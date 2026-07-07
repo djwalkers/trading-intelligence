@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 0.7.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
+Build 0.8.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Market, signal, and strategy data is mocked — there is no broker connection and no live trading.
@@ -31,15 +31,19 @@ npm run lint    # lint the project
 ## What's included
 
 - **Dashboard** — market status, paper portfolio value, today's P/L, active strategies, a paper
-  trading performance summary (open/closed trades, realised/unrealised P/L), latest signals,
-  watchlist snapshot, and system health summary.
+  trading performance summary (open/closed trades, realised/unrealised P/L), an Intelligence
+  Summary card (highest-scoring opportunity, average score, Excellent/monitor-only counts),
+  latest signals, watchlist snapshot, and system health summary.
 - **Market Intelligence** — the flagship screen. Market Overview (regime, confidence, volatility,
   risk), a ranked Opportunities list, and — for the selected opportunity — a Decision Breakdown
-  (five-factor star rating), a Strong Buy → Strong Sell recommendation with a plain-language
-  explanation, a "Why this recommendation?" evidence list, and a "What could change?" list of
-  factors that would invalidate the call. Strong Buy / Buy / Strong Sell recommendations have a
-  "Paper Trade" action; Hold and Avoid do not.
-- **Watchlist** — tracked instruments with price, change, day range, and volume.
+  (five-factor star rating), an Intelligence Score (0–100 across seven factors) with an "Explain
+  score" breakdown of what helped and hurt it, a Strong Buy → Strong Sell recommendation with a
+  plain-language explanation, a "Why this recommendation?" evidence list, and a "What could
+  change?" list of factors that would invalidate the call. Strong Buy / Buy / Strong Sell
+  recommendations have a "Paper Trade" action; Hold and Avoid do not. Tick up to 3 opportunities
+  to compare them side by side.
+- **Watchlist** — tracked instruments with price, change, day range, and volume, plus a Watchlist
+  Health summary (Excellent / Good / Weak / Avoid-monitor counts by Intelligence Score).
 - **Signals** — mock signal feed (BUY / SELL / HOLD) with confidence, strategy, and reasoning.
   BUY/SELL signals have a "Paper Trade" action (HOLD signals are not tradeable).
 - **Paper Portfolio** — simulated portfolio starting at £10,000, with open positions, a paper
@@ -66,15 +70,18 @@ src/
     tables/              Shared list/table views used across dashboard + full pages
     trading/              Paper trade open/close confirmation modals, Trade Journal view/list/entry
     portfolio/            Paper Portfolio page view (client, reads paper trade state)
-    dashboard/             Dashboard-only client widgets (paper trading performance summary)
-    market-intelligence/  Market Overview, Opportunities, Decision Breakdown, Recommendation,
-                          and the reusable evidence bullet list used by "Why?" and "What could
-                          change?"
+    dashboard/             Dashboard-only widgets (paper trading performance, intelligence summary)
+    watchlist/             Watchlist-only widgets (Watchlist Health summary)
+    market-intelligence/  Market Overview, Opportunities (with compare checkboxes), Decision
+                          Breakdown, Intelligence Score display/breakdown, Explain Score,
+                          Comparison table, Recommendation, and the reusable evidence bullet list
+                          used by "Why?" and "What could change?"
     icons.tsx            Hand-rolled inline SVG icons (no icon library dependency)
   lib/
     types/               TypeScript types for domain models
     mock/                Mock data, kept separate from UI components
-    utils/                Formatting, styling, and paper-trade P/L calculation helper functions
+    utils/                Formatting, styling, paper-trade P/L, and Intelligence Score calculation
+                          helper functions
     state/                Paper trades context (reads/writes through the persistence layer) and
                           the shared useCloseTradeFlow hook
     persistence/          Storage-agnostic PaperTradeStore interface, the active localStorage
@@ -115,6 +122,14 @@ project. See also
 for the schema rationale and migration path, and
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md) for the
 infrastructure-level overview.
+
+## What's new in 0.8.0
+
+An Intelligence Score (0–100, seven factors: Trend, Momentum, Volume, Volatility, Market Context,
+Risk, Reward) for every Market Intelligence opportunity, with a rule-based "Explain score" section,
+a side-by-side comparison of up to 3 opportunities, a Watchlist Health summary, and a Dashboard
+Intelligence Summary card. Mock and deterministic throughout — no AI, no live data. See
+[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md) for full details.
 
 ## What's new in 0.7.0
 
@@ -179,7 +194,8 @@ positive/active states, amber for caution/passive states, red for negative state
 informational states). No crypto or gambling visual language, no profit claims. On Market
 Intelligence specifically, colour is reserved for the two recommendation extremes (Strong Buy /
 Strong Sell) and star ratings are monochrome — conviction is meant to read through layout and the
-amount of supporting evidence, not colour intensity.
+amount of supporting evidence, not colour intensity. The Intelligence Score follows the same rule:
+plain monochrome bars, colour only on the two score-band extremes (Excellent / Avoid).
 
 ## Explicitly out of scope for this build
 
@@ -191,7 +207,10 @@ amount of supporting evidence, not colour intensity.
   `localStorage`, with no cross-device sync
 - A deployed/linked Supabase project or CI for running migrations
 - Partial trade closes, position netting, or live/scheduled price movement
-- Real market data, technical indicators, or model-generated scoring behind Market Intelligence
+- Real market data, technical indicators, or model-generated scoring behind Market Intelligence or
+  the Intelligence Score
+- Persistence of Intelligence Scores at the time a trade was opened (scores are computed from
+  mock data on every render, not stored on the trade)
 - AI-generated signals or agents
 - Live order execution
 - Financial advice of any kind
@@ -202,8 +221,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/BUILD-0.3.0.md`](../../docs/product/BUILD-0.3.0.md),
 [`../../docs/product/BUILD-0.4.0.md`](../../docs/product/BUILD-0.4.0.md),
 [`../../docs/product/BUILD-0.5.0.md`](../../docs/product/BUILD-0.5.0.md),
-[`../../docs/product/BUILD-0.6.0.md`](../../docs/product/BUILD-0.6.0.md), and
-[`../../docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md) for the full build
+[`../../docs/product/BUILD-0.6.0.md`](../../docs/product/BUILD-0.6.0.md),
+[`../../docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md), and
+[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md) for the full build
 records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

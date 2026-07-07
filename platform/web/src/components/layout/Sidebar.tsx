@@ -43,7 +43,7 @@ export function Sidebar() {
 
       <div className="border-t border-base-700 px-4 py-4">
         <p className="text-xs leading-relaxed text-ink-600">
-          Build 0.7.0 &middot; Prototype
+          Build 0.8.0 &middot; Prototype
           <br />
           Mock data only. No live trading.
         </p>

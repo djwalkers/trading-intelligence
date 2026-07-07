@@ -39,6 +39,15 @@ export const opportunities: Opportunity[] = [
       "Broader market regime shifts to bearish",
       "Volatility rises sharply, reducing signal reliability",
     ],
+    intelligenceFactors: {
+      trend: 92,
+      momentum: 82,
+      volume: 88,
+      volatility: 68,
+      marketContext: 80,
+      risk: 75,
+      reward: 85,
+    },
   },
   {
     id: "opp-nvda",
@@ -70,6 +79,15 @@ export const opportunities: Opportunity[] = [
       "Price breaks below the 20-day moving average",
       "Volume fails to confirm further upside",
     ],
+    intelligenceFactors: {
+      trend: 84,
+      momentum: 90,
+      volume: 80,
+      volatility: 48,
+      marketContext: 78,
+      risk: 58,
+      reward: 88,
+    },
   },
   {
     id: "opp-aapl",
@@ -101,6 +119,15 @@ export const opportunities: Opportunity[] = [
       "A clear pickup in volume would add conviction in either direction",
       "A shift in the broader market regime would change the backdrop for this call",
     ],
+    intelligenceFactors: {
+      trend: 55,
+      momentum: 52,
+      volume: 54,
+      volatility: 58,
+      marketContext: 53,
+      risk: 60,
+      reward: 48,
+    },
   },
   {
     id: "opp-spy",
@@ -131,6 +158,15 @@ export const opportunities: Opportunity[] = [
       "Volatility rises, signalling a potential regime change",
       "A broad-based sector rotation emerges",
     ],
+    intelligenceFactors: {
+      trend: 52,
+      momentum: 50,
+      volume: 42,
+      volatility: 62,
+      marketContext: 55,
+      risk: 68,
+      reward: 40,
+    },
   },
   {
     id: "opp-tsla",
@@ -162,5 +198,14 @@ export const opportunities: Opportunity[] = [
       "Volatility subsides toward the average of the current scan",
       "Broader market regime provides a stronger supportive backdrop",
     ],
+    intelligenceFactors: {
+      trend: 18,
+      momentum: 28,
+      volume: 45,
+      volatility: 30,
+      marketContext: 20,
+      risk: 25,
+      reward: 22,
+    },
   },
 ];

@@ -6,15 +6,26 @@ import { SignalsTable } from "@/components/tables/SignalsTable";
 import { WatchlistTable } from "@/components/tables/WatchlistTable";
 import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PaperTradingSummary } from "@/components/dashboard/PaperTradingSummary";
-import { instruments, paperPortfolio, signals, strategies, systemServices, marketStatus } from "@/lib/mock";
+import { IntelligenceSummaryCard } from "@/components/dashboard/IntelligenceSummaryCard";
+import {
+  instruments,
+  opportunities,
+  paperPortfolio,
+  signals,
+  strategies,
+  systemServices,
+  marketStatus,
+} from "@/lib/mock";
 import { formatCurrencyGBP, formatPercent } from "@/lib/utils/format";
 import { plToneClass } from "@/lib/utils/style";
+import { summarizeIntelligenceScores } from "@/lib/utils/intelligence-score";
 
 export default function DashboardPage() {
   const activeStrategies = strategies.filter((strategy) => strategy.status === "active");
   const latestSignals = signals.slice(0, 4);
   const watchlistSnapshot = instruments.slice(0, 5);
   const runningServices = systemServices.filter((service) => service.state === "running").length;
+  const intelligenceSummary = summarizeIntelligenceScores(opportunities);
 
   return (
     <>
@@ -49,6 +60,14 @@ export default function DashboardPage() {
         viewAllHref="/portfolio"
       >
         <PaperTradingSummary />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Intelligence summary"
+        description="Today's opportunities, scored 0-100 across seven factors"
+        viewAllHref="/market-intelligence"
+      >
+        <IntelligenceSummaryCard summary={intelligenceSummary} />
       </SectionPanel>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

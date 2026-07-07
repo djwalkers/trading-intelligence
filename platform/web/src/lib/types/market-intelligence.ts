@@ -17,6 +17,22 @@ export interface EvidenceRating {
   score: number;
 }
 
+// Seven 0-100 factors feeding the Intelligence Score. All seven are "higher is better" on the
+// same scale — including risk and volatility, which represent favourability (low actual risk /
+// low actual volatility scores high), not raw exposure — so they can be averaged and compared
+// directly without sign-flipping logic scattered through the UI.
+export interface IntelligenceFactorScores {
+  trend: number;
+  momentum: number;
+  volume: number;
+  volatility: number;
+  marketContext: number;
+  risk: number;
+  reward: number;
+}
+
+export type ScoreBand = "Excellent" | "Good" | "Weak" | "Avoid";
+
 export interface Opportunity {
   id: string;
   instrumentSymbol: string;
@@ -29,4 +45,5 @@ export interface Opportunity {
   evidence: EvidenceRating[];
   whyEvidence: string[];
   invalidationFactors: string[];
+  intelligenceFactors: IntelligenceFactorScores;
 }

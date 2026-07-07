@@ -4,6 +4,7 @@ import type {
   PaperTradeStatus,
   Recommendation,
   RiskLevel,
+  ScoreBand,
   ServiceState,
   SignalType,
   StrategyStatus,
@@ -138,6 +139,35 @@ export function tradeSourceClasses(source: PaperTradeSource): string {
       return "border-base-600 bg-base-800 text-ink-300";
     case "Market Intelligence":
       return "border-accent-blue/25 bg-accent-blue/10 text-accent-blue";
+  }
+}
+
+// Same restrained pattern as recommendationClasses — colour flags the two extremes
+// (Excellent, Avoid) only; Good and Weak stay neutral so the number itself, not colour,
+// carries the comparison.
+export function scoreBandClasses(band: ScoreBand): string {
+  switch (band) {
+    case "Excellent":
+      return "border-accent-teal/40 bg-accent-teal/10 text-accent-teal";
+    case "Good":
+      return "border-accent-teal/25 bg-base-800 text-ink-100";
+    case "Weak":
+      return "border-base-600 bg-base-800 text-ink-300";
+    case "Avoid":
+      return "border-accent-amber/30 bg-accent-amber/10 text-accent-amber";
+  }
+}
+
+export function scoreBandLabel(band: ScoreBand): string {
+  switch (band) {
+    case "Excellent":
+      return "Excellent";
+    case "Good":
+      return "Good";
+    case "Weak":
+      return "Weak";
+    case "Avoid":
+      return "Avoid";
   }
 }
 

@@ -9,6 +9,7 @@ Related: [`docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`docs/product/BUILD-0.5.0.md`](../../docs/product/BUILD-0.5.0.md),
 [`docs/product/BUILD-0.6.0.md`](../../docs/product/BUILD-0.6.0.md),
 [`docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md),
+[`docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md),
 [`docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md),
 [`docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md),
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md)
@@ -140,6 +141,31 @@ health) using mock data only.
 - Zero app behaviour changed — `getPaperTradeStore()` still always returns local storage, no
   `@supabase/supabase-js` dependency was added, and no Supabase network calls are possible
 
+**Build 0.8.0 (Intelligence Score)**
+
+- Every opportunity now has an Overall Intelligence Score (0–100) plus seven factors — Trend,
+  Momentum, Volume, Volatility, Market Context, Risk, Reward — all on the same "higher is better"
+  scale, combined via a fixed, disclosed weighted average (mock and deterministic, no AI, no live
+  data)
+- "Explain score" section: a rule-based plain-English summary of why the score is high or low,
+  plus which factors increased confidence (≥70) and which reduced it (<50) — templated strings,
+  not a model
+- Comparison feature: tick up to 3 opportunities in the ranked list to reveal a side-by-side
+  comparison table (Instrument, Signal, Overall, Trend, Momentum, Volume, Volatility, Risk,
+  Reward, Recommendation)
+- Watchlist Health summary panel: Excellent (80+) / Good (65–79) / Weak (50–64) / Avoid-monitor
+  (below 50) opportunity counts
+- Dashboard Intelligence Summary card: highest-scoring opportunity, average score, Excellent
+  count, monitor-only count
+- Design stayed restrained: plain monochrome bars (no gauges, no neon, no per-factor colour),
+  colour reserved for the two band extremes only, matching the existing recommendation-badge
+  pattern
+- New reusable components: `IntelligenceScoreDisplay`, `IntelligenceScoreBreakdown`,
+  `ScoreExplanation`, `ComparisonTable`, `WatchlistHealthSummary`, `IntelligenceSummaryCard`; new
+  `summarizeIntelligenceScores` util shared by both the Watchlist and Dashboard summaries
+- Fixed stale "Build 0.7.0" labels (sidebar footer, app footer, System Health) — bumped to
+  "Build 0.8.0"
+
 ## What is intentionally not included yet
 
 - Authentication, real broker connection, live trading, AI agents, payment features
@@ -147,7 +173,10 @@ health) using mock data only.
   `@supabase/supabase-js` dependency has been added yet)
 - A deployed/linked Supabase project or CI for migrations
 - Partial trade closes, position netting, or live/scheduled price movement
-- Real market data, technical indicators, or model-generated scoring behind Market Intelligence
+- Real market data, technical indicators, or model-generated scoring behind Market Intelligence or
+  the Intelligence Score
+- Persistence of Intelligence Scores at the time a trade was opened (scores are computed from
+  live mock data on every render)
 - Financial advice language of any kind
 
 ## How to run
@@ -160,8 +189,9 @@ npm run dev
 
 ## Next recommended build
 
-**Build 0.8.0**: implement `SupabasePaperTradeStore` for real against the now-live schema — add
+**Build 0.9.0**: implement `SupabasePaperTradeStore` for real against the now-live schema — add
 `@supabase/supabase-js`, wire up the `paper_trades`/`trade_intelligence`/`trade_events` queries,
 add a one-time localStorage import step, and flip `getPaperTradeStore()` to select it when
-Supabase is configured. A live (even if still mocked/delayed) price feed to replace the fixed
-per-instrument drift would be a natural companion piece once real persistence exists.
+Supabase is configured. Once real persistence exists, storing each trade's Intelligence Score at
+open time becomes a natural follow-up. A live (even if still mocked/delayed) price feed to replace
+the fixed per-instrument drift would pair well with either piece of work.

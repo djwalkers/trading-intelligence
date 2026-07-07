@@ -7,11 +7,16 @@ import { InfoNote } from "@/components/ui/InfoNote";
 import { MarketOverviewPanel } from "@/components/market-intelligence/MarketOverviewPanel";
 import { OpportunityList } from "@/components/market-intelligence/OpportunityList";
 import { DecisionBreakdownPanel } from "@/components/market-intelligence/DecisionBreakdownPanel";
+import { IntelligenceScoreDisplay } from "@/components/market-intelligence/IntelligenceScoreDisplay";
+import { IntelligenceScoreBreakdown } from "@/components/market-intelligence/IntelligenceScoreBreakdown";
+import { ScoreExplanation } from "@/components/market-intelligence/ScoreExplanation";
 import { RecommendationPanel } from "@/components/market-intelligence/RecommendationPanel";
 import { EvidenceBulletList } from "@/components/market-intelligence/EvidenceBulletList";
+import { ComparisonTable } from "@/components/market-intelligence/ComparisonTable";
 import { PaperTradeModal } from "@/components/trading/PaperTradeModal";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
 import { buildPaperTradeFromOpportunity, isTradeableRecommendation } from "@/lib/utils/paper-trade";
+import { calculateOverallIntelligenceScore } from "@/lib/utils/intelligence-score";
 import type { MarketOverview, MarketStatus, Opportunity, PaperTrade } from "@/lib/types";
 
 interface MarketIntelligenceViewProps {
@@ -19,6 +24,8 @@ interface MarketIntelligenceViewProps {
   opportunities: Opportunity[];
   marketStatus: MarketStatus;
 }
+
+const MAX_COMPARE = 3;
 
 export function MarketIntelligenceView({
   overview,
@@ -31,6 +38,23 @@ export function MarketIntelligenceView({
 
   const [selectedId, setSelectedId] = useState<string | null>(rankedOpportunities[0]?.id ?? null);
   const selected = rankedOpportunities.find((opportunity) => opportunity.id === selectedId);
+
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const compareOpportunities = rankedOpportunities.filter((opportunity) =>
+    compareIds.includes(opportunity.id),
+  );
+
+  function handleToggleCompare(id: string) {
+    setCompareIds((previous) => {
+      if (previous.includes(id)) {
+        return previous.filter((existingId) => existingId !== id);
+      }
+      if (previous.length >= MAX_COMPARE) {
+        return previous;
+      }
+      return [...previous, id];
+    });
+  }
 
   const { addTrade, hasTradeForOpportunity } = usePaperTrades();
   const [pendingTrade, setPendingTrade] = useState<PaperTrade | null>(null);
@@ -63,11 +87,17 @@ export function MarketIntelligenceView({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <div className="lg:col-span-2">
-          <SectionPanel title="Opportunities" description="Ranked by confidence">
+          <SectionPanel
+            title="Opportunities"
+            description="Ranked by confidence · tick up to 3 to compare"
+          >
             <OpportunityList
               opportunities={rankedOpportunities}
               selectedId={selected?.id ?? null}
               onSelect={setSelectedId}
+              compareIds={compareIds}
+              onToggleCompare={handleToggleCompare}
+              maxCompare={MAX_COMPARE}
             />
           </SectionPanel>
         </div>
@@ -76,6 +106,24 @@ export function MarketIntelligenceView({
           {selected ? (
             <>
               <DecisionBreakdownPanel opportunity={selected} />
+
+              <SectionPanel
+                title="Intelligence score"
+                description="A 0-100 composite across seven factors"
+              >
+                <div className="flex flex-col gap-4 px-5 py-4">
+                  <IntelligenceScoreDisplay
+                    overall={calculateOverallIntelligenceScore(selected.intelligenceFactors)}
+                  />
+                  <IntelligenceScoreBreakdown factors={selected.intelligenceFactors} />
+                </div>
+              </SectionPanel>
+
+              <ScoreExplanation
+                factors={selected.intelligenceFactors}
+                overall={calculateOverallIntelligenceScore(selected.intelligenceFactors)}
+              />
+
               <RecommendationPanel
                 opportunity={selected}
                 tradeable={isTradeableRecommendation(selected.recommendation)}
@@ -99,6 +147,13 @@ export function MarketIntelligenceView({
           )}
         </div>
       </div>
+
+      <SectionPanel
+        title="Compare opportunities"
+        description={`${compareOpportunities.length} of ${MAX_COMPARE} selected`}
+      >
+        <ComparisonTable opportunities={compareOpportunities} />
+      </SectionPanel>
 
       <InfoNote>
         Market Intelligence is generated from mock analytical rules for prototyping purposes. It is
