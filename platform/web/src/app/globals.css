@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-base-950 text-ink-100 antialiased;
+  }
+
+  ::selection {
+    @apply bg-accent-teal/30 text-ink-100;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl2 border border-base-700 bg-base-900 shadow-panel;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between border-b border-base-700 px-5 py-4;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.base.600") transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: theme("colors.base.600");
+    border-radius: 999px;
+  }
+}

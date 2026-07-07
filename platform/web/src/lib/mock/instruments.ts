@@ -1,0 +1,73 @@
+import type { Instrument } from "@/lib/types";
+
+export const instruments: Instrument[] = [
+  {
+    symbol: "AAPL",
+    name: "Apple Inc.",
+    assetClass: "equity",
+    exchange: "NASDAQ",
+    currency: "USD",
+    price: 213.42,
+    changeAbsolute: 1.87,
+    changePercent: 0.88,
+    dayHigh: 214.1,
+    dayLow: 210.55,
+    volume: 48_213_000,
+  },
+  {
+    symbol: "MSFT",
+    name: "Microsoft Corporation",
+    assetClass: "equity",
+    exchange: "NASDAQ",
+    currency: "USD",
+    price: 441.06,
+    changeAbsolute: -2.34,
+    changePercent: -0.53,
+    dayHigh: 445.2,
+    dayLow: 439.8,
+    volume: 21_876_000,
+  },
+  {
+    symbol: "TSLA",
+    name: "Tesla, Inc.",
+    assetClass: "equity",
+    exchange: "NASDAQ",
+    currency: "USD",
+    price: 248.19,
+    changeAbsolute: 6.42,
+    changePercent: 2.65,
+    dayHigh: 251.3,
+    dayLow: 239.9,
+    volume: 96_442_000,
+  },
+  {
+    symbol: "NVDA",
+    name: "NVIDIA Corporation",
+    assetClass: "equity",
+    exchange: "NASDAQ",
+    currency: "USD",
+    price: 134.87,
+    changeAbsolute: 3.11,
+    changePercent: 2.36,
+    dayHigh: 136.4,
+    dayLow: 130.75,
+    volume: 187_320_000,
+  },
+  {
+    symbol: "SPY",
+    name: "S&P 500 ETF Trust",
+    assetClass: "etf",
+    exchange: "NYSEARCA",
+    currency: "USD",
+    price: 556.78,
+    changeAbsolute: 0.94,
+    changePercent: 0.17,
+    dayHigh: 557.9,
+    dayLow: 554.2,
+    volume: 62_004_000,
+  },
+];
+
+export function getInstrumentBySymbol(symbol: string): Instrument | undefined {
+  return instruments.find((instrument) => instrument.symbol === symbol);
+}

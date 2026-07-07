@@ -1,0 +1,166 @@
+import type { MarketOverview, Opportunity } from "@/lib/types";
+
+export const marketOverview: MarketOverview = {
+  regime: "Bullish",
+  confidencePercent: 72,
+  volatility: "Medium",
+  riskLevel: "Moderate",
+};
+
+export const opportunities: Opportunity[] = [
+  {
+    id: "opp-msft",
+    instrumentSymbol: "MSFT",
+    instrumentName: "Microsoft Corporation",
+    signalType: "BUY",
+    confidencePercent: 84,
+    reasons: ["Strong trend", "Momentum increasing", "Volume above average"],
+    recommendation: "Strong Buy",
+    narrative:
+      "Microsoft is trading in a well-established uptrend, holding consistently above both its 20-day and 50-day moving averages. Momentum has strengthened over the past week, and volume on up days has run above the 20-day average, indicating genuine participation rather than a thin, low-conviction drift. Volatility remains moderate and the broader market regime is constructive, together supporting a high-conviction view.",
+    evidence: [
+      { label: "Trend", score: 5 },
+      { label: "Momentum", score: 4 },
+      { label: "Volume", score: 5 },
+      { label: "Volatility", score: 3 },
+      { label: "Market Direction", score: 4 },
+    ],
+    whyEvidence: [
+      "20-day moving average is above the 50-day moving average",
+      "Momentum indicator has turned positive over the past 5 sessions",
+      "Volume on up days is running above the 20-day average",
+      "Price has held above key support on each recent pullback",
+      "Overall market regime is bullish, adding a supportive backdrop",
+    ],
+    invalidationFactors: [
+      "Price closes below the 50-day moving average",
+      "Momentum indicator turns negative",
+      "Volume on down days begins to exceed up-day volume",
+      "Broader market regime shifts to bearish",
+      "Volatility rises sharply, reducing signal reliability",
+    ],
+  },
+  {
+    id: "opp-nvda",
+    instrumentSymbol: "NVDA",
+    instrumentName: "NVIDIA Corporation",
+    signalType: "BUY",
+    confidencePercent: 79,
+    reasons: ["Momentum accelerating", "Above-average volume", "Trend intact"],
+    recommendation: "Buy",
+    narrative:
+      "Nvidia continues to show strong upward momentum, with price action outpacing its own trend line over the past few sessions. Volume has been elevated but slightly less consistent than the strongest setups in this scan, and volatility is running on the higher side for the instrument, which tempers conviction relative to a top-tier signal. The setup remains constructive, but wider price swings warrant a standard rather than high-conviction buy rating.",
+    evidence: [
+      { label: "Trend", score: 4 },
+      { label: "Momentum", score: 5 },
+      { label: "Volume", score: 4 },
+      { label: "Volatility", score: 2 },
+      { label: "Market Direction", score: 4 },
+    ],
+    whyEvidence: [
+      "Momentum has accelerated over the past 5 sessions",
+      "Price remains above its 20-day moving average",
+      "Volume has been above average on up days",
+      "Market regime remains supportive of growth-oriented names",
+      "Trend strength score sits in the upper half of the current scan",
+    ],
+    invalidationFactors: [
+      "Momentum decelerates over consecutive sessions",
+      "Volatility expands further, reducing signal reliability",
+      "Price breaks below the 20-day moving average",
+      "Volume fails to confirm further upside",
+    ],
+  },
+  {
+    id: "opp-aapl",
+    instrumentSymbol: "AAPL",
+    instrumentName: "Apple Inc.",
+    signalType: "HOLD",
+    confidencePercent: 71,
+    reasons: ["Mixed signals"],
+    recommendation: "Hold",
+    narrative:
+      "Apple is showing a balanced set of signals with no single factor dominating. Trend and momentum readings sit close to neutral, and volume has neither confirmed strength nor shown clear distribution. In this environment the evidence does not support taking a new position in either direction, and the existing signal is best treated as a hold until a clearer trend or momentum shift emerges.",
+    evidence: [
+      { label: "Trend", score: 3 },
+      { label: "Momentum", score: 3 },
+      { label: "Volume", score: 3 },
+      { label: "Volatility", score: 3 },
+      { label: "Market Direction", score: 3 },
+    ],
+    whyEvidence: [
+      "Trend strength is close to neutral",
+      "Momentum has not shown a clear directional bias",
+      "Volume is in line with its recent average, offering no strong confirmation",
+      "Volatility is unremarkable relative to recent history",
+      "Market regime is neutral for this instrument, providing no strong tailwind either way",
+    ],
+    invalidationFactors: [
+      "A sustained break above recent resistance would support upgrading to buy",
+      "A break below recent support would support downgrading to sell",
+      "A clear pickup in volume would add conviction in either direction",
+      "A shift in the broader market regime would change the backdrop for this call",
+    ],
+  },
+  {
+    id: "opp-spy",
+    instrumentSymbol: "SPY",
+    instrumentName: "S&P 500 ETF Trust",
+    signalType: "HOLD",
+    confidencePercent: 65,
+    reasons: ["Broad market steady", "No strong directional edge"],
+    recommendation: "Hold",
+    narrative:
+      "As a broad market proxy, the S&P 500 ETF reflects the overall neutral-to-constructive regime identified in the Market Overview. Trend and momentum are both directionally unremarkable, and volume is on the lighter side, consistent with a market digesting recent moves rather than establishing a new one. There is no strong evidence to favour either accumulating or reducing broad market exposure at this time.",
+    evidence: [
+      { label: "Trend", score: 3 },
+      { label: "Momentum", score: 3 },
+      { label: "Volume", score: 2 },
+      { label: "Volatility", score: 2 },
+      { label: "Market Direction", score: 3 },
+    ],
+    whyEvidence: [
+      "Trend strength sits at the midpoint of the current scan",
+      "Momentum shows no clear directional bias",
+      "Volume is below its recent average",
+      "Volatility is low, reducing the urgency of any near-term decision",
+    ],
+    invalidationFactors: [
+      "Market regime shifts decisively bullish or bearish",
+      "Volume increases sharply in either direction",
+      "Volatility rises, signalling a potential regime change",
+      "A broad-based sector rotation emerges",
+    ],
+  },
+  {
+    id: "opp-tsla",
+    instrumentSymbol: "TSLA",
+    instrumentName: "Tesla, Inc.",
+    signalType: "SELL",
+    confidencePercent: 74,
+    reasons: ["Momentum weakening", "Trend breaking down"],
+    recommendation: "Strong Sell",
+    narrative:
+      "Tesla's trend has turned decisively lower, with price repeatedly failing to reclaim its short-term moving averages. Momentum has weakened sharply, volatility is elevated relative to the rest of the scan, and market-direction evidence has moved firmly against the position. Taken together, the weight of evidence points to a high-conviction bearish view rather than a moderate one.",
+    evidence: [
+      { label: "Trend", score: 1 },
+      { label: "Momentum", score: 2 },
+      { label: "Volume", score: 3 },
+      { label: "Volatility", score: 4 },
+      { label: "Market Direction", score: 1 },
+    ],
+    whyEvidence: [
+      "Trend has turned decisively lower across recent sessions",
+      "Momentum has weakened sharply from recent highs",
+      "Price has repeatedly failed to reclaim its 20-day moving average",
+      "Volatility is elevated relative to the rest of the scan",
+      "Market direction evidence has moved firmly against the position",
+    ],
+    invalidationFactors: [
+      "Price reclaims and holds its 20-day moving average",
+      "Momentum turns positive over consecutive sessions",
+      "Volatility subsides toward the average of the current scan",
+      "Broader market regime provides a stronger supportive backdrop",
+    ],
+  },
+];
