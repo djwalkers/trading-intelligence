@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { PaperTrade } from "@/lib/types";
 import { getPaperTradeStore } from "@/lib/persistence/get-paper-trade-store";
 import { LocalStoragePaperTradeStore } from "@/lib/persistence/local-storage-paper-trade-store";
+import { useAuth } from "@/lib/auth/auth-context";
 
 const IMPORT_PROMPT_RESOLVED_KEY = "trading-intelligence.import-prompt-resolved.v1";
 
@@ -32,21 +33,44 @@ function hasResolvedImportPrompt(): boolean {
   return window.localStorage.getItem(IMPORT_PROMPT_RESOLVED_KEY) === "true";
 }
 
+interface LoadedTrades {
+  // Which authKey these trades were loaded for — see below. Compared against the current
+  // authKey to derive isHydrated, rather than tracking it as separate state that would need
+  // resetting synchronously inside the effect.
+  key: string;
+  trades: PaperTrade[];
+}
+
 export function PaperTradesProvider({ children }: { children: ReactNode }) {
-  const [trades, setTrades] = useState<PaperTrade[]>([]);
-  const [isHydrated, setIsHydrated] = useState(false);
+  const [loaded, setLoaded] = useState<LoadedTrades>({ key: "", trades: [] });
   const [importCandidate, setImportCandidate] = useState<PaperTrade[] | null>(null);
+  const { isConfigured, isLoading: isAuthLoading, user } = useAuth();
+
+  // Identifies "whose trades should currently be loaded." Local prototype mode never changes
+  // (single shared key); Supabase mode changes whenever the signed-in user changes — including
+  // signing in, signing out, or switching accounts on the same browser tab — which is exactly
+  // when trades need to be re-hydrated from scratch rather than left showing the previous
+  // identity's data (or nothing, if the very first hydration attempt ran before auth resolved).
+  const authKey = !isConfigured ? "local" : isAuthLoading ? "pending" : (user?.id ?? "unauthenticated");
+
+  // Neither becomes true/populated until a hydration attempt for THIS authKey has completed —
+  // so switching identity (sign-in, sign-out, account switch) never shows a stale previous
+  // identity's trades, even for a single render.
+  const isHydrated = loaded.key === authKey;
+  const trades = isHydrated ? loaded.trades : [];
 
   useEffect(() => {
+    if (authKey === "pending") return;
+
     let cancelled = false;
 
     async function hydrate() {
       try {
-        const loaded = await getPaperTradeStore().load();
+        const loadedTrades = await getPaperTradeStore().load();
         if (cancelled) return;
-        // One-time hydration from storage after mount, so the client's first render matches
+        // One-time hydration from storage per identity, so the client's first render matches
         // the server (empty state) and avoids a hydration mismatch.
-        setTrades(loaded);
+        setLoaded({ key: authKey, trades: loadedTrades });
 
         // First-run import offer: only when Supabase is actually the active store (not merely
         // configured — if it's unreachable we've already fallen back, and offering to "import
@@ -55,7 +79,7 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
         const status = getPaperTradeStore().getStatus();
         if (
           status.mode === "Supabase" &&
-          loaded.length === 0 &&
+          loadedTrades.length === 0 &&
           !hasResolvedImportPrompt()
         ) {
           const localTrades = await new LocalStoragePaperTradeStore().load();
@@ -64,10 +88,10 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
           }
         }
       } catch {
-        // The resilient store already handles and surfaces persistence failures; nothing
-        // further to do here beyond leaving the trade list empty.
-      } finally {
-        if (!cancelled) setIsHydrated(true);
+        // Not authenticated (AuthRequiredError) or a genuine Supabase failure — either way,
+        // this identity's trade list is empty for now; the resilient store and AuthGate already
+        // surface why.
+        if (!cancelled) setLoaded({ key: authKey, trades: [] });
       }
     }
 
@@ -76,18 +100,22 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authKey]);
 
   function addTrade(trade: PaperTrade) {
-    setTrades((previous) => [trade, ...previous]);
-    getPaperTradeStore().addTrade(trade);
+    setLoaded((previous) => ({ key: previous.key, trades: [trade, ...previous.trades] }));
+    // AuthRequiredError (no session) or a genuine Supabase failure already gets its own handling
+    // — AuthGate redirects to sign-in, or the persistence fallback banner appears — so there is
+    // nothing further to do with the rejection here beyond not letting it go unhandled.
+    getPaperTradeStore().addTrade(trade).catch(() => {});
   }
 
   function closeTrade(closedTrade: PaperTrade) {
-    setTrades((previous) =>
-      previous.map((trade) => (trade.id === closedTrade.id ? closedTrade : trade)),
-    );
-    getPaperTradeStore().closeTrade(closedTrade);
+    setLoaded((previous) => ({
+      key: previous.key,
+      trades: previous.trades.map((trade) => (trade.id === closedTrade.id ? closedTrade : trade)),
+    }));
+    getPaperTradeStore().closeTrade(closedTrade).catch(() => {});
   }
 
   function hasTradeForSignal(signalId: string) {
@@ -107,13 +135,15 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
         await store.addTrade(trade);
       }
       const refreshed = await store.load();
-      setTrades(refreshed);
+      setLoaded({ key: authKey, trades: refreshed });
     }
 
-    runImport().finally(() => {
-      markImportPromptResolved();
-      setImportCandidate(null);
-    });
+    runImport()
+      .catch(() => {})
+      .finally(() => {
+        markImportPromptResolved();
+        setImportCandidate(null);
+      });
   }
 
   function skipImport() {

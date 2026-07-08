@@ -1,5 +1,5 @@
-import { createClient } from "@supabase/supabase-js";
-import { isSupabaseConfigured } from "./config";
+import { getSupabaseClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { LocalStoragePaperTradeStore } from "./local-storage-paper-trade-store";
 import { ResilientPaperTradeStore } from "./resilient-paper-trade-store";
 import { SupabasePaperTradeStore } from "./supabase-paper-trade-store";
@@ -8,13 +8,12 @@ import type { PaperTradeStore } from "./paper-trade-store";
 let store: ResilientPaperTradeStore | null = null;
 
 function createSupabaseStore(): PaperTradeStore | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) return null;
+  const client = getSupabaseClient();
+  if (!client) return null;
 
   // Only the public anon key is ever used here — never a service role key. Row Level Security
-  // (0005_row_level_security.sql) is what actually gates access, not secrecy of this key.
-  const client = createClient(url, anonKey);
+  // (0005_row_level_security.sql, replaced by 0007_user_scoped_row_level_security.sql) is what
+  // actually gates access, not secrecy of this key.
   return new SupabasePaperTradeStore(client);
 }
 

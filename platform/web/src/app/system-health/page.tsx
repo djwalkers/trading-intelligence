@@ -4,6 +4,7 @@ import { InfoNote } from "@/components/ui/InfoNote";
 import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PersistenceStatusPanel } from "@/components/system-health/PersistenceStatusPanel";
 import { MarketDataStatusPanel } from "@/components/system-health/MarketDataStatusPanel";
+import { AuthStatusPanel } from "@/components/system-health/AuthStatusPanel";
 import { marketStatus, systemServices } from "@/lib/mock";
 import { Badge } from "@/components/ui/Badge";
 import { DotIcon } from "@/components/icons";
@@ -17,7 +18,7 @@ export default function SystemHealthPage() {
     <>
       <PageHeader
         title="System Health"
-        description="Current status of each platform service in Build 1.0.0 of this prototype."
+        description="Current status of each platform service in Build 1.1.0 of this prototype."
       />
 
       <div className="panel flex items-center justify-between px-5 py-4">
@@ -27,9 +28,16 @@ export default function SystemHealthPage() {
           <span className="text-ink-500">&middot; {marketStatus.nextEvent}</span>
         </div>
         <Badge className="border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
-          Build 1.0.0
+          Build 1.1.0
         </Badge>
       </div>
+
+      <SectionPanel
+        title="Authentication"
+        description="Whether sign-in is required, who is signed in, and how paper trading data is scoped"
+      >
+        <AuthStatusPanel />
+      </SectionPanel>
 
       <SectionPanel
         title="Persistence"

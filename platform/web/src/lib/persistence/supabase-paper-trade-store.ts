@@ -1,8 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { EvidenceRating, PaperTrade, Recommendation } from "@/lib/types";
 import type { PaperTradeStore } from "./paper-trade-store";
+import { AuthRequiredError } from "./auth-required-error";
 
-// Row shapes for the schema created in Build 0.7.0
+// Row shapes for the schema created in Build 0.7.0, extended in Build 1.1.0 with user_id
 // (platform/web/supabase/migrations/). Hand-written rather than generated, since no live
 // Supabase project is linked to this repo to codegen against.
 interface PaperTradeRow {
@@ -25,6 +26,7 @@ interface PaperTradeRow {
   realised_pnl: number | string | null;
   realised_pnl_percent: number | string | null;
   opened_at: string;
+  user_id: string | null;
 }
 
 interface TradeIntelligenceRow {
@@ -94,16 +96,31 @@ function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceRow | nu
   };
 }
 
-// Real Supabase persistence against the schema from Build 0.7.0. Uses only the public anon key
-// (never a service role key) — safe to construct and use directly in the browser, protected by
-// the permissive-but-present RLS policies from 0005_row_level_security.sql.
+// Real Supabase persistence against the schema from Build 0.7.0, user-scoped as of Build 1.1.0.
+// Uses only the public anon key (never a service role key) — safe to construct and use directly
+// in the browser, protected by the user-scoped RLS policies in
+// 0007_user_scoped_row_level_security.sql.
 export class SupabasePaperTradeStore implements PaperTradeStore {
   constructor(private readonly client: SupabaseClient) {}
 
+  // Every operation requires a live session — user_id is stamped from it on insert, and reads
+  // are explicitly scoped by it (in addition to, not instead of, RLS enforcing the same thing
+  // server-side). Throws AuthRequiredError rather than silently returning nothing, so the caller
+  // (ResilientPaperTradeStore) can tell "not authenticated" apart from "Supabase unreachable".
+  private async requireUserId(): Promise<string> {
+    const { data } = await this.client.auth.getSession();
+    const userId = data.session?.user.id;
+    if (!userId) throw new AuthRequiredError();
+    return userId;
+  }
+
   async load(): Promise<PaperTrade[]> {
+    const userId = await this.requireUserId();
+
     const { data: tradeRows, error: tradesError } = await this.client
       .from("paper_trades")
       .select("*")
+      .eq("user_id", userId)
       .order("opened_at", { ascending: false });
 
     if (tradesError) throw new Error(tradesError.message);
@@ -127,9 +144,11 @@ export class SupabasePaperTradeStore implements PaperTradeStore {
   }
 
   async addTrade(trade: PaperTrade): Promise<void> {
+    const userId = await this.requireUserId();
+
     const { data: inserted, error } = await this.client
       .from("paper_trades")
-      .insert(toDbTrade(trade))
+      .insert({ ...toDbTrade(trade), user_id: userId })
       .select("id")
       .single();
 
@@ -173,6 +192,8 @@ export class SupabasePaperTradeStore implements PaperTradeStore {
   }
 
   async closeTrade(closedTrade: PaperTrade): Promise<void> {
+    const userId = await this.requireUserId();
+
     const { data: updated, error } = await this.client
       .from("paper_trades")
       .update({
@@ -184,6 +205,7 @@ export class SupabasePaperTradeStore implements PaperTradeStore {
         updated_at: new Date().toISOString(),
       })
       .eq("client_trade_id", closedTrade.id)
+      .eq("user_id", userId)
       .select("id")
       .single();
 

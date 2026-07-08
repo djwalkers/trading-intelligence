@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "@/components/layout/AppShell";
+import { AuthProvider } from "@/lib/auth/auth-context";
 import { PaperTradesProvider } from "@/lib/state/paper-trades-context";
 import "./globals.css";
 
@@ -25,9 +26,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body className="font-sans">
-        <PaperTradesProvider>
-          <AppShell>{children}</AppShell>
-        </PaperTradesProvider>
+        <AuthProvider>
+          <PaperTradesProvider>
+            <AppShell>{children}</AppShell>
+          </PaperTradesProvider>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,6 +1,7 @@
 import type { PaperTrade } from "@/lib/types";
 import type { PaperTradeStore } from "./paper-trade-store";
 import type { PersistenceStatus } from "./persistence-status";
+import { AuthRequiredError } from "./auth-required-error";
 
 type StatusListener = (status: PersistenceStatus) => void;
 
@@ -58,6 +59,15 @@ export class ResilientPaperTradeStore implements PaperTradeStore {
       this.setStatus({ connected: true, lastSyncedAt: new Date().toISOString() });
       return result;
     } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        // Not a broken connection — the backend is fine, there's just no signed-in user right
+        // now. Falling back to local storage here would be wrong for a user-scoped app (it would
+        // silently start saving to an unscoped store instead of surfacing that sign-in is
+        // needed), so this rethrows rather than falling back. AuthGate is what actually redirects
+        // the user to sign in; this just refuses to write in the meantime.
+        throw error;
+      }
+
       const reason = error instanceof Error ? error.message : "Unknown persistence error";
       console.error("[persistence] Supabase unavailable, falling back to local storage:", error);
 
