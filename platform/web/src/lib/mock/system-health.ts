@@ -1,5 +1,4 @@
 import type { MarketStatus, SystemService } from "@/lib/types";
-import { isSupabaseConfigured } from "@/lib/persistence/config";
 
 export const marketStatus: MarketStatus = {
   isOpen: true,
@@ -44,19 +43,5 @@ export const systemServices: SystemService[] = [
     name: "Execution Engine",
     state: "disabled",
     detail: "Order execution is disabled. No trades can be placed.",
-  },
-  {
-    id: "persistence-mode",
-    name: "Persistence Mode",
-    state: "running",
-    detail: "Local Browser Storage — paper trades are saved in this browser only.",
-  },
-  {
-    id: "supabase",
-    name: "Supabase",
-    state: isSupabaseConfigured() ? "passive" : "not_connected",
-    detail: `Supabase schema: Prepared (migrations in platform/web/supabase/migrations) · Supabase persistence: Disabled${
-      isSupabaseConfigured() ? " · Environment variables detected" : ""
-    }`,
   },
 ];

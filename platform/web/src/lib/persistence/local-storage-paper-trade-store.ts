@@ -26,7 +26,18 @@ export class LocalStoragePaperTradeStore implements PaperTradeStore {
     }
   }
 
-  async save(trades: PaperTrade[]): Promise<void> {
+  async addTrade(trade: PaperTrade): Promise<void> {
+    const current = await this.load();
+    await this.writeAll([trade, ...current]);
+  }
+
+  async closeTrade(closedTrade: PaperTrade): Promise<void> {
+    const current = await this.load();
+    const next = current.map((trade) => (trade.id === closedTrade.id ? closedTrade : trade));
+    await this.writeAll(next);
+  }
+
+  private async writeAll(trades: PaperTrade[]): Promise<void> {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
   }

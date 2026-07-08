@@ -8,7 +8,7 @@ import { buildClosedTrade } from "@/lib/utils/paper-trade";
 // Shared close-trade state so the Paper Portfolio page and Trade Journal don't each
 // reimplement the same "pending close -> confirm -> update trade" wiring.
 export function useCloseTradeFlow() {
-  const { updateTrade } = usePaperTrades();
+  const { closeTrade } = usePaperTrades();
   const [closingTrade, setClosingTrade] = useState<PaperTrade | null>(null);
 
   function requestClose(trade: PaperTrade) {
@@ -17,7 +17,7 @@ export function useCloseTradeFlow() {
 
   function confirmClose() {
     if (closingTrade) {
-      updateTrade(buildClosedTrade(closingTrade));
+      closeTrade(buildClosedTrade(closingTrade));
     }
     setClosingTrade(null);
   }

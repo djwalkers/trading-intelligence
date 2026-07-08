@@ -1,13 +1,13 @@
 # Trading Intelligence — Web Prototype
 
-Build 0.8.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
+Build 0.9.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Market, signal, and strategy data is mocked — there is no broker connection and no live trading.
-Paper trades are persisted through a storage-agnostic abstraction that currently uses local
-browser state (`localStorage`) by default; a Supabase-backed implementation is planned but not
-yet live (see [Persistence mode](#persistence-mode) below). "Trading Intelligence" is a temporary
-product name for this prototype phase.
+Paper trades are persisted through a storage-agnostic abstraction: `localStorage` by default, or
+Supabase when configured (see [Persistence mode](#persistence-mode) below) — either way the app
+looks and behaves identically. "Trading Intelligence" is a temporary product name for this
+prototype phase.
 
 ## Getting started
 
@@ -57,7 +57,8 @@ npm run lint    # lint the project
   Intelligence / BUY / SELL.
 - **Strategies** — mock rule-based strategies and their recent signal output.
 - **System Health** — status of each platform service (mocked, not connected, running, passive,
-  disabled), plus current persistence mode and whether Supabase environment variables are set.
+  disabled), plus a live Persistence panel: current mode (Local Browser Storage / Supabase),
+  connection status, and last synchronisation time.
 
 ## Project structure
 
@@ -68,10 +69,12 @@ src/
     layout/              Sidebar, top bar, prototype banner, footer, page shell
     ui/                  Small reusable primitives (badge, stat card, section panel, page header)
     tables/              Shared list/table views used across dashboard + full pages
-    trading/              Paper trade open/close confirmation modals, Trade Journal view/list/entry
+    trading/              Paper trade open/close confirmation modals, the first-run import
+                          modal, Trade Journal view/list/entry
     portfolio/            Paper Portfolio page view (client, reads paper trade state)
     dashboard/             Dashboard-only widgets (paper trading performance, intelligence summary)
     watchlist/             Watchlist-only widgets (Watchlist Health summary)
+    system-health/         Live Persistence status panel (mode, connection, last sync)
     market-intelligence/  Market Overview, Opportunities (with compare checkboxes), Decision
                           Breakdown, Intelligence Score display/breakdown, Explain Score,
                           Comparison table, Recommendation, and the reusable evidence bullet list
@@ -82,10 +85,11 @@ src/
     mock/                Mock data, kept separate from UI components
     utils/                Formatting, styling, paper-trade P/L, and Intelligence Score calculation
                           helper functions
-    state/                Paper trades context (reads/writes through the persistence layer) and
-                          the shared useCloseTradeFlow hook
-    persistence/          Storage-agnostic PaperTradeStore interface, the active localStorage
-                          implementation, a Supabase placeholder, and Supabase-configured detection
+    state/                Paper trades context (reads/writes through the persistence layer), the
+                          shared useCloseTradeFlow hook, and usePersistenceStatus
+    persistence/          Storage-agnostic PaperTradeStore interface; LocalStoragePaperTradeStore
+                          and SupabasePaperTradeStore implementations; ResilientPaperTradeStore
+                          (fallback + status tracking); Supabase-configured detection
 ```
 
 Mock data lives entirely in `src/lib/mock` and is typed against `src/lib/types`. Pages import
@@ -97,31 +101,50 @@ business logic embedded in page files. Paper trades you place are runtime state 
 ## Persistence mode
 
 Paper trades are saved through a small storage-agnostic interface (`PaperTradeStore`,
-`src/lib/persistence/paper-trade-store.ts`) with two implementations: a `LocalStoragePaperTradeStore`
-(active) and a `SupabasePaperTradeStore` placeholder (not yet implemented — it throws if ever
-called). **`getPaperTradeStore()` always returns the local storage implementation right now**, so
-the app never requires any environment variables to run.
-
-Two environment variables are recognised for future Supabase use, documented in `.env.example`:
+`src/lib/persistence/paper-trade-store.ts`) with two real implementations —
+`LocalStoragePaperTradeStore` and `SupabasePaperTradeStore` — chosen by `getPaperTradeStore()`:
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 ```
 
-Copy `.env.example` to `.env.local` (already gitignored) and fill these in if you want to see the
-System Health page report "Supabase: Configured" — this is purely informational today and does
-**not** switch persistence; your paper trades still live in `localStorage` either way.
+**Both unset (default): local storage, no configuration needed.** `npm run dev` just works.
 
-The real schema — not just documented, but runnable SQL — lives in
-`supabase/migrations/` (five files, numbered in run order) and `supabase/seed.sql` (sample data).
-Neither is executed by the app or by `npm run build`; they only run if you deliberately follow
-[`docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) against a real Supabase
-project. See also
+**Both set:** the app reads and writes paper trades to Supabase — copy `.env.example` to
+`.env.local`, fill these in from your project's API settings, and see
+[`docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the full walk-through
+(create a project, run the migrations, verify the tables). Only the public anon key is ever used,
+client-side — never a service role key; access control is delegated to the RLS policies already
+in the migrations.
+
+**If Supabase is configured but unreachable**, the app does not break: `ResilientPaperTradeStore`
+catches the failure, logs it to the console, falls back to `localStorage` for the rest of the
+session (no repeated retries), and shows a small banner — "Persistence unavailable. Falling back
+to local storage." — until the next page load. System Health's Persistence panel always reflects
+the real, current state: mode, connection, and last synchronisation time.
+
+If this browser already has local paper trades and a freshly-configured Supabase project has
+none, a one-time modal offers to import that history — answering either way (Import or Skip)
+means it's never asked again on that browser.
+
+The schema itself — real, runnable SQL, not just documentation — lives in `supabase/migrations/`
+(five files, numbered in run order) and `supabase/seed.sql` (sample data for manually poking at
+the schema; not read by the app). See
 [`docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
-for the schema rationale and migration path, and
+for the schema rationale, and
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md) for the
 infrastructure-level overview.
+
+## What's new in 0.9.0
+
+`SupabasePaperTradeStore` is now real, not a placeholder — implemented against the exact schema
+from Build 0.7.0 using `@supabase/supabase-js`. `getPaperTradeStore()` genuinely selects Supabase
+when configured, local storage otherwise, with automatic, logged fallback if Supabase ever
+becomes unreachable mid-session. A one-time import offer moves existing local history into a
+freshly-configured, empty Supabase project. System Health's persistence status is now live rather
+than mocked. Nothing changes visually for anyone not using Supabase. See
+[`../../docs/product/BUILD-0.9.0.md`](../../docs/product/BUILD-0.9.0.md) for full details.
 
 ## What's new in 0.8.0
 
@@ -199,12 +222,11 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
 
 ## Explicitly out of scope for this build
 
-- Authentication
+- Authentication (Supabase RLS policies remain permissive placeholders until auth exists)
 - Real broker/market data connections
-- A real Supabase connection, client, or queries — the store is a placeholder and no
-  `@supabase/supabase-js` dependency has been added yet; the SQL schema exists and can be deployed
-  to a real project, but nothing in the app talks to it — paper trades live only in the browser's
-  `localStorage`, with no cross-device sync
+- Real-time sync or multi-tab updates from Supabase (data loads once per page load, not polled)
+- Automatic reconnection within a session after falling back to local storage (reload the page
+  to try Supabase again)
 - A deployed/linked Supabase project or CI for running migrations
 - Partial trade closes, position netting, or live/scheduled price movement
 - Real market data, technical indicators, or model-generated scoring behind Market Intelligence or
@@ -222,8 +244,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/BUILD-0.4.0.md`](../../docs/product/BUILD-0.4.0.md),
 [`../../docs/product/BUILD-0.5.0.md`](../../docs/product/BUILD-0.5.0.md),
 [`../../docs/product/BUILD-0.6.0.md`](../../docs/product/BUILD-0.6.0.md),
-[`../../docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md), and
-[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md) for the full build
+[`../../docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md),
+[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md), and
+[`../../docs/product/BUILD-0.9.0.md`](../../docs/product/BUILD-0.9.0.md) for the full build
 records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and
