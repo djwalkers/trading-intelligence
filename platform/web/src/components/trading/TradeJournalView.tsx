@@ -8,6 +8,7 @@ import { TradeJournalList } from "@/components/trading/TradeJournalList";
 import { CloseTradeModal } from "@/components/trading/CloseTradeModal";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
 import { useCloseTradeFlow } from "@/lib/state/use-close-trade-flow";
+import { usePersistenceStatus } from "@/lib/state/use-persistence-status";
 import { calculateTradePnl, calculateTradePnlPercent } from "@/lib/utils/paper-trade";
 import type { PaperTrade } from "@/lib/types";
 
@@ -54,6 +55,7 @@ export function TradeJournalView() {
   const [filter, setFilter] = useState<TradeJournalFilter>("All");
   const { closingTrade, currentPrice, isPriceLoading, requestClose, confirmClose, cancelClose } =
     useCloseTradeFlow();
+  const persistenceStatus = usePersistenceStatus();
 
   const filteredTrades = trades.filter((trade) => matchesFilter(trade, filter));
 
@@ -102,9 +104,12 @@ export function TradeJournalView() {
       </SectionPanel>
 
       <InfoNote>
-        Trades are stored locally in your browser only (localStorage) and are not shared across
-        devices. Clearing your browser data will remove this history. Nothing here represents a
-        real order or real capital.
+        Trade history is stored using the active persistence provider — currently{" "}
+        <strong className="font-medium text-ink-200">
+          {persistenceStatus.mode === "Supabase" ? "Supabase" : "local browser storage"}
+        </strong>
+        . Supabase is used when configured; local browser storage is used as a fallback. Nothing
+        here represents a real order or real capital.
       </InfoNote>
 
       {closingTrade ? (
