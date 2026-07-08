@@ -1,6 +1,8 @@
 import type { EvidenceRating, Recommendation } from "./market-intelligence";
 import type { MarketDataMode, MarketDataSource } from "./market-data";
 import type { AgreementLevel } from "./strategy-engine";
+import type { PortfolioExposureSnapshot } from "./portfolio-risk";
+import type { PositionAction } from "./position-manager";
 
 export type PaperTradeSide = "BUY" | "SELL";
 export type PaperTradeStatus = "Open" | "Closed";
@@ -69,4 +71,22 @@ export interface PaperTrade {
   // sourceBotDecisionId: a scan can reject several candidates before one opens a trade, and this
   // is the scan-level id, not a per-candidate one.
   scanId?: string;
+  // Optional, backward compatible — populated only for Bot-sourced trades (Mission 2). A trade
+  // only ever gets created after the Portfolio Risk Manager's checks pass, so
+  // portfolioRiskStatus is always "Passed" in practice today — kept as a status (not a bare
+  // boolean) since a future mission could persist a rejected attempt. portfolioExposureSnapshot
+  // is the portfolio's exposure immediately *before* this trade was added, for audit purposes only
+  // — never read by any P/L calculation.
+  portfolioRiskStatus?: "Passed" | "Failed";
+  portfolioRiskSummary?: string;
+  portfolioExposureSnapshot?: PortfolioExposureSnapshot;
+  // Optional, backward compatible — populated only for Bot-sourced trades (Mission 3). Records
+  // how the Position Manager classified this trade against any pre-existing position in the same
+  // instrument — always "NEW_POSITION" or "ADD_TO_POSITION" in practice, since a trade is only
+  // ever created for those two classifications (HOLD_POSITION/BLOCK_POSITION never produce a
+  // trade) — kept as the full action type rather than a boolean for a readable audit trail.
+  positionAction?: PositionAction;
+  existingPositionValue?: number;
+  positionValueAfterTrade?: number;
+  positionDecisionReason?: string;
 }

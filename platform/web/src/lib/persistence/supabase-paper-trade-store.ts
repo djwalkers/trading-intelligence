@@ -3,6 +3,8 @@ import type {
   EvidenceRating,
   MarketDataSource,
   PaperTrade,
+  PortfolioExposureSnapshot,
+  PositionAction,
   Recommendation,
 } from "@/lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -11,8 +13,9 @@ import { AuthRequiredError } from "./auth-required-error";
 
 // Row shapes for the schema created in Build 0.7.0, extended with user_id in Build 1.1.0, entry
 // price provenance in Build 1.2.0, Strategy Engine metadata in Build 1.3.0, Bot Runner metadata in
-// Mission 1, and the scan id in Mission 1.1 (platform/web/supabase/migrations/). Hand-written
-// rather than generated, since no live Supabase project is linked to this repo to codegen against.
+// Mission 1, the scan id in Mission 1.1, Portfolio Risk Manager metadata in Mission 2, and Position
+// Manager metadata in Mission 3 (platform/web/supabase/migrations/). Hand-written rather than
+// generated, since no live Supabase project is linked to this repo to codegen against.
 interface PaperTradeRow {
   id: string;
   client_trade_id: string;
@@ -44,6 +47,13 @@ interface PaperTradeRow {
   source_bot_decision_id: string | null;
   risk_checks_summary: string | null;
   scan_id: string | null;
+  portfolio_risk_status: "Passed" | "Failed" | null;
+  portfolio_risk_summary: string | null;
+  portfolio_exposure_snapshot: PortfolioExposureSnapshot | null;
+  position_action: PositionAction | null;
+  existing_position_value: number | string | null;
+  position_value_after_trade: number | string | null;
+  position_decision_reason: string | null;
 }
 
 interface TradeIntelligenceRow {
@@ -84,6 +94,13 @@ function toDbTrade(trade: PaperTrade) {
     source_bot_decision_id: trade.sourceBotDecisionId ?? null,
     risk_checks_summary: trade.riskChecksSummary ?? null,
     scan_id: trade.scanId ?? null,
+    portfolio_risk_status: trade.portfolioRiskStatus ?? null,
+    portfolio_risk_summary: trade.portfolioRiskSummary ?? null,
+    portfolio_exposure_snapshot: trade.portfolioExposureSnapshot ?? null,
+    position_action: trade.positionAction ?? null,
+    existing_position_value: trade.existingPositionValue ?? null,
+    position_value_after_trade: trade.positionValueAfterTrade ?? null,
+    position_decision_reason: trade.positionDecisionReason ?? null,
   };
 }
 
@@ -122,6 +139,13 @@ function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceRow | nu
     sourceBotDecisionId: row.source_bot_decision_id ?? undefined,
     riskChecksSummary: row.risk_checks_summary ?? undefined,
     scanId: row.scan_id ?? undefined,
+    portfolioRiskStatus: row.portfolio_risk_status ?? undefined,
+    portfolioRiskSummary: row.portfolio_risk_summary ?? undefined,
+    portfolioExposureSnapshot: row.portfolio_exposure_snapshot ?? undefined,
+    positionAction: row.position_action ?? undefined,
+    existingPositionValue: toNumber(row.existing_position_value),
+    positionValueAfterTrade: toNumber(row.position_value_after_trade),
+    positionDecisionReason: row.position_decision_reason ?? undefined,
     intelligence: intelligence
       ? {
           recommendation: intelligence.recommendation,

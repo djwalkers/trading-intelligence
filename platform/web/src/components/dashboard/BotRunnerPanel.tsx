@@ -13,6 +13,15 @@ interface BotRunnerPanelProps {
   instruments: Instrument[];
 }
 
+function candidateStatusLabel(candidate: BotDecision["candidates"][number]) {
+  if (!candidate.individualPassed) return "Individual: Failed";
+  if (!candidate.positionEvaluated) return "Individual: Passed";
+  if (!candidate.portfolioRiskEvaluated) return `Individual: Passed · Position: ${candidate.positionAction}`;
+  return `Individual: Passed · Position: ${candidate.positionAction} · Portfolio: ${
+    candidate.portfolioPassed ? "Passed" : "Failed"
+  }`;
+}
+
 export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
   const { trades, addTrade } = usePaperTrades();
   const { addDecision } = useBotDecisionLog();
@@ -22,9 +31,8 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
   async function handleRunScan() {
     setIsScanning(true);
     try {
-      const openTrades = trades.filter((trade) => trade.status === "Open");
       const scanId = reserveScanId();
-      const { decision, trade } = await runBotScan(instruments, openTrades, scanId);
+      const { decision, trade } = await runBotScan(instruments, trades, scanId);
       if (trade) addTrade(trade);
       addDecision(decision);
       setLastDecision(decision);
@@ -42,9 +50,10 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-2xl text-sm text-ink-400">
           Scans every watchlist instrument through the Strategy Engine, ranks the tradeable
-          opportunities, and walks down the list — evaluating risk checks for each candidate in
-          turn — until one opens a paper trade or every candidate has been rejected. Triggered
-          manually; nothing runs on a schedule.
+          opportunities, and walks down the list — evaluating individual risk, then the Position
+          Manager (new position, add to position, hold, or block), then portfolio risk, for each
+          candidate in turn — until one opens a paper trade or every candidate has been rejected.
+          Triggered manually; nothing runs on a schedule.
         </p>
         <button
           type="button"
@@ -90,20 +99,25 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
           <p className="text-sm text-ink-300">{lastDecision.reason}</p>
 
           {lastDecision.candidates.length > 0 ? (
-            <ul className="flex flex-col gap-1">
+            <ul className="flex flex-col gap-1.5">
               {lastDecision.candidates.map((candidate) => (
-                <li key={candidate.instrumentSymbol} className="flex items-start gap-2 text-xs">
-                  <span
-                    className={
-                      candidate.outcome === "Trade Opened" ? "text-accent-teal" : "text-accent-red"
-                    }
-                  >
-                    #{candidate.rank} {candidate.outcome === "Trade Opened" ? "Executed" : "Rejected"}
-                  </span>
-                  <span className="text-ink-400">
-                    {candidate.instrumentSymbol} ({candidate.confidence}%)
-                    {candidate.rejectionReason ? ` — ${candidate.rejectionReason}` : ""}
-                  </span>
+                <li key={candidate.instrumentSymbol} className="flex flex-col gap-0.5 text-xs">
+                  <div className="flex items-start gap-2">
+                    <span
+                      className={
+                        candidate.outcome === "Trade Opened" ? "text-accent-teal" : "text-accent-red"
+                      }
+                    >
+                      #{candidate.rank} {candidate.outcome === "Trade Opened" ? "Executed" : "Rejected"}
+                    </span>
+                    <span className="text-ink-400">
+                      {candidate.instrumentSymbol} ({candidate.confidence}%)
+                    </span>
+                    <span className="text-ink-500">{candidateStatusLabel(candidate)}</span>
+                  </div>
+                  {candidate.rejectionReason ? (
+                    <span className="pl-1 text-ink-500">{candidate.rejectionReason}</span>
+                  ) : null}
                 </li>
               ))}
             </ul>

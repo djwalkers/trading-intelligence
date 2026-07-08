@@ -3,10 +3,12 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { BotDecision } from "@/lib/bot";
 
-// Bumped to v2 in Mission 1.1 — the BotDecision shape changed (candidates/trace/scanId replace
-// the old flat riskChecks list), so old v1 entries are deliberately left behind rather than
-// migrated; this is a local-browser-only log, not data worth writing migration code for.
-const STORAGE_KEY = "trading-intelligence.bot-decisions.v2";
+// Bumped to v2 in Mission 1.1 (candidates/trace/scanId replaced the old flat riskChecks list), to
+// v3 in Mission 2 (candidates gained individual/portfolio risk fields, decisions gained a
+// portfolio exposure snapshot), and to v4 in Mission 3 (candidates gained Position Manager
+// fields) — old entries are deliberately left behind rather than migrated; this is a
+// local-browser-only log, not data worth writing migration code for.
+const STORAGE_KEY = "trading-intelligence.bot-decisions.v4";
 // A prototype decision log, not an audit trail — bounded so localStorage can't grow unbounded
 // across many manual scans in one browser.
 const MAX_ENTRIES = 50;

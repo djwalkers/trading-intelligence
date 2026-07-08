@@ -4,16 +4,20 @@ import type {
   MarketQuote,
   PaperTrade,
   PaperTradeSide,
+  PortfolioExposureSnapshot,
+  PositionAction,
   StrategyScore,
 } from "@/lib/types";
 import { getInstrumentBySymbol } from "@/lib/mock/instruments";
 import { getStrategyEngine } from "@/lib/strategy-engine";
 import { getMarketDataProvider } from "@/lib/market-data/get-market-data-provider";
 import { isTradeableRecommendation, sideForRecommendation } from "@/lib/utils/paper-trade";
+import { buildExposureSnapshot, evaluatePortfolioRisk } from "./portfolio-risk";
+import { buildPositionContext, evaluatePosition } from "./position-manager";
 import type { BotCandidateEvaluation, BotDecision, BotRiskCheck, BotScanResult, BotTraceStep } from "./types";
 
-// Hardcoded, disclosed, and deliberately simple — this is Mission 1/1.1, not a configurable risk
-// engine. Adjusting any of these means editing this file, not a settings screen.
+// Hardcoded, disclosed, and deliberately simple — this is Mission 1/1.1/2/3, not a configurable
+// risk engine. Adjusting any of these means editing this file, not a settings screen.
 const MIN_CONFIDENCE = 75;
 const MAX_NOTIONAL_GBP = 250;
 const BOT_STRATEGY_LABEL = "Bot Runner";
@@ -30,13 +34,13 @@ interface CandidateRiskResult {
   quote: MarketQuote | undefined;
 }
 
-// Runs all five hardcoded risk checks for one candidate. Every check always runs and is always
-// returned, whether it passed or not — the decision trace shows what would have needed to be
-// true, not just the first failure.
+// Runs the four hardcoded *individual* risk checks for one candidate. Every check always runs and
+// is always returned, whether it passed or not — the decision trace shows what would have needed
+// to be true, not just the first failure. Duplicate-instrument handling moved to the Position
+// Manager (Mission 3) — a duplicate symbol/side is no longer blindly rejected here, it's
+// classified (NEW_POSITION/ADD_TO_POSITION/HOLD_POSITION/BLOCK_POSITION) — see runBotScan.
 async function evaluateCandidateRisk(
   candidate: StrategyScore,
-  side: PaperTradeSide,
-  openTrades: PaperTrade[],
   instrument: Instrument,
 ): Promise<CandidateRiskResult> {
   const riskChecks: BotRiskCheck[] = [];
@@ -61,20 +65,6 @@ async function evaluateCandidateRisk(
     name: "Agreement not Conflict",
     passed: agreementPassed,
     detail: `Agreement is ${candidate.agreement}.`,
-  });
-
-  const hasDuplicate = openTrades.some(
-    (trade) =>
-      trade.status === "Open" &&
-      trade.instrumentSymbol === candidate.instrumentSymbol &&
-      trade.side === side,
-  );
-  riskChecks.push({
-    name: "No duplicate open trade",
-    passed: !hasDuplicate,
-    detail: hasDuplicate
-      ? `An open ${side} trade already exists for ${candidate.instrumentSymbol}.`
-      : `No existing open ${side} trade for ${candidate.instrumentSymbol}.`,
   });
 
   // Fetched regardless of the checks above, via the same MarketDataProvider every other trade
@@ -114,9 +104,31 @@ function buildBotTrade(params: {
   decisionId: string;
   scanId: string;
   riskChecks: BotRiskCheck[];
+  portfolioRiskChecks: BotRiskCheck[];
+  portfolioSnapshot: PortfolioExposureSnapshot;
+  positionAction: PositionAction;
+  existingPositionValue: number;
+  positionValueAfterTrade: number;
+  positionDecisionReason: string;
 }): PaperTrade {
-  const { candidate, side, price, quantity, status, quote, timestamp, decisionId, scanId, riskChecks } =
-    params;
+  const {
+    candidate,
+    side,
+    price,
+    quantity,
+    status,
+    quote,
+    timestamp,
+    decisionId,
+    scanId,
+    riskChecks,
+    portfolioRiskChecks,
+    portfolioSnapshot,
+    positionAction,
+    existingPositionValue,
+    positionValueAfterTrade,
+    positionDecisionReason,
+  } = params;
 
   return {
     id: `trade-bot-${candidate.instrumentSymbol}-${Date.now()}`,
@@ -129,7 +141,7 @@ function buildBotTrade(params: {
     signalConfidence: candidate.overallConfidence,
     strategyName: BOT_STRATEGY_LABEL,
     status: "Open",
-    reason: `Bot Runner opened this trade automatically: ${candidate.primaryStrategyName} led with the highest confidence (${candidate.overallConfidence}%), agreement was ${candidate.agreement}, and every risk check passed.`,
+    reason: `Bot Runner opened this trade automatically: ${candidate.primaryStrategyName} led with the highest confidence (${candidate.overallConfidence}%), agreement was ${candidate.agreement}, position action was ${positionAction}, and every individual, position, and portfolio risk check passed.`,
     source: "Bot",
     sourceBotDecisionId: decisionId,
     scanId,
@@ -143,18 +155,29 @@ function buildBotTrade(params: {
     riskChecksSummary: riskChecks
       .map((check) => `${check.name}: ${check.passed ? "passed" : "failed"} (${check.detail})`)
       .join(" · "),
+    portfolioRiskStatus: "Passed",
+    portfolioRiskSummary: portfolioRiskChecks
+      .map((check) => `${check.name}: ${check.passed ? "passed" : "failed"} (${check.detail})`)
+      .join(" · "),
+    portfolioExposureSnapshot: portfolioSnapshot,
+    positionAction,
+    existingPositionValue,
+    positionValueAfterTrade,
+    positionDecisionReason,
   };
 }
 
 // One scan: rank every tradeable opportunity the Strategy Engine finds, then walk down the ranked
-// list — evaluating risk checks for each candidate in turn (Mission 1.1) — until one passes every
-// check and a single paper trade is opened, or every candidate has been rejected. The loop breaks
-// the instant a candidate passes, so "max one trade per scan" is still satisfied structurally, not
-// by a counter. Pure aside from one live price fetch per candidate evaluated — never touches
-// persistence itself; the caller adds the trade and logs the decision.
+// list — evaluating individual risk checks, then (Mission 3) the Position Manager's classification
+// against any existing position in that instrument, then (Mission 2) portfolio-level risk — for
+// each candidate in turn, until one passes all three tiers and a single paper trade is opened, or
+// every candidate has been rejected. The loop breaks the instant a candidate passes, so "max one
+// trade per scan" is still satisfied structurally, not by a counter. Pure aside from one live
+// price fetch per candidate evaluated — never touches persistence itself; the caller adds the
+// trade and logs the decision.
 export async function runBotScan(
   instruments: Instrument[],
-  openTrades: PaperTrade[],
+  trades: PaperTrade[],
   scanId: string,
 ): Promise<BotScanResult> {
   const startedAt = performance.now();
@@ -163,6 +186,10 @@ export async function runBotScan(
   const instrumentsScanned = instruments.map((instrument) => instrument.symbol);
   const trace: BotTraceStep[] = [];
 
+  // One baseline for the whole scan — every candidate is checked against the portfolio as it
+  // stands right now, since at most one trade can ever open per scan.
+  const portfolioSnapshotBefore = buildExposureSnapshot(trades);
+
   trace.push({
     step: "Scan started",
     detail: `${scanId} started, scanning ${instruments.length} instrument(s).`,
@@ -170,6 +197,10 @@ export async function runBotScan(
   trace.push({
     step: "Instruments scanned",
     detail: instrumentsScanned.length > 0 ? instrumentsScanned.join(", ") : "None",
+  });
+  trace.push({
+    step: "Portfolio snapshot captured",
+    detail: `${portfolioSnapshotBefore.totalOpenTrades} open trade(s), £${portfolioSnapshotBefore.totalCapitalDeployed.toFixed(2)} deployed, £${portfolioSnapshotBefore.availableCash.toFixed(2)} available cash.`,
   });
 
   const scores = getStrategyEngine().evaluateAll(instruments);
@@ -200,6 +231,7 @@ export async function runBotScan(
         timestamp,
         instrumentsScanned,
         candidates: [],
+        portfolioSnapshotBefore,
         selectedInstrument: null,
         selectedInstrumentName: null,
         actionTaken: "No Trade",
@@ -246,7 +278,13 @@ export async function runBotScan(
         side,
         confidence: candidate.overallConfidence,
         agreement: candidate.agreement,
-        riskChecks: [],
+        individualRiskChecks: [],
+        individualPassed: false,
+        positionEvaluated: false,
+        positionChecks: [],
+        portfolioRiskEvaluated: false,
+        portfolioRiskChecks: [],
+        portfolioPassed: false,
         outcome: "Rejected",
         rejectionReason,
       });
@@ -254,33 +292,17 @@ export async function runBotScan(
       continue;
     }
 
-    const { riskChecks, price, quantity, status, quote } = await evaluateCandidateRisk(
-      candidate,
-      side,
-      openTrades,
-      instrument,
-    );
-    const failedChecks = riskChecks.filter((check) => !check.passed);
+    const { riskChecks, price, quantity, status, quote } = await evaluateCandidateRisk(candidate, instrument);
+    const failedIndividualChecks = riskChecks.filter((check) => !check.passed);
+    const individualPassed = failedIndividualChecks.length === 0;
 
     trace.push({
       step: "Risk checks evaluated",
-      detail: `${candidate.instrumentSymbol}: ${riskChecks.length - failedChecks.length}/${riskChecks.length} risk checks passed.`,
+      detail: `${candidate.instrumentSymbol}: ${riskChecks.length - failedIndividualChecks.length}/${riskChecks.length} individual risk checks passed.`,
     });
 
-    if (failedChecks.length === 0) {
-      selected = candidate;
-      openedTrade = buildBotTrade({
-        candidate,
-        side,
-        price,
-        quantity,
-        status,
-        quote,
-        timestamp,
-        decisionId,
-        scanId,
-        riskChecks,
-      });
+    if (!individualPassed) {
+      const rejectionReason = `Individual checks failed: ${failedIndividualChecks.map((check) => check.name).join(", ")}.`;
       candidateEvaluations.push({
         rank,
         instrumentSymbol: candidate.instrumentSymbol,
@@ -288,17 +310,150 @@ export async function runBotScan(
         side,
         confidence: candidate.overallConfidence,
         agreement: candidate.agreement,
-        riskChecks,
-        outcome: "Trade Opened",
+        individualRiskChecks: riskChecks,
+        individualPassed: false,
+        positionEvaluated: false,
+        positionChecks: [],
+        portfolioRiskEvaluated: false,
+        portfolioRiskChecks: [],
+        portfolioPassed: false,
+        outcome: "Rejected",
+        rejectionReason,
       });
-      trace.push({
-        step: "Trade opened",
-        detail: `Opened a ${side} trade for ${candidate.instrumentSymbol}.`,
-      });
-      break;
+      trace.push({ step: "Candidate rejected", detail: `${candidate.instrumentSymbol}: ${rejectionReason}` });
+      continue;
     }
 
-    const rejectionReason = `Failed: ${failedChecks.map((check) => check.name).join(", ")}.`;
+    // Position Manager (Mission 3) — classifies against any existing position in this instrument.
+    // Only evaluated once individual checks pass, same "no point checking the next tier" rule
+    // Mission 2 established for portfolio risk.
+    const candidateNotional = quantity * price;
+    const positionContext = buildPositionContext(candidate.instrumentSymbol, trades);
+    const positionDecision = evaluatePosition({
+      context: positionContext,
+      trades,
+      candidateSide: side,
+      candidateConfidence: candidate.overallConfidence,
+      candidateAgreement: candidate.agreement,
+      candidateNotional,
+    });
+
+    trace.push({
+      step: "Position evaluated",
+      detail:
+        `${candidate.instrumentSymbol}: existing position £${positionDecision.existingPositionValue.toFixed(2)}` +
+        (positionDecision.latestBotConfidence !== undefined
+          ? `, previous confidence ${positionDecision.latestBotConfidence}% vs current ${candidate.overallConfidence}%`
+          : "") +
+        (positionDecision.latestBotAgreement !== undefined
+          ? `, previous agreement ${positionDecision.latestBotAgreement} vs current ${candidate.agreement}`
+          : "") +
+        (positionContext.minutesSinceLastOpenTrade !== undefined
+          ? `, ${positionContext.minutesSinceLastOpenTrade.toFixed(1)} minute(s) since last trade`
+          : "") +
+        ".",
+    });
+    trace.push({
+      step: "Position decision",
+      detail: `${candidate.instrumentSymbol}: ${positionDecision.action} — ${positionDecision.reason}`,
+    });
+
+    const positionAllowsTrade =
+      positionDecision.action === "NEW_POSITION" || positionDecision.action === "ADD_TO_POSITION";
+
+    if (!positionAllowsTrade) {
+      const rejectionReason = `Position Manager: ${positionDecision.action} — ${positionDecision.reason}`;
+      candidateEvaluations.push({
+        rank,
+        instrumentSymbol: candidate.instrumentSymbol,
+        instrumentName: candidate.instrumentName,
+        side,
+        confidence: candidate.overallConfidence,
+        agreement: candidate.agreement,
+        individualRiskChecks: riskChecks,
+        individualPassed: true,
+        positionEvaluated: true,
+        positionAction: positionDecision.action,
+        positionChecks: positionDecision.checks,
+        existingPositionValue: positionDecision.existingPositionValue,
+        positionValueAfterTrade: positionDecision.positionValueAfterTrade,
+        positionDecisionReason: positionDecision.reason,
+        portfolioRiskEvaluated: false,
+        portfolioRiskChecks: [],
+        portfolioPassed: false,
+        outcome: "Rejected",
+        rejectionReason,
+      });
+      trace.push({ step: "Candidate rejected", detail: `${candidate.instrumentSymbol}: ${rejectionReason}` });
+      continue;
+    }
+
+    // Portfolio risk (Mission 2) — only reached once the Position Manager has tentatively
+    // allowed a new position or an add. If it fails here, the position action is overridden to
+    // BLOCK_POSITION so the final recorded decision stays accurate ("portfolio risk fails" is one
+    // of the Position Manager's own block conditions per the mission spec, evaluated as its own
+    // pipeline stage rather than duplicated inside position-manager.ts).
+    const portfolioResult = evaluatePortfolioRisk(
+      portfolioSnapshotBefore,
+      candidate.instrumentSymbol,
+      side,
+      candidateNotional,
+    );
+    const failedPortfolioChecks = portfolioResult.checks.filter((check) => !check.passed);
+
+    trace.push({
+      step: "Portfolio risk evaluated",
+      detail: `${candidate.instrumentSymbol}: ${portfolioResult.checks.length - failedPortfolioChecks.length}/${portfolioResult.checks.length} portfolio risk checks passed.`,
+    });
+
+    if (!portfolioResult.passed) {
+      const rejectionReason = `Position Manager tentatively allowed ${positionDecision.action}, but portfolio risk failed: ${failedPortfolioChecks
+        .map((check) => check.name)
+        .join(", ")} — ${failedPortfolioChecks.map((check) => check.detail).join(" ")}`;
+      candidateEvaluations.push({
+        rank,
+        instrumentSymbol: candidate.instrumentSymbol,
+        instrumentName: candidate.instrumentName,
+        side,
+        confidence: candidate.overallConfidence,
+        agreement: candidate.agreement,
+        individualRiskChecks: riskChecks,
+        individualPassed: true,
+        positionEvaluated: true,
+        positionAction: "BLOCK_POSITION",
+        positionChecks: positionDecision.checks,
+        existingPositionValue: positionDecision.existingPositionValue,
+        positionValueAfterTrade: positionDecision.positionValueAfterTrade,
+        positionDecisionReason: `${positionDecision.reason} (overridden to BLOCK_POSITION: portfolio risk failed)`,
+        portfolioRiskEvaluated: true,
+        portfolioRiskChecks: portfolioResult.checks,
+        portfolioPassed: false,
+        outcome: "Rejected",
+        rejectionReason,
+      });
+      trace.push({ step: "Candidate rejected", detail: `${candidate.instrumentSymbol}: ${rejectionReason}` });
+      continue;
+    }
+
+    selected = candidate;
+    openedTrade = buildBotTrade({
+      candidate,
+      side,
+      price,
+      quantity,
+      status,
+      quote,
+      timestamp,
+      decisionId,
+      scanId,
+      riskChecks,
+      portfolioRiskChecks: portfolioResult.checks,
+      portfolioSnapshot: portfolioSnapshotBefore,
+      positionAction: positionDecision.action,
+      existingPositionValue: positionDecision.existingPositionValue,
+      positionValueAfterTrade: positionDecision.positionValueAfterTrade,
+      positionDecisionReason: positionDecision.reason,
+    });
     candidateEvaluations.push({
       rank,
       instrumentSymbol: candidate.instrumentSymbol,
@@ -306,11 +461,24 @@ export async function runBotScan(
       side,
       confidence: candidate.overallConfidence,
       agreement: candidate.agreement,
-      riskChecks,
-      outcome: "Rejected",
-      rejectionReason,
+      individualRiskChecks: riskChecks,
+      individualPassed: true,
+      positionEvaluated: true,
+      positionAction: positionDecision.action,
+      positionChecks: positionDecision.checks,
+      existingPositionValue: positionDecision.existingPositionValue,
+      positionValueAfterTrade: positionDecision.positionValueAfterTrade,
+      positionDecisionReason: positionDecision.reason,
+      portfolioRiskEvaluated: true,
+      portfolioRiskChecks: portfolioResult.checks,
+      portfolioPassed: true,
+      outcome: "Trade Opened",
     });
-    trace.push({ step: "Candidate rejected", detail: `${candidate.instrumentSymbol}: ${rejectionReason}` });
+    trace.push({
+      step: "Trade opened",
+      detail: `Opened a ${side} trade for ${candidate.instrumentSymbol} (${positionDecision.action}).`,
+    });
+    break;
   }
 
   const executionTimeMs = performance.now() - startedAt;
@@ -329,13 +497,14 @@ export async function runBotScan(
         timestamp,
         instrumentsScanned,
         candidates: candidateEvaluations,
+        portfolioSnapshotBefore,
         selectedInstrument: selected.instrumentSymbol,
         selectedInstrumentName: selected.instrumentName,
         actionTaken: "Trade Opened",
         reason:
           rejectedCount > 0
-            ? `Opened a ${openedTrade.side} trade for ${selected.instrumentSymbol} after ${rejectedCount} higher-ranked candidate(s) failed risk checks.`
-            : `Opened a ${openedTrade.side} trade for ${selected.instrumentSymbol}: highest-ranked opportunity at ${selected.overallConfidence}% confidence (${selected.agreement}), all risk checks passed.`,
+            ? `Opened a ${openedTrade.side} trade for ${selected.instrumentSymbol} (${openedTrade.positionAction}) after ${rejectedCount} higher-ranked candidate(s) failed individual, position, or portfolio risk checks.`
+            : `Opened a ${openedTrade.side} trade for ${selected.instrumentSymbol} (${openedTrade.positionAction}): highest-ranked opportunity at ${selected.overallConfidence}% confidence (${selected.agreement}), all individual, position, and portfolio risk checks passed.`,
         trace,
         tradeCreated: true,
         createdTradeId: openedTrade.id,
@@ -357,10 +526,11 @@ export async function runBotScan(
       timestamp,
       instrumentsScanned,
       candidates: candidateEvaluations,
+      portfolioSnapshotBefore,
       selectedInstrument: null,
       selectedInstrumentName: null,
       actionTaken: "No Trade",
-      reason: `All ${candidateEvaluations.length} candidate(s) failed risk checks — no trade opened this scan.`,
+      reason: `All ${candidateEvaluations.length} candidate(s) failed individual, position, or portfolio risk checks — no trade opened this scan.`,
       trace,
       tradeCreated: false,
       executionTimeMs,

@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 1.3.0 · Mission 1.1. A dark-themed prototype for a trading intelligence platform, built with Next.js
+Build 1.3.0 · Mission 3. A dark-themed prototype for a trading intelligence platform, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
@@ -64,12 +64,15 @@ npm run lint    # lint the project
 - **Trade Journal** — a full history of every paper trade placed this session, showing whether
   each came from a Signal, Market Intelligence, or (as of Mission 1) the Bot Runner — the latter
   two also show the Strategy Engine's primary strategy, agreement level, overall confidence, and
-  evidence summary at the time the trade was placed (Bot trades also show a risk checks summary and,
-  as of Mission 1.1, the scan ID that produced them) — plus exit price, close time, and realised P/L
-  once closed. Open trades can be closed from here too. Filters: All / Open / Closed / Signals /
-  Market Intelligence / Bot / BUY / SELL.
+  evidence summary at the time the trade was placed (Bot trades also show a risk checks summary,
+  the scan ID that produced them, the Portfolio Risk Manager's outcome and a summary of its six
+  checks, and — as of Mission 3 — the Position Manager's action and the position's value before/
+  after the trade) — plus exit price, close time, and realised P/L once closed. Open trades can be
+  closed from here too. Filters: All / Open / Closed / Signals / Market Intelligence / Bot / BUY /
+  SELL.
 - **Bot Decisions** — every autonomous scan the Bot Runner has made in this browser, each with a
-  readable scan ID (`SCAN-000001`): instruments scanned, every ranked candidate's full risk-check
+  readable scan ID (`SCAN-000001`): instruments scanned, a portfolio exposure snapshot at scan time
+  (Mission 2), every ranked candidate's full individual, Position Manager, AND portfolio risk-check
   evaluation (executed or rejected, and why), which candidate (if any) executed, and a collapsible
   full step-by-step scan trace. Manually-triggered only; stored locally, not in Supabase.
 - **Strategies** — mock rule-based strategies and their recent signal output (unrelated to, and
@@ -78,8 +81,11 @@ npm run lint    # lint the project
   plus a live Authentication panel (auth enabled/disabled, current user, data scope), a live
   Persistence panel (current mode, connection status, last synchronisation time), a live Market
   Data panel (provider, connection/mode, last successful refresh, failure reason), a live
-  Strategy Engine panel (running status, strategies loaded, evaluation time), and a live Bot Runner
-  panel (manual mode, last scan time, last action).
+  Strategy Engine panel (running status, strategies loaded, evaluation time), a live Bot Runner
+  panel (manual mode, last scan time, last action, candidates evaluated/rejected), a Portfolio
+  Risk Manager status block (active, open trade limit, capital deployment limit, sector exposure
+  limit), and a Position Manager status block (active, max instrument position, add-to-position
+  confidence improvement, minimum add interval).
 - **Sign in / Sign up / Forgot password / Reset password** — email/password authentication when
   Supabase is configured, styled to match the app's dark theme, including a full password reset
   flow. Every other page requires sign-in in that case; local prototype mode has no sign-in at
@@ -136,8 +142,12 @@ src/
                           summary calculation — pure, synchronous, no configuration or failure
                           mode
     bot/                   runBotScan() — ranks tradeable opportunities from the Strategy Engine,
-                          applies five hardcoded risk rules, and returns at most one PaperTrade
-                          plus a BotDecision log entry; pure aside from one live price fetch
+                          applies four hardcoded individual risk rules, then the Position Manager
+                          (Mission 3 — classifies a candidate against any existing position as
+                          NEW_POSITION/ADD_TO_POSITION/HOLD_POSITION/BLOCK_POSITION), then six
+                          portfolio-level risk rules via the Portfolio Risk Manager (Mission 2),
+                          and returns at most one PaperTrade plus a BotDecision log entry; pure
+                          aside from one live price fetch per candidate evaluated
 ```
 
 Mock data lives entirely in `src/lib/mock` and is typed against `src/lib/types`. Pages import
@@ -209,11 +219,12 @@ one-time modal offers to import that history — answering either way (Import or
 never asked again on that browser.
 
 The schema itself — real, runnable SQL, not just documentation — lives in `supabase/migrations/`
-(eleven files, numbered in run order — the first five from Build 0.7.0, `user_id` and user-scoped
+(thirteen files, numbered in run order — the first five from Build 0.7.0, `user_id` and user-scoped
 RLS from Build 1.1.0, entry price provenance columns from Build 1.2.0, Strategy Engine metadata
-columns from Build 1.3.0, Bot Runner metadata columns from Mission 1, and the bot scan id column
-from Mission 1.1) and `supabase/seed.sql` (sample data for manually poking at the schema; not read
-by the app). See
+columns from Build 1.3.0, Bot Runner metadata columns from Mission 1, the bot scan id column from
+Mission 1.1, Portfolio Risk Manager metadata columns from Mission 2, and Position Manager metadata
+columns from Mission 3) and `supabase/seed.sql`
+(sample data for manually poking at the schema; not read by the app). See
 [`docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 for the schema rationale, and
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md) for the
@@ -279,25 +290,75 @@ the resulting `PaperTrade` (`primaryStrategy`, `strategyAgreement`, `overallConf
 The first autonomous paper-trading loop — manually triggered, never scheduled. Clicking "Run Bot
 Scan" on the Dashboard calls `runBotScan()` (`src/lib/bot/bot-runner.ts`), which runs every
 watchlist instrument through the Strategy Engine, ranks the tradeable opportunities by confidence,
-and then walks down that ranked list — evaluating five hardcoded risk rules for each candidate in
-turn (max one trade per scan, minimum 75% confidence, no trading on Conflict agreement, no
-duplicate open trade for the same instrument + side, and a hard £250 max notional per trade) —
-until one candidate passes every check and opens a real `PaperTrade` (`source: "Bot"`), or every
-candidate has been rejected (Mission 1.1's candidate fallback; Mission 1's bot stopped at the first
-candidate). Either way, the full scan — its readable scan ID (`SCAN-000001`), every candidate
-evaluated, and a step-by-step trace — is logged to the Bot Decisions page.
+and then walks down that ranked list, evaluating three tiers for each candidate in turn:
+
+1. **Individual risk** (four hardcoded rules: max one trade per scan, minimum 75% confidence, no
+   trading on Conflict agreement, a hard £250 max notional per trade).
+2. **Position Manager** (Mission 3) — classifies the candidate against any existing position in
+   that instrument as `NEW_POSITION`, `ADD_TO_POSITION` (confidence improved by 5+ points over the
+   last Bot trade there, agreement not weaker, position value ≤ £750, 30+ minutes since the last
+   trade), `HOLD_POSITION` (soft — not enough new evidence yet), or `BLOCK_POSITION` (hard — an
+   opposing existing position, the value cap exceeded, or portfolio risk failing).
+3. **Portfolio risk** (Mission 2, six hardcoded rules: max 5 open trades, max 60% of starting
+   capital deployed, max 30% exposure to one sector, max 3 open trades per sector, minimum £1,000
+   cash remaining, max 4 open trades in the same direction).
+
+A candidate proceeds to the next tier only if the current one passes; `HOLD_`/`BLOCK_POSITION` or a
+portfolio-risk failure causes the bot to fall back to the next-ranked candidate, same as an
+individual-risk failure (Mission 1.1). Only a candidate that clears all three tiers opens a real
+`PaperTrade` (`source: "Bot"`). Either way, the full scan — its readable scan ID (`SCAN-000001`), a
+portfolio exposure snapshot at scan time, every candidate's full three-tier evaluation, and a
+step-by-step trace — is logged to the Bot Decisions page.
 
 No AI, no scheduler, no broker connection — every scan is a deterministic, explainable pass over
 the same Strategy Engine data every other page already uses. The decision log
 (`src/lib/state/bot-decision-log-context.tsx`) is intentionally simple: a `localStorage`-backed
 React context, not a second persistence abstraction, per Mission 1's "do not overbuild" instruction;
-scan IDs are reserved by a similarly simple `localStorage` counter (`src/lib/bot/scan-id.ts`).
-System Health's Bot Runner panel always reflects the real current state: mode (always "Manual
-Mode"), last scan ID and time, last action, and last scan's candidates evaluated/rejected. See
-[`../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md`](../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md)
+scan IDs are reserved by a similarly simple `localStorage` counter (`src/lib/bot/scan-id.ts`). The
+Portfolio Risk Manager (`src/lib/bot/portfolio-risk.ts`) reads mock sector data
+(`src/lib/mock/sectors.ts`) and reuses the Paper Portfolio page's own cash-balance formula; the
+Position Manager (`src/lib/bot/position-manager.ts`) only compares against the latest *Bot* trade in
+an instrument, since only Bot trades carry a comparable confidence/agreement from the same Strategy
+Engine. System Health's Bot Runner panel always reflects the real current state: mode (always
+"Manual Mode"), last scan ID and time, last action, last scan's candidates evaluated/rejected, and
+both the Portfolio Risk Manager's and Position Manager's active limits. See
+[`../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md`](../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md),
+[`../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md`](../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md),
+[`../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md`](../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md),
 and
-[`../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md`](../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md)
+[`../../docs/product/MISSION-3-POSITION-MANAGER.md`](../../docs/product/MISSION-3-POSITION-MANAGER.md)
 for full design rationale, risk rule details, and verification results.
+
+## What's new in Mission 3
+
+The old "no duplicate open trade" rule is replaced with a Position Manager that understands
+existing positions. A candidate is now classified as `NEW_POSITION`, `ADD_TO_POSITION`,
+`HOLD_POSITION`, or `BLOCK_POSITION` against any existing position in the same instrument — a
+strong enough opportunity can genuinely add to an existing paper position, but only when
+confidence has improved by 5+ points over the last Bot trade there, agreement hasn't weakened,
+the resulting position stays under £750, and at least 30 minutes have passed since the last trade
+in that instrument. An opposing existing position or a value-cap breach is a hard block; the
+comparative/timing conditions not being met yet is a soft hold — both cause the bot to fall back to
+the next-ranked candidate, same as before. Bot-sourced trades now also record the position action
+and the position's value before/after. See
+[`../../docs/product/MISSION-3-POSITION-MANAGER.md`](../../docs/product/MISSION-3-POSITION-MANAGER.md)
+for full details, including why `HOLD_POSITION` and `BLOCK_POSITION` are split the way they are and
+the seeded-state scenarios used to verify all four classifications.
+
+## What's new in Mission 2
+
+The Bot Runner now evaluates whole-portfolio exposure before opening a trade, not just the
+individual opportunity. A new Portfolio Risk Manager (`src/lib/bot/portfolio-risk.ts`) computes
+open trade count, capital deployed, available cash, and exposure by instrument/side/sector, then
+checks six hardcoded portfolio-level rules — only once a candidate has already passed all five
+individual rules. A candidate that fails portfolio risk causes the bot to fall back to the
+next-ranked candidate, exactly like an individual-risk failure. New mock sector data
+(`src/lib/mock/sectors.ts`); the Bot Decisions page, Dashboard panel, System Health, and Trade
+Journal all surface the new portfolio checks and exposure snapshot. None of the five individual
+risk rules were weakened. See
+[`../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md`](../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md)
+for full details, including the seeded-portfolio test scenario used to verify a portfolio-risk
+rejection and fallback.
 
 ## What's new in Mission 1.1
 
@@ -457,12 +518,20 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
 
 - No scheduled or autonomous bot triggering — the Bot Runner only ever runs when a human clicks
   "Run Bot Scan"; no cron, no background job, no polling
-- No configurable bot risk rules — five hardcoded thresholds, changed only by editing
-  `bot-runner.ts`, not a settings screen
+- No configurable bot risk rules — four individual, five position-level, and six portfolio-level
+  thresholds, changed only by editing `bot-runner.ts`/`position-manager.ts`/`portfolio-risk.ts`,
+  not a settings screen
 - Bot decision log is local-browser-only, not Supabase-scoped per user (unlike paper trades); only
-  the resulting trade's scan id is persisted to Supabase, not the full candidate trace
-- No portfolio-level bot exposure limits — the £250 notional cap is still per-trade only, not an
-  aggregate across all open bot trades
+  the resulting trade's scan id, portfolio risk metadata, and position metadata are persisted to
+  Supabase, not the full candidate trace
+- Portfolio risk limits are percentages of *starting* paper capital (a fixed number), not current
+  portfolio value — a deliberate v1 simplification so the ceilings themselves don't drift
+- Sector/category data is a small hardcoded lookup for this prototype's 5-instrument universe
+  (`src/lib/mock/sectors.ts`), not a real classification standard
+- No correlation-aware or cross-sector portfolio risk — "sector" is the only grouping considered
+- Position Manager confidence/agreement comparisons only look at the latest *Bot*-sourced trade in
+  an instrument + side — a position opened manually (Signal/Market Intelligence) has no comparable
+  baseline, so the bot can't yet add to a manually-opened position with full confidence tracking
 - AI, machine learning, or live/real market data feeding the Strategy Engine — three fixed
   deterministic rules, same result every time
 - A fourth strategy (the current agreement-aggregation logic is written for exactly three)
@@ -506,8 +575,10 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/BUILD-1.2.0.md`](../../docs/product/BUILD-1.2.0.md),
 [`../../docs/product/BUILD-1.3.0.md`](../../docs/product/BUILD-1.3.0.md),
 [`../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md`](../../docs/product/MISSION-1-FIRST-AUTONOMOUS-PAPER-TRADE.md),
+[`../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md`](../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md),
+[`../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md`](../../docs/product/MISSION-2-PORTFOLIO-RISK-MANAGER.md),
 and
-[`../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md`](../../docs/product/MISSION-1.1-BOT-CANDIDATE-FALLBACK.md)
+[`../../docs/product/MISSION-3-POSITION-MANAGER.md`](../../docs/product/MISSION-3-POSITION-MANAGER.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

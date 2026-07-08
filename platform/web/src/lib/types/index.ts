@@ -7,3 +7,5 @@ export * from "./paper-trade";
 export * from "./market-intelligence";
 export * from "./market-data";
 export * from "./strategy-engine";
+export * from "./portfolio-risk";
+export * from "./position-manager";

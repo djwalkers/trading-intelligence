@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/Badge";
 import type { PaperTrade } from "@/lib/types";
 import {
+  formatCurrencyGBP,
   formatCurrencyUSD,
   formatDateTime,
   formatPercent,
@@ -99,6 +100,29 @@ export function TradeJournalEntry({ trade, onCloseTrade }: TradeJournalEntryProp
             <span>
               Scan: <span className="text-ink-200">{trade.scanId}</span>
             </span>
+          ) : null}
+          {trade.portfolioRiskStatus ? (
+            <span>
+              Portfolio risk: <span className="text-ink-200">{trade.portfolioRiskStatus}</span>
+            </span>
+          ) : null}
+          {trade.portfolioRiskSummary ? (
+            <span className="basis-full text-ink-500">
+              Portfolio checks: {trade.portfolioRiskSummary}
+            </span>
+          ) : null}
+          {trade.positionAction ? (
+            <span>
+              Position: <span className="text-ink-200">{trade.positionAction}</span>
+            </span>
+          ) : null}
+          {trade.existingPositionValue !== undefined && trade.positionValueAfterTrade !== undefined ? (
+            <span>
+              {formatCurrencyGBP(trade.existingPositionValue)} → {formatCurrencyGBP(trade.positionValueAfterTrade)}
+            </span>
+          ) : null}
+          {trade.positionDecisionReason ? (
+            <span className="basis-full text-ink-500">{trade.positionDecisionReason}</span>
           ) : null}
         </div>
       ) : null}

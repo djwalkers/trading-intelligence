@@ -25,7 +25,7 @@ export default function SystemHealthPage() {
     <>
       <PageHeader
         title="System Health"
-        description="Current status of each platform service, including Mission 1.1's Bot Runner."
+        description="Current status of each platform service, including Mission 3's Position Manager."
       />
 
       <div className="panel flex items-center justify-between px-5 py-4">
@@ -35,7 +35,7 @@ export default function SystemHealthPage() {
           <span className="text-ink-500">&middot; {marketStatus.nextEvent}</span>
         </div>
         <Badge className="border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
-          Build 1.3.0 · Mission 1.1
+          Build 1.3.0 · Mission 3
         </Badge>
       </div>
 

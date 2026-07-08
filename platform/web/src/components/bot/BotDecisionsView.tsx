@@ -2,7 +2,33 @@
 
 import { Badge } from "@/components/ui/Badge";
 import { useBotDecisionLog } from "@/lib/state/bot-decision-log-context";
-import { formatDateTime } from "@/lib/utils/format";
+import { formatCurrencyGBP, formatDateTime } from "@/lib/utils/format";
+import type { BotRiskCheck } from "@/lib/bot";
+
+const POSITION_ACTION_TONE: Record<string, string> = {
+  NEW_POSITION: "text-accent-teal",
+  ADD_TO_POSITION: "text-accent-teal",
+  HOLD_POSITION: "text-accent-amber",
+  BLOCK_POSITION: "text-accent-red",
+};
+
+function RiskCheckList({ checks }: { checks: BotRiskCheck[] }) {
+  if (checks.length === 0) return null;
+  return (
+    <ul className="mt-1.5 flex flex-col gap-0.5">
+      {checks.map((check) => (
+        <li key={check.name} className="flex items-start gap-2 text-xs">
+          <span className={check.passed ? "text-accent-teal" : "text-accent-red"}>
+            {check.passed ? "Passed" : "Failed"}
+          </span>
+          <span className="text-ink-500">
+            {check.name} — {check.detail}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export function BotDecisionsView() {
   const { decisions } = useBotDecisionLog();
@@ -24,6 +50,7 @@ export function BotDecisionsView() {
         const executedCandidate = decision.candidates.find(
           (candidate) => candidate.outcome === "Trade Opened",
         );
+        const snapshot = decision.portfolioSnapshotBefore;
 
         return (
           <div key={decision.id} className="flex flex-col gap-3 px-5 py-4">
@@ -59,6 +86,37 @@ export function BotDecisionsView() {
 
             <p className="text-sm text-ink-300">{decision.reason}</p>
 
+            {snapshot ? (
+              <details className="text-xs text-ink-500">
+                <summary className="cursor-pointer select-none text-ink-400">
+                  Portfolio exposure at scan time
+                </summary>
+                <div className="mt-1.5 flex flex-col gap-1 border-l border-base-700 pl-3">
+                  <span>
+                    {snapshot.totalOpenTrades} open trade(s) ·{" "}
+                    {formatCurrencyGBP(snapshot.totalCapitalDeployed)} deployed ·{" "}
+                    {formatCurrencyGBP(snapshot.availableCash)} available cash
+                  </span>
+                  <span>
+                    By side: BUY {snapshot.countBySide.BUY} (
+                    {formatCurrencyGBP(snapshot.capitalBySide.BUY)}) · SELL {snapshot.countBySide.SELL} (
+                    {formatCurrencyGBP(snapshot.capitalBySide.SELL)})
+                  </span>
+                  {Object.keys(snapshot.countBySector).length > 0 ? (
+                    <span>
+                      By sector:{" "}
+                      {Object.entries(snapshot.countBySector)
+                        .map(
+                          ([sector, count]) =>
+                            `${sector} ${count} (${formatCurrencyGBP(snapshot.capitalBySector[sector] ?? 0)})`,
+                        )
+                        .join(", ")}
+                    </span>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
             {decision.candidates.length > 0 ? (
               <div className="flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-ink-400">Candidate evaluation</span>
@@ -88,20 +146,56 @@ export function BotDecisionsView() {
                       {candidate.rejectionReason ? (
                         <p className="mt-1 text-xs text-accent-red">{candidate.rejectionReason}</p>
                       ) : null}
-                      {candidate.riskChecks.length > 0 ? (
-                        <ul className="mt-1.5 flex flex-col gap-0.5">
-                          {candidate.riskChecks.map((check) => (
-                            <li key={check.name} className="flex items-start gap-2 text-xs">
-                              <span className={check.passed ? "text-accent-teal" : "text-accent-red"}>
-                                {check.passed ? "Passed" : "Failed"}
-                              </span>
-                              <span className="text-ink-500">
-                                {check.name} — {check.detail}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
+
+                      <p className="mt-2 text-xs font-medium text-ink-400">
+                        Individual risk checks —{" "}
+                        <span className={candidate.individualPassed ? "text-accent-teal" : "text-accent-red"}>
+                          {candidate.individualPassed ? "Passed" : "Failed"}
+                        </span>
+                      </p>
+                      <RiskCheckList checks={candidate.individualRiskChecks} />
+
+                      {candidate.positionEvaluated ? (
+                        <>
+                          <p className="mt-2 text-xs font-medium text-ink-400">
+                            Position Manager —{" "}
+                            <span className={POSITION_ACTION_TONE[candidate.positionAction ?? ""] ?? "text-ink-300"}>
+                              {candidate.positionAction}
+                            </span>
+                          </p>
+                          <p className="text-xs text-ink-500">
+                            Existing position: {formatCurrencyGBP(candidate.existingPositionValue ?? 0)} · After
+                            trade: {formatCurrencyGBP(candidate.positionValueAfterTrade ?? 0)}
+                          </p>
+                          {candidate.positionDecisionReason ? (
+                            <p className="text-xs text-ink-500">{candidate.positionDecisionReason}</p>
+                          ) : null}
+                          <RiskCheckList checks={candidate.positionChecks} />
+                        </>
+                      ) : (
+                        <p className="mt-2 text-xs text-ink-600">
+                          Position Manager not evaluated — individual checks failed first.
+                        </p>
+                      )}
+
+                      {candidate.portfolioRiskEvaluated ? (
+                        <>
+                          <p className="mt-2 text-xs font-medium text-ink-400">
+                            Portfolio risk checks —{" "}
+                            <span className={candidate.portfolioPassed ? "text-accent-teal" : "text-accent-red"}>
+                              {candidate.portfolioPassed ? "Passed" : "Failed"}
+                            </span>
+                          </p>
+                          <RiskCheckList checks={candidate.portfolioRiskChecks} />
+                        </>
+                      ) : (
+                        <p className="mt-2 text-xs text-ink-600">
+                          Portfolio risk not evaluated —{" "}
+                          {!candidate.individualPassed
+                            ? "individual checks failed first."
+                            : "the Position Manager did not allow a new or added position."}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
