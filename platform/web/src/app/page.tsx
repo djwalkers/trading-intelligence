@@ -3,10 +3,11 @@ import { StatCard } from "@/components/ui/StatCard";
 import { SectionPanel } from "@/components/ui/SectionPanel";
 import { InfoNote } from "@/components/ui/InfoNote";
 import { SignalsTable } from "@/components/tables/SignalsTable";
-import { WatchlistTable } from "@/components/tables/WatchlistTable";
+import { WatchlistView } from "@/components/watchlist/WatchlistView";
 import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PaperTradingSummary } from "@/components/dashboard/PaperTradingSummary";
 import { IntelligenceSummaryCard } from "@/components/dashboard/IntelligenceSummaryCard";
+import { MarketDataStatusCard } from "@/components/dashboard/MarketDataStatusCard";
 import {
   instruments,
   opportunities,
@@ -87,7 +88,15 @@ export default function DashboardPage() {
       </div>
 
       <SectionPanel title="Watchlist snapshot" description="Tracked instruments at a glance" viewAllHref="/watchlist">
-        <WatchlistTable instruments={watchlistSnapshot} />
+        <WatchlistView instruments={watchlistSnapshot} />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Market Data Status"
+        description="Where instrument prices are currently sourced from"
+        viewAllHref="/system-health"
+      >
+        <MarketDataStatusCard />
       </SectionPanel>
 
       <InfoNote>

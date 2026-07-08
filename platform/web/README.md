@@ -1,13 +1,14 @@
 # Trading Intelligence — Web Prototype
 
-Build 0.9.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
+Build 1.0.0. A dark-themed prototype for a trading intelligence platform, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
-Market, signal, and strategy data is mocked — there is no broker connection and no live trading.
-Paper trades are persisted through a storage-agnostic abstraction: `localStorage` by default, or
-Supabase when configured (see [Persistence mode](#persistence-mode) below) — either way the app
-looks and behaves identically. "Trading Intelligence" is a temporary product name for this
-prototype phase.
+Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
+trades are persisted through a storage-agnostic abstraction: `localStorage` by default, or Supabase
+when configured (see [Persistence mode](#persistence-mode) below). Instrument prices flow through a
+similar storage-agnostic abstraction: mock data by default, or a live external market data provider
+when configured (see [Market data mode](#market-data-mode) below) — either way the app looks and
+behaves identically. "Trading Intelligence" is a temporary product name for this prototype phase.
 
 ## Getting started
 
@@ -42,23 +43,25 @@ npm run lint    # lint the project
   change?" list of factors that would invalidate the call. Strong Buy / Buy / Strong Sell
   recommendations have a "Paper Trade" action; Hold and Avoid do not. Tick up to 3 opportunities
   to compare them side by side.
-- **Watchlist** — tracked instruments with price, change, day range, and volume, plus a Watchlist
+- **Watchlist** — tracked instruments with current price, daily change (value + percent), day
+  range, volume, a last-updated timestamp, and a Mock/External data source badge, plus a Watchlist
   Health summary (Excellent / Good / Weak / Avoid-monitor counts by Intelligence Score).
 - **Signals** — mock signal feed (BUY / SELL / HOLD) with confidence, strategy, and reasoning.
   BUY/SELL signals have a "Paper Trade" action (HOLD signals are not tradeable).
 - **Paper Portfolio** — simulated portfolio starting at £10,000, with open positions, a paper
-  trading performance panel (open/closed counts, realised/unrealised/total P/L), and separate
-  Open trades / Closed trades sections. Open trades can be closed directly from this page. No
-  real execution.
+  trading performance panel (open/closed counts, realised/unrealised/total P/L, valued through the
+  market data provider), and separate Open trades / Closed trades sections showing each open
+  trade's current market price. Open trades can be closed directly from this page. No real
+  execution.
 - **Trade Journal** — a full history of every paper trade placed this session, showing whether
   each came from a Signal or Market Intelligence — the latter also show their recommendation,
   evidence, and invalidation factors — plus exit price, close time, and realised P/L once closed.
   Open trades can be closed from here too. Filters: All / Open / Closed / Signals / Market
   Intelligence / BUY / SELL.
 - **Strategies** — mock rule-based strategies and their recent signal output.
-- **System Health** — status of each platform service (mocked, not connected, running, passive,
-  disabled), plus a live Persistence panel: current mode (Local Browser Storage / Supabase),
-  connection status, and last synchronisation time.
+- **System Health** — status of each platform service (not connected, running, passive, disabled),
+  plus a live Persistence panel (current mode, connection status, last synchronisation time) and a
+  live Market Data panel (provider, connection/mode, last successful refresh, failure reason).
 
 ## Project structure
 
@@ -72,9 +75,11 @@ src/
     trading/              Paper trade open/close confirmation modals, the first-run import
                           modal, Trade Journal view/list/entry
     portfolio/            Paper Portfolio page view (client, reads paper trade state)
-    dashboard/             Dashboard-only widgets (paper trading performance, intelligence summary)
-    watchlist/             Watchlist-only widgets (Watchlist Health summary)
-    system-health/         Live Persistence status panel (mode, connection, last sync)
+    dashboard/             Dashboard-only widgets (paper trading performance, intelligence summary,
+                          market data status)
+    watchlist/             Watchlist-only widgets (WatchlistView client wrapper, Watchlist Health
+                          summary)
+    system-health/         Live Persistence and Market Data status panels
     market-intelligence/  Market Overview, Opportunities (with compare checkboxes), Decision
                           Breakdown, Intelligence Score display/breakdown, Explain Score,
                           Comparison table, Recommendation, and the reusable evidence bullet list
@@ -90,6 +95,9 @@ src/
     persistence/          Storage-agnostic PaperTradeStore interface; LocalStoragePaperTradeStore
                           and SupabasePaperTradeStore implementations; ResilientPaperTradeStore
                           (fallback + status tracking); Supabase-configured detection
+    market-data/          MarketDataProvider interface; MockMarketDataProvider and
+                          ExternalMarketDataProvider implementations; ResilientMarketDataProvider
+                          (fallback + status tracking); provider-configured detection
 ```
 
 Mock data lives entirely in `src/lib/mock` and is typed against `src/lib/types`. Pages import
@@ -135,6 +143,47 @@ the schema; not read by the app). See
 for the schema rationale, and
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md) for the
 infrastructure-level overview.
+
+## Market data mode
+
+Instrument prices are served through a small storage-agnostic interface (`MarketDataProvider`,
+`src/lib/market-data/market-data-provider.ts`) with two real implementations —
+`MockMarketDataProvider` and `ExternalMarketDataProvider` — chosen by `getMarketDataProvider()`:
+
+```bash
+NEXT_PUBLIC_MARKET_DATA_PROVIDER=
+NEXT_PUBLIC_MARKET_DATA_API_KEY=
+```
+
+**Both unset (default): mock prices, no configuration needed.** `npm run dev` just works, and
+Watchlist/Portfolio/Dashboard/System Health all show a "Mock" source and "Mocked" mode.
+
+**Both set:** the app fetches live quotes from Finnhub's quote endpoint — copy `.env.example` to
+`.env.local` and fill these in with a free [finnhub.io](https://finnhub.io) API key.
+`NEXT_PUBLIC_MARKET_DATA_PROVIDER` is currently a display label only (e.g. `Finnhub`), not a
+multi-vendor selector — see [`ExternalMarketDataProvider`](src/lib/market-data/external-market-data-provider.ts)
+to add another vendor.
+
+**If the external provider is configured but fails**, the app does not break:
+`ResilientMarketDataProvider` catches the failure, logs it to the console, falls back to mock
+prices for the rest of the session (no repeated retries), and System Health's Market Data panel
+shows mode "Fallback" with the failure reason. The Dashboard's Market Data Status card always
+reflects the real, current state: provider, mode, last updated, instruments loaded, and whether
+fallback is active.
+
+Only prices for *existing* positions and the Watchlist go through this provider in this build —
+new trade entry prices (placed from Signals or Market Intelligence) still use the static mock
+instrument price; see [`BUILD-1.0.0.md`](../../docs/product/BUILD-1.0.0.md) for why.
+
+## What's new in 1.0.0
+
+A `MarketDataProvider` abstraction — mock by default, a real Finnhub-backed external adapter when
+configured, with the same resilient-fallback pattern Build 0.9.0 introduced for persistence.
+Watchlist now shows live-style current price, change, last-updated time, and data source; Paper
+Portfolio and the Dashboard's paper trading summary value open trades through the provider instead
+of a hardcoded mock function; System Health and the Dashboard both gained a Market Data status
+view. No broker execution, no live order placement, no AI. See
+[`../../docs/product/BUILD-1.0.0.md`](../../docs/product/BUILD-1.0.0.md) for full details.
 
 ## What's new in 0.9.0
 
@@ -223,18 +272,21 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
 ## Explicitly out of scope for this build
 
 - Authentication (Supabase RLS policies remain permissive placeholders until auth exists)
-- Real broker/market data connections
+- Real broker connections, live order placement, or any real execution
 - Real-time sync or multi-tab updates from Supabase (data loads once per page load, not polled)
-- Automatic reconnection within a session after falling back to local storage (reload the page
-  to try Supabase again)
+- Automatic reconnection within a session after falling back to local storage or mock prices
+  (reload the page to try the real provider again)
 - A deployed/linked Supabase project or CI for running migrations
 - Partial trade closes, position netting, or live/scheduled price movement
-- Real market data, technical indicators, or model-generated scoring behind Market Intelligence or
-  the Intelligence Score
+- Multiple external market data vendors (only one Finnhub-shaped adapter exists so far); historical
+  prices, charts, or intraday movement
+- Live pricing for new trade entries (Signals/Market Intelligence still use the static mock
+  instrument price at the moment a trade is placed)
+- Technical indicators or model-generated scoring behind Market Intelligence or the Intelligence
+  Score
 - Persistence of Intelligence Scores at the time a trade was opened (scores are computed from
   mock data on every render, not stored on the trade)
 - AI-generated signals or agents
-- Live order execution
 - Financial advice of any kind
 
 See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
@@ -245,8 +297,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/BUILD-0.5.0.md`](../../docs/product/BUILD-0.5.0.md),
 [`../../docs/product/BUILD-0.6.0.md`](../../docs/product/BUILD-0.6.0.md),
 [`../../docs/product/BUILD-0.7.0.md`](../../docs/product/BUILD-0.7.0.md),
-[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md), and
-[`../../docs/product/BUILD-0.9.0.md`](../../docs/product/BUILD-0.9.0.md) for the full build
+[`../../docs/product/BUILD-0.8.0.md`](../../docs/product/BUILD-0.8.0.md),
+[`../../docs/product/BUILD-0.9.0.md`](../../docs/product/BUILD-0.9.0.md), and
+[`../../docs/product/BUILD-1.0.0.md`](../../docs/product/BUILD-1.0.0.md) for the full build
 records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

@@ -43,9 +43,9 @@ export function Sidebar() {
 
       <div className="border-t border-base-700 px-4 py-4">
         <p className="text-xs leading-relaxed text-ink-600">
-          Build 0.9.0 &middot; Prototype
+          Build 1.0.0 &middot; Prototype
           <br />
-          Mock data only. No live trading.
+          Mock or external prices. No live trading.
         </p>
       </div>
     </aside>

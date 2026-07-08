@@ -8,24 +8,6 @@ function quantityForEntryPrice(entryPrice: number): number {
   return Math.max(1, Math.round(TARGET_NOTIONAL / (entryPrice || 1)));
 }
 
-// Small, fixed per-instrument drift so open positions and closed trades can show a realistic
-// non-zero P/L. This is deliberately NOT a live price feed — it only marks paper trades, and
-// never changes the Watchlist, Dashboard, or any other instrument price display.
-const MOCK_PRICE_DRIFT_PERCENT: Record<string, number> = {
-  AAPL: 0.6,
-  MSFT: 1.1,
-  TSLA: -2.4,
-  NVDA: 2.8,
-  SPY: 0.3,
-};
-
-export function getCurrentMockPrice(symbol: string): number {
-  const instrument = getInstrumentBySymbol(symbol);
-  const basePrice = instrument?.price ?? 0;
-  const driftPercent = MOCK_PRICE_DRIFT_PERCENT[symbol] ?? 0;
-  return Math.round(basePrice * (1 + driftPercent / 100) * 100) / 100;
-}
-
 function pnlDirection(side: PaperTradeSide, entryPrice: number, markPrice: number): number {
   return side === "SELL" ? entryPrice - markPrice : markPrice - entryPrice;
 }
@@ -45,9 +27,7 @@ export function calculateTradePnlPercent(
   return (pnlDirection(trade.side, trade.entryPrice, markPrice) / trade.entryPrice) * 100;
 }
 
-export function buildClosedTrade(trade: PaperTrade): PaperTrade {
-  const exitPrice = getCurrentMockPrice(trade.instrumentSymbol);
-
+export function buildClosedTrade(trade: PaperTrade, exitPrice: number): PaperTrade {
   return {
     ...trade,
     status: "Closed",
@@ -66,7 +46,13 @@ export interface PaperTradePerformance {
   totalPnl: number;
 }
 
-export function calculatePaperTradePerformance(trades: PaperTrade[]): PaperTradePerformance {
+// pricesBySymbol comes from the market data provider (see useMarketQuotes) — this function never
+// sources a price itself. A missing entry (quote not loaded yet) falls back to entry price, which
+// values the position at breakeven rather than showing a stale or wrong number.
+export function calculatePaperTradePerformance(
+  trades: PaperTrade[],
+  pricesBySymbol: Record<string, number>,
+): PaperTradePerformance {
   let openCount = 0;
   let closedCount = 0;
   let realisedPnl = 0;
@@ -78,7 +64,8 @@ export function calculatePaperTradePerformance(trades: PaperTrade[]): PaperTrade
       realisedPnl += trade.realisedPnl ?? 0;
     } else {
       openCount += 1;
-      unrealisedPnl += calculateTradePnl(trade, getCurrentMockPrice(trade.instrumentSymbol));
+      const markPrice = pricesBySymbol[trade.instrumentSymbol] ?? trade.entryPrice;
+      unrealisedPnl += calculateTradePnl(trade, markPrice);
     }
   }
 

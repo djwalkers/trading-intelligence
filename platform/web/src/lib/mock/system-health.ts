@@ -9,12 +9,6 @@ export const marketStatus: MarketStatus = {
 
 export const systemServices: SystemService[] = [
   {
-    id: "market-data",
-    name: "Market Data",
-    state: "mocked",
-    detail: "Serving simulated prices. No live feed connected.",
-  },
-  {
     id: "broker-api",
     name: "Broker API",
     state: "not_connected",

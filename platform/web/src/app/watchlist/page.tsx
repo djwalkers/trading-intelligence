@@ -1,6 +1,6 @@
 import { PageHeader } from "@/components/ui/PageHeader";
 import { SectionPanel } from "@/components/ui/SectionPanel";
-import { WatchlistTable } from "@/components/tables/WatchlistTable";
+import { WatchlistView } from "@/components/watchlist/WatchlistView";
 import { WatchlistHealthSummary } from "@/components/watchlist/WatchlistHealthSummary";
 import { instruments, opportunities } from "@/lib/mock";
 import { summarizeIntelligenceScores } from "@/lib/utils/intelligence-score";
@@ -28,7 +28,7 @@ export default function WatchlistPage() {
       </SectionPanel>
 
       <SectionPanel title="Tracked instruments" description={`${instruments.length} instruments`}>
-        <WatchlistTable instruments={instruments} />
+        <WatchlistView instruments={instruments} />
       </SectionPanel>
     </>
   );

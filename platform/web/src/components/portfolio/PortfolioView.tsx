@@ -9,11 +9,11 @@ import { PaperTradesTable } from "@/components/tables/PaperTradesTable";
 import { CloseTradeModal } from "@/components/trading/CloseTradeModal";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
 import { useCloseTradeFlow } from "@/lib/state/use-close-trade-flow";
+import { useMarketQuotes } from "@/lib/state/use-market-quotes";
 import {
   calculatePaperTradePerformance,
   calculateTradePnl,
   calculateTradePnlPercent,
-  getCurrentMockPrice,
 } from "@/lib/utils/paper-trade";
 import type { PaperPortfolio } from "@/lib/types";
 import { formatCurrencyGBP, formatPercent, formatSignedNumber } from "@/lib/utils/format";
@@ -27,11 +27,14 @@ const RECENT_TRADES_LIMIT = 5;
 
 export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
   const { trades } = usePaperTrades();
-  const { closingTrade, requestClose, confirmClose, cancelClose } = useCloseTradeFlow();
+  const { closingTrade, currentPrice, isPriceLoading, requestClose, confirmClose, cancelClose } =
+    useCloseTradeFlow();
 
   const openTrades = trades.filter((trade) => trade.status === "Open");
   const closedTrades = trades.filter((trade) => trade.status === "Closed");
-  const performance = calculatePaperTradePerformance(trades);
+  const openSymbols = [...new Set(openTrades.map((trade) => trade.instrumentSymbol))];
+  const { prices } = useMarketQuotes(openSymbols);
+  const performance = calculatePaperTradePerformance(trades, prices);
 
   const committedCapital = openTrades.reduce(
     (sum, trade) => sum + trade.quantity * trade.entryPrice,
@@ -39,8 +42,6 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
   );
   const adjustedCashBalance =
     paperPortfolio.cashBalance - committedCapital + performance.realisedPnl;
-
-  const currentPrice = closingTrade ? getCurrentMockPrice(closingTrade.instrumentSymbol) : 0;
 
   return (
     <>
@@ -105,6 +106,7 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
       >
         <PaperTradesTable
           trades={openTrades.slice(0, RECENT_TRADES_LIMIT)}
+          prices={prices}
           onCloseTrade={requestClose}
           emptyMessage="No open paper trades. Place one from the Signals or Market Intelligence page."
         />
@@ -117,6 +119,7 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
       >
         <PaperTradesTable
           trades={closedTrades.slice(0, RECENT_TRADES_LIMIT)}
+          prices={prices}
           onCloseTrade={requestClose}
           emptyMessage="No closed paper trades yet."
         />
@@ -136,8 +139,12 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
           quantity={closingTrade.quantity}
           entryPrice={closingTrade.entryPrice}
           currentPrice={currentPrice}
-          estimatedPnl={calculateTradePnl(closingTrade, currentPrice)}
-          estimatedPnlPercent={calculateTradePnlPercent(closingTrade, currentPrice)}
+          isPriceLoading={isPriceLoading}
+          estimatedPnl={calculateTradePnl(closingTrade, currentPrice ?? closingTrade.entryPrice)}
+          estimatedPnlPercent={calculateTradePnlPercent(
+            closingTrade,
+            currentPrice ?? closingTrade.entryPrice,
+          )}
           onConfirm={confirmClose}
           onCancel={cancelClose}
         />

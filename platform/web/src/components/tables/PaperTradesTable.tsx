@@ -10,12 +10,14 @@ import {
 
 interface PaperTradesTableProps {
   trades: PaperTrade[];
+  prices?: Record<string, number>;
   onCloseTrade: (trade: PaperTrade) => void;
   emptyMessage?: string;
 }
 
 export function PaperTradesTable({
   trades,
+  prices = {},
   onCloseTrade,
   emptyMessage = "No paper trades yet.",
 }: PaperTradesTableProps) {
@@ -33,6 +35,7 @@ export function PaperTradesTable({
             <th className="px-5 py-2.5 font-medium">Source</th>
             <th className="px-5 py-2.5 font-medium">Quantity</th>
             <th className="px-5 py-2.5 font-medium">Entry price</th>
+            <th className="px-5 py-2.5 font-medium">Current price</th>
             <th className="px-5 py-2.5 font-medium">Opened</th>
             <th className="px-5 py-2.5 font-medium">Status</th>
             <th className="px-5 py-2.5 font-medium">Action</th>
@@ -55,6 +58,11 @@ export function PaperTradesTable({
               </td>
               <td className="px-5 py-2.5 text-ink-300">{trade.quantity}</td>
               <td className="px-5 py-2.5 text-ink-300">{formatCurrencyUSD(trade.entryPrice)}</td>
+              <td className="px-5 py-2.5 text-ink-300">
+                {trade.status === "Open" && prices[trade.instrumentSymbol] !== undefined
+                  ? formatCurrencyUSD(prices[trade.instrumentSymbol] as number)
+                  : "—"}
+              </td>
               <td className="whitespace-nowrap px-5 py-2.5 text-ink-500">
                 {formatDateTime(trade.timestamp)}
               </td>

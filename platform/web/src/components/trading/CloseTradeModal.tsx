@@ -11,7 +11,8 @@ interface CloseTradeModalProps {
   side: PaperTradeSide;
   quantity: number;
   entryPrice: number;
-  currentPrice: number;
+  currentPrice: number | null;
+  isPriceLoading: boolean;
   estimatedPnl: number;
   estimatedPnlPercent: number;
   onConfirm: () => void;
@@ -25,6 +26,7 @@ export function CloseTradeModal({
   quantity,
   entryPrice,
   currentPrice,
+  isPriceLoading,
   estimatedPnl,
   estimatedPnlPercent,
   onConfirm,
@@ -73,13 +75,19 @@ export function CloseTradeModal({
             <dd className="text-ink-100">{formatCurrencyUSD(entryPrice)}</dd>
           </div>
           <div>
-            <dt className="text-xs text-ink-500">Current mock price</dt>
-            <dd className="text-ink-100">{formatCurrencyUSD(currentPrice)}</dd>
+            <dt className="text-xs text-ink-500">Current price</dt>
+            <dd className="text-ink-100">
+              {isPriceLoading || currentPrice === null
+                ? "Fetching current price…"
+                : formatCurrencyUSD(currentPrice)}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-ink-500">Estimated realised P/L</dt>
             <dd className={`font-medium ${plToneClass(estimatedPnl)}`}>
-              {formatSignedNumber(estimatedPnl)} ({formatPercent(estimatedPnlPercent)})
+              {isPriceLoading || currentPrice === null
+                ? "—"
+                : `${formatSignedNumber(estimatedPnl)} (${formatPercent(estimatedPnlPercent)})`}
             </dd>
           </div>
         </dl>
@@ -99,8 +107,9 @@ export function CloseTradeModal({
           <button
             type="button"
             onClick={onConfirm}
+            disabled={isPriceLoading || currentPrice === null}
             autoFocus
-            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
+            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Confirm close
           </button>

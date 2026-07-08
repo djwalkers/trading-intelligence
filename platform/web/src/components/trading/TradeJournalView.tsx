@@ -8,7 +8,7 @@ import { TradeJournalList } from "@/components/trading/TradeJournalList";
 import { CloseTradeModal } from "@/components/trading/CloseTradeModal";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
 import { useCloseTradeFlow } from "@/lib/state/use-close-trade-flow";
-import { calculateTradePnl, calculateTradePnlPercent, getCurrentMockPrice } from "@/lib/utils/paper-trade";
+import { calculateTradePnl, calculateTradePnlPercent } from "@/lib/utils/paper-trade";
 import type { PaperTrade } from "@/lib/types";
 
 type TradeJournalFilter =
@@ -52,10 +52,10 @@ function matchesFilter(trade: PaperTrade, filter: TradeJournalFilter): boolean {
 export function TradeJournalView() {
   const { trades } = usePaperTrades();
   const [filter, setFilter] = useState<TradeJournalFilter>("All");
-  const { closingTrade, requestClose, confirmClose, cancelClose } = useCloseTradeFlow();
+  const { closingTrade, currentPrice, isPriceLoading, requestClose, confirmClose, cancelClose } =
+    useCloseTradeFlow();
 
   const filteredTrades = trades.filter((trade) => matchesFilter(trade, filter));
-  const currentPrice = closingTrade ? getCurrentMockPrice(closingTrade.instrumentSymbol) : 0;
 
   return (
     <>
@@ -115,8 +115,12 @@ export function TradeJournalView() {
           quantity={closingTrade.quantity}
           entryPrice={closingTrade.entryPrice}
           currentPrice={currentPrice}
-          estimatedPnl={calculateTradePnl(closingTrade, currentPrice)}
-          estimatedPnlPercent={calculateTradePnlPercent(closingTrade, currentPrice)}
+          isPriceLoading={isPriceLoading}
+          estimatedPnl={calculateTradePnl(closingTrade, currentPrice ?? closingTrade.entryPrice)}
+          estimatedPnlPercent={calculateTradePnlPercent(
+            closingTrade,
+            currentPrice ?? closingTrade.entryPrice,
+          )}
           onConfirm={confirmClose}
           onCancel={cancelClose}
         />
