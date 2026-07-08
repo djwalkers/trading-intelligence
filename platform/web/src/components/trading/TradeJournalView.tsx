@@ -18,6 +18,7 @@ type TradeJournalFilter =
   | "Closed"
   | "Signals"
   | "Market Intelligence"
+  | "Bot"
   | "BUY"
   | "SELL";
 
@@ -27,6 +28,7 @@ const FILTERS: { key: TradeJournalFilter; label: string }[] = [
   { key: "Closed", label: "Closed" },
   { key: "Signals", label: "Signals" },
   { key: "Market Intelligence", label: "Market Intelligence" },
+  { key: "Bot", label: "Bot" },
   { key: "BUY", label: "BUY" },
   { key: "SELL", label: "SELL" },
 ];
@@ -43,6 +45,8 @@ function matchesFilter(trade: PaperTrade, filter: TradeJournalFilter): boolean {
       return trade.source === "Signal";
     case "Market Intelligence":
       return trade.source === "Market Intelligence";
+    case "Bot":
+      return trade.source === "Bot";
     case "BUY":
       return trade.side === "BUY";
     case "SELL":

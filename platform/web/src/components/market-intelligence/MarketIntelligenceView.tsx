@@ -13,16 +13,27 @@ import { ScoreExplanation } from "@/components/market-intelligence/ScoreExplanat
 import { RecommendationPanel } from "@/components/market-intelligence/RecommendationPanel";
 import { EvidenceBulletList } from "@/components/market-intelligence/EvidenceBulletList";
 import { ComparisonTable } from "@/components/market-intelligence/ComparisonTable";
+import { GeneratedByPanel } from "@/components/market-intelligence/GeneratedByPanel";
+import { StrategyBreakdownPanel } from "@/components/market-intelligence/StrategyBreakdownPanel";
+import { AgreementPanel } from "@/components/market-intelligence/AgreementPanel";
 import { PaperTradeModal } from "@/components/trading/PaperTradeModal";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
-import { buildPaperTradeFromOpportunity, isTradeableRecommendation } from "@/lib/utils/paper-trade";
+import { usePaperTradeEntryFlow } from "@/lib/state/use-paper-trade-entry-flow";
+import {
+  buildPaperTradeFromOpportunity,
+  isTradeableRecommendation,
+  MARKET_INTELLIGENCE_MODEL_NAME,
+  quantityForEntryPrice,
+  sideForRecommendation,
+} from "@/lib/utils/paper-trade";
 import { calculateOverallIntelligenceScore } from "@/lib/utils/intelligence-score";
-import type { MarketOverview, MarketStatus, Opportunity, PaperTrade } from "@/lib/types";
+import type { MarketOverview, MarketStatus, Opportunity, StrategyScore } from "@/lib/types";
 
 interface MarketIntelligenceViewProps {
   overview: MarketOverview;
   opportunities: Opportunity[];
   marketStatus: MarketStatus;
+  strategyScores: StrategyScore[];
 }
 
 const MAX_COMPARE = 3;
@@ -31,6 +42,7 @@ export function MarketIntelligenceView({
   overview,
   opportunities,
   marketStatus,
+  strategyScores,
 }: MarketIntelligenceViewProps) {
   const rankedOpportunities = [...opportunities].sort(
     (a, b) => b.confidencePercent - a.confidencePercent,
@@ -38,6 +50,9 @@ export function MarketIntelligenceView({
 
   const [selectedId, setSelectedId] = useState<string | null>(rankedOpportunities[0]?.id ?? null);
   const selected = rankedOpportunities.find((opportunity) => opportunity.id === selectedId);
+  const selectedScore = selected
+    ? strategyScores.find((score) => score.instrumentSymbol === selected.instrumentSymbol)
+    : undefined;
 
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const compareOpportunities = rankedOpportunities.filter((opportunity) =>
@@ -57,18 +72,22 @@ export function MarketIntelligenceView({
   }
 
   const { addTrade, hasTradeForOpportunity } = usePaperTrades();
-  const [pendingTrade, setPendingTrade] = useState<PaperTrade | null>(null);
+  const { pendingSource, entryPriceInfo, isPriceLoading, requestTrade, cancelTrade } =
+    usePaperTradeEntryFlow<Opportunity>();
 
   function handlePaperTrade() {
     if (!selected) return;
-    setPendingTrade(buildPaperTradeFromOpportunity(selected));
+    requestTrade(selected.instrumentSymbol, selected);
   }
 
   function handleConfirm() {
-    if (pendingTrade) {
-      addTrade(pendingTrade);
+    if (pendingSource && entryPriceInfo) {
+      const score = strategyScores.find(
+        (candidate) => candidate.instrumentSymbol === pendingSource.instrumentSymbol,
+      );
+      addTrade(buildPaperTradeFromOpportunity(pendingSource, entryPriceInfo, score));
     }
-    setPendingTrade(null);
+    cancelTrade();
   }
 
   return (
@@ -105,6 +124,8 @@ export function MarketIntelligenceView({
         <div className="flex flex-col gap-6 lg:col-span-3">
           {selected ? (
             <>
+              {selectedScore ? <GeneratedByPanel score={selectedScore} /> : null}
+
               <DecisionBreakdownPanel opportunity={selected} />
 
               <SectionPanel
@@ -137,6 +158,13 @@ export function MarketIntelligenceView({
                 items={selected.invalidationFactors}
                 tone="risk"
               />
+
+              {selectedScore ? (
+                <>
+                  <StrategyBreakdownPanel score={selectedScore} />
+                  <AgreementPanel score={selectedScore} />
+                </>
+              ) : null}
             </>
           ) : (
             <SectionPanel title="Decision breakdown">
@@ -162,18 +190,19 @@ export function MarketIntelligenceView({
         to lose.
       </InfoNote>
 
-      {pendingTrade ? (
+      {pendingSource ? (
         <PaperTradeModal
-          instrumentSymbol={pendingTrade.instrumentSymbol}
-          instrumentName={pendingTrade.instrumentName}
-          side={pendingTrade.side}
-          quantity={pendingTrade.quantity}
-          entryPrice={pendingTrade.entryPrice}
-          confidencePercent={pendingTrade.signalConfidence}
-          strategyName={pendingTrade.strategyName}
+          instrumentSymbol={pendingSource.instrumentSymbol}
+          instrumentName={pendingSource.instrumentName}
+          side={sideForRecommendation(pendingSource.recommendation)}
+          quantity={entryPriceInfo ? quantityForEntryPrice(entryPriceInfo.price) : null}
+          entryPriceInfo={entryPriceInfo}
+          isPriceLoading={isPriceLoading}
+          confidencePercent={pendingSource.confidencePercent}
+          strategyName={MARKET_INTELLIGENCE_MODEL_NAME}
           sourceLabel="Market Intelligence"
           onConfirm={handleConfirm}
-          onCancel={() => setPendingTrade(null)}
+          onCancel={cancelTrade}
         />
       ) : null}
     </>

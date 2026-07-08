@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthProvider } from "@/lib/auth/auth-context";
 import { PaperTradesProvider } from "@/lib/state/paper-trades-context";
+import { BotDecisionLogProvider } from "@/lib/state/bot-decision-log-context";
 import "./globals.css";
 
 const inter = Inter({
@@ -28,7 +29,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="font-sans">
         <AuthProvider>
           <PaperTradesProvider>
-            <AppShell>{children}</AppShell>
+            <BotDecisionLogProvider>
+              <AppShell>{children}</AppShell>
+            </BotDecisionLogProvider>
           </PaperTradesProvider>
         </AuthProvider>
       </body>

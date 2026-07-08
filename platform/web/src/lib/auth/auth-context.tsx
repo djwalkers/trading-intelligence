@@ -24,6 +24,8 @@ interface AuthContextValue {
   signUp: (email: string, password: string) => Promise<AuthResult>;
   signIn: (email: string, password: string) => Promise<AuthResult>;
   signOut: () => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<AuthResult>;
+  updatePassword: (newPassword: string) => Promise<AuthResult>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -97,9 +99,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await client.auth.signOut();
   }
 
+  // Sends a reset email regardless of whether the address is registered — the caller shows the
+  // same "check your inbox" message either way, so as not to reveal which emails have accounts.
+  async function requestPasswordReset(email: string): Promise<AuthResult> {
+    const client = getSupabaseClient();
+    if (!client) return { error: "Authentication is not configured for this deployment." };
+    const redirectTo =
+      typeof window !== "undefined" ? `${window.location.origin}/reset-password` : undefined;
+    const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo });
+    return { error: error?.message ?? null };
+  }
+
+  // Only meaningful once the user has followed a reset-password email link, which establishes a
+  // temporary recovery session (see /reset-password) — updateUser fails with no session at all.
+  async function updatePassword(newPassword: string): Promise<AuthResult> {
+    const client = getSupabaseClient();
+    if (!client) return { error: "Authentication is not configured for this deployment." };
+    const { error } = await client.auth.updateUser({ password: newPassword });
+    return { error: error?.message ?? null };
+  }
+
   return (
     <AuthContext.Provider
-      value={{ isConfigured: configured, isLoading, user, sessionExpired, signUp, signIn, signOut }}
+      value={{
+        isConfigured: configured,
+        isLoading,
+        user,
+        sessionExpired,
+        signUp,
+        signIn,
+        signOut,
+        requestPasswordReset,
+        updatePassword,
+      }}
     >
       {children}
     </AuthContext.Provider>

@@ -1,4 +1,5 @@
 import type {
+  AgreementLevel,
   MarketRegime,
   PaperTradeSource,
   PaperTradeStatus,
@@ -100,6 +101,21 @@ export function recommendationClasses(recommendation: Recommendation): string {
   }
 }
 
+// Same restrained pattern as recommendationClasses — colour flags the two extremes (unanimous
+// agreement, genuine conflict) only; the two in-between levels stay neutral.
+export function agreementLevelClasses(agreement: AgreementLevel): string {
+  switch (agreement) {
+    case "Strong Agreement":
+      return "border-accent-teal/40 bg-accent-teal/10 text-accent-teal";
+    case "Moderate Agreement":
+      return "border-accent-teal/25 bg-base-800 text-ink-100";
+    case "Mixed Signals":
+      return "border-accent-amber/25 bg-base-800 text-ink-100";
+    case "Conflict":
+      return "border-accent-red/40 bg-accent-red/10 text-accent-red";
+  }
+}
+
 export function marketRegimeClasses(regime: MarketRegime): string {
   switch (regime) {
     case "Bullish":
@@ -139,6 +155,8 @@ export function tradeSourceClasses(source: PaperTradeSource): string {
       return "border-base-600 bg-base-800 text-ink-300";
     case "Market Intelligence":
       return "border-accent-blue/25 bg-accent-blue/10 text-accent-blue";
+    case "Bot":
+      return "border-accent-amber/25 bg-accent-amber/10 text-accent-amber";
   }
 }
 

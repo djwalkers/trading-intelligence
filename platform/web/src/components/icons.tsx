@@ -85,6 +85,19 @@ export function JournalIcon(props: IconProps) {
   );
 }
 
+export function BotIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="5" y="8.5" width="14" height="10" rx="2.5" />
+      <path d="M12 8.5V5" />
+      <circle cx="12" cy="3.5" r="1.25" />
+      <circle cx="9" cy="13.5" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="13.5" r="1.1" fill="currentColor" stroke="none" />
+      <path d="M2.5 12.5h2.5M19 12.5h2.5" />
+    </svg>
+  );
+}
+
 export function ChevronRightIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

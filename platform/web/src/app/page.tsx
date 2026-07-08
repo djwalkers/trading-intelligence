@@ -8,6 +8,8 @@ import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PaperTradingSummary } from "@/components/dashboard/PaperTradingSummary";
 import { IntelligenceSummaryCard } from "@/components/dashboard/IntelligenceSummaryCard";
 import { MarketDataStatusCard } from "@/components/dashboard/MarketDataStatusCard";
+import { StrategyEngineSummaryCard } from "@/components/dashboard/StrategyEngineSummaryCard";
+import { BotRunnerPanel } from "@/components/dashboard/BotRunnerPanel";
 import {
   instruments,
   opportunities,
@@ -20,6 +22,7 @@ import {
 import { formatCurrencyGBP, formatPercent } from "@/lib/utils/format";
 import { plToneClass } from "@/lib/utils/style";
 import { summarizeIntelligenceScores } from "@/lib/utils/intelligence-score";
+import { getStrategyEngine, summarizeStrategyScores } from "@/lib/strategy-engine";
 
 export default function DashboardPage() {
   const activeStrategies = strategies.filter((strategy) => strategy.status === "active");
@@ -27,6 +30,8 @@ export default function DashboardPage() {
   const watchlistSnapshot = instruments.slice(0, 5);
   const runningServices = systemServices.filter((service) => service.state === "running").length;
   const intelligenceSummary = summarizeIntelligenceScores(opportunities);
+  const strategyScores = getStrategyEngine().evaluateAll(instruments);
+  const strategyEngineSummary = summarizeStrategyScores(strategyScores);
 
   return (
     <>
@@ -88,7 +93,7 @@ export default function DashboardPage() {
       </div>
 
       <SectionPanel title="Watchlist snapshot" description="Tracked instruments at a glance" viewAllHref="/watchlist">
-        <WatchlistView instruments={watchlistSnapshot} />
+        <WatchlistView instruments={watchlistSnapshot} strategyScores={strategyScores} />
       </SectionPanel>
 
       <SectionPanel
@@ -97,6 +102,22 @@ export default function DashboardPage() {
         viewAllHref="/system-health"
       >
         <MarketDataStatusCard />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Strategy Summary"
+        description="Deterministic Strategy Engine output across every tracked instrument"
+        viewAllHref="/market-intelligence"
+      >
+        <StrategyEngineSummaryCard summary={strategyEngineSummary} />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Bot Runner"
+        description="Manually-triggered autonomous paper trading — one scan, at most one trade"
+        viewAllHref="/bot-decisions"
+      >
+        <BotRunnerPanel instruments={instruments} />
       </SectionPanel>
 
       <InfoNote>

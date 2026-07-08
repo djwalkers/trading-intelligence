@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect } from "react";
-import type { PaperTradeSide } from "@/lib/types";
-import { formatCurrencyUSD } from "@/lib/utils/format";
+import type { EntryPriceInfo, PaperTradeSide } from "@/lib/types";
+import { formatCurrencyUSD, formatDateTime } from "@/lib/utils/format";
+import { Badge } from "@/components/ui/Badge";
 
 interface PaperTradeModalProps {
   instrumentSymbol: string;
   instrumentName: string;
   side: PaperTradeSide;
-  quantity: number;
-  entryPrice: number;
+  quantity: number | null;
+  entryPriceInfo: EntryPriceInfo | null;
+  isPriceLoading: boolean;
   confidencePercent: number;
   strategyName: string;
   sourceLabel?: string;
@@ -22,7 +24,8 @@ export function PaperTradeModal({
   instrumentName,
   side,
   quantity,
-  entryPrice,
+  entryPriceInfo,
+  isPriceLoading,
   confidencePercent,
   strategyName,
   sourceLabel,
@@ -36,6 +39,8 @@ export function PaperTradeModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onCancel]);
+
+  const isReady = !isPriceLoading && entryPriceInfo !== null && quantity !== null;
 
   return (
     <div
@@ -71,11 +76,37 @@ export function PaperTradeModal({
           </div>
           <div>
             <dt className="text-xs text-ink-500">Quantity</dt>
-            <dd className="text-ink-100">{quantity}</dd>
+            <dd className="text-ink-100">{quantity === null ? "Calculating…" : quantity}</dd>
           </div>
           <div>
             <dt className="text-xs text-ink-500">Entry price</dt>
-            <dd className="text-ink-100">{formatCurrencyUSD(entryPrice)}</dd>
+            <dd className="text-ink-100">
+              {entryPriceInfo === null ? "Fetching current price…" : formatCurrencyUSD(entryPriceInfo.price)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-500">Price source</dt>
+            <dd className="text-ink-100">
+              {entryPriceInfo === null ? (
+                "—"
+              ) : (
+                <Badge
+                  className={
+                    entryPriceInfo.source === "External"
+                      ? "border-accent-blue/25 bg-accent-blue/10 text-accent-blue"
+                      : "border-base-600 bg-base-800 text-ink-300"
+                  }
+                >
+                  {entryPriceInfo.source} &middot; {entryPriceInfo.provider}
+                </Badge>
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-500">Price last updated</dt>
+            <dd className="text-ink-100">
+              {entryPriceInfo === null ? "—" : formatDateTime(entryPriceInfo.timestamp)}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-ink-500">Strategy</dt>
@@ -86,6 +117,13 @@ export function PaperTradeModal({
             <dd className="text-ink-100">{confidencePercent}%</dd>
           </div>
         </dl>
+
+        {entryPriceInfo?.mode === "Fallback" ? (
+          <div className="mt-5 rounded-xl2 border border-accent-amber/30 bg-accent-amber/10 px-4 py-3 text-xs leading-relaxed text-accent-amber">
+            Live market data was unavailable when this price was fetched — this trade uses a mock
+            price instead.
+          </div>
+        ) : null}
 
         <div className="mt-5 rounded-xl2 border border-accent-amber/30 bg-accent-amber/10 px-4 py-3 text-xs leading-relaxed text-accent-amber">
           This is prototype paper trading only. No real order will be placed.
@@ -102,8 +140,9 @@ export function PaperTradeModal({
           <button
             type="button"
             onClick={onConfirm}
+            disabled={!isReady}
             autoFocus
-            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
+            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Confirm paper trade
           </button>

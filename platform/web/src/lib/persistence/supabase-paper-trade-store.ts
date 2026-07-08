@@ -1,11 +1,18 @@
+import type {
+  AgreementLevel,
+  EvidenceRating,
+  MarketDataSource,
+  PaperTrade,
+  Recommendation,
+} from "@/lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { EvidenceRating, PaperTrade, Recommendation } from "@/lib/types";
 import type { PaperTradeStore } from "./paper-trade-store";
 import { AuthRequiredError } from "./auth-required-error";
 
-// Row shapes for the schema created in Build 0.7.0, extended in Build 1.1.0 with user_id
-// (platform/web/supabase/migrations/). Hand-written rather than generated, since no live
-// Supabase project is linked to this repo to codegen against.
+// Row shapes for the schema created in Build 0.7.0, extended with user_id in Build 1.1.0, entry
+// price provenance in Build 1.2.0, Strategy Engine metadata in Build 1.3.0, Bot Runner metadata in
+// Mission 1, and the scan id in Mission 1.1 (platform/web/supabase/migrations/). Hand-written
+// rather than generated, since no live Supabase project is linked to this repo to codegen against.
 interface PaperTradeRow {
   id: string;
   client_trade_id: string;
@@ -15,7 +22,7 @@ interface PaperTradeRow {
   quantity: number | string;
   entry_price: number | string;
   status: "Open" | "Closed";
-  source: "Signal" | "Market Intelligence";
+  source: "Signal" | "Market Intelligence" | "Bot";
   strategy_name: string;
   reason: string;
   signal_confidence: number | string;
@@ -27,6 +34,16 @@ interface PaperTradeRow {
   realised_pnl_percent: number | string | null;
   opened_at: string;
   user_id: string | null;
+  entry_price_source: MarketDataSource | null;
+  entry_price_provider: string | null;
+  entry_price_timestamp: string | null;
+  primary_strategy: string | null;
+  strategy_agreement: AgreementLevel | null;
+  overall_confidence: number | string | null;
+  evidence_summary: string | null;
+  source_bot_decision_id: string | null;
+  risk_checks_summary: string | null;
+  scan_id: string | null;
 }
 
 interface TradeIntelligenceRow {
@@ -57,6 +74,16 @@ function toDbTrade(trade: PaperTrade) {
     realised_pnl: trade.realisedPnl ?? null,
     realised_pnl_percent: trade.realisedPnlPercent ?? null,
     opened_at: trade.timestamp,
+    entry_price_source: trade.entryPriceSource ?? null,
+    entry_price_provider: trade.entryPriceProvider ?? null,
+    entry_price_timestamp: trade.entryPriceTimestamp ?? null,
+    primary_strategy: trade.primaryStrategy ?? null,
+    strategy_agreement: trade.strategyAgreement ?? null,
+    overall_confidence: trade.overallConfidence ?? null,
+    evidence_summary: trade.evidenceSummary ?? null,
+    source_bot_decision_id: trade.sourceBotDecisionId ?? null,
+    risk_checks_summary: trade.riskChecksSummary ?? null,
+    scan_id: trade.scanId ?? null,
   };
 }
 
@@ -85,6 +112,16 @@ function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceRow | nu
     closedAt: row.closed_at ?? undefined,
     realisedPnl: toNumber(row.realised_pnl),
     realisedPnlPercent: toNumber(row.realised_pnl_percent),
+    entryPriceSource: row.entry_price_source ?? undefined,
+    entryPriceProvider: row.entry_price_provider ?? undefined,
+    entryPriceTimestamp: row.entry_price_timestamp ?? undefined,
+    primaryStrategy: row.primary_strategy ?? undefined,
+    strategyAgreement: row.strategy_agreement ?? undefined,
+    overallConfidence: toNumber(row.overall_confidence),
+    evidenceSummary: row.evidence_summary ?? undefined,
+    sourceBotDecisionId: row.source_bot_decision_id ?? undefined,
+    riskChecksSummary: row.risk_checks_summary ?? undefined,
+    scanId: row.scan_id ?? undefined,
     intelligence: intelligence
       ? {
           recommendation: intelligence.recommendation,

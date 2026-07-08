@@ -1,10 +1,17 @@
-import type { Opportunity, PaperTrade, PaperTradeSide, Recommendation, Signal } from "@/lib/types";
-import { getInstrumentBySymbol } from "@/lib/mock/instruments";
+import type {
+  EntryPriceInfo,
+  Opportunity,
+  PaperTrade,
+  PaperTradeSide,
+  Recommendation,
+  Signal,
+  StrategyScore,
+} from "@/lib/types";
 
 const TARGET_NOTIONAL = 250;
-const MARKET_INTELLIGENCE_MODEL_NAME = "Market Intelligence Engine";
+export const MARKET_INTELLIGENCE_MODEL_NAME = "Market Intelligence Engine";
 
-function quantityForEntryPrice(entryPrice: number): number {
+export function quantityForEntryPrice(entryPrice: number): number {
   return Math.max(1, Math.round(TARGET_NOTIONAL / (entryPrice || 1)));
 }
 
@@ -76,9 +83,11 @@ export function isTradeableSignal(signal: Signal): boolean {
   return signal.signalType === "BUY" || signal.signalType === "SELL";
 }
 
-export function buildPaperTradeFromSignal(signal: Signal): PaperTrade {
-  const instrument = getInstrumentBySymbol(signal.instrumentSymbol);
-  const entryPrice = instrument?.price ?? 0;
+// entryPriceInfo comes from MarketDataProvider (see usePaperTradeEntryFlow) — this function never
+// sources a price itself, matching the pattern already established for valuing existing trades
+// (calculatePaperTradePerformance) rather than duplicating a second, independent price lookup.
+export function buildPaperTradeFromSignal(signal: Signal, entryPriceInfo: EntryPriceInfo): PaperTrade {
+  const entryPrice = entryPriceInfo.price;
 
   return {
     id: `trade-${signal.id}-${Date.now()}`,
@@ -94,6 +103,9 @@ export function buildPaperTradeFromSignal(signal: Signal): PaperTrade {
     reason: signal.reason,
     source: "Signal",
     sourceSignalId: signal.id,
+    entryPriceSource: entryPriceInfo.source,
+    entryPriceProvider: entryPriceInfo.provider,
+    entryPriceTimestamp: entryPriceInfo.timestamp,
   };
 }
 
@@ -107,13 +119,19 @@ export function isTradeableRecommendation(recommendation: Recommendation): boole
   );
 }
 
-function sideForRecommendation(recommendation: Recommendation): PaperTradeSide {
+export function sideForRecommendation(recommendation: Recommendation): PaperTradeSide {
   return recommendation === "Strong Sell" ? "SELL" : "BUY";
 }
 
-export function buildPaperTradeFromOpportunity(opportunity: Opportunity): PaperTrade {
-  const instrument = getInstrumentBySymbol(opportunity.instrumentSymbol);
-  const entryPrice = instrument?.price ?? 0;
+// strategyScore is optional only for type-level flexibility (e.g. tests constructing a trade
+// without running the full engine) — every real call site in the app has one, since Market
+// Intelligence always evaluates the engine for its opportunities.
+export function buildPaperTradeFromOpportunity(
+  opportunity: Opportunity,
+  entryPriceInfo: EntryPriceInfo,
+  strategyScore?: StrategyScore,
+): PaperTrade {
+  const entryPrice = entryPriceInfo.price;
 
   return {
     id: `trade-${opportunity.id}-${Date.now()}`,
@@ -135,5 +153,12 @@ export function buildPaperTradeFromOpportunity(opportunity: Opportunity): PaperT
       evidenceFactors: opportunity.whyEvidence,
       invalidationFactors: opportunity.invalidationFactors,
     },
+    entryPriceSource: entryPriceInfo.source,
+    entryPriceProvider: entryPriceInfo.provider,
+    entryPriceTimestamp: entryPriceInfo.timestamp,
+    primaryStrategy: strategyScore?.primaryStrategyName,
+    strategyAgreement: strategyScore?.agreement,
+    overallConfidence: strategyScore?.overallConfidence,
+    evidenceSummary: strategyScore?.agreementExplanation,
   };
 }

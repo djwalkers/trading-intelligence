@@ -7,6 +7,7 @@ import {
   formatSignedNumber,
 } from "@/lib/utils/format";
 import {
+  agreementLevelClasses,
   paperTradeStatusClasses,
   plToneClass,
   recommendationClasses,
@@ -69,6 +70,38 @@ export function TradeJournalEntry({ trade, onCloseTrade }: TradeJournalEntryProp
       ) : null}
 
       <p className="text-sm text-ink-400">{trade.reason}</p>
+
+      {trade.primaryStrategy ? (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-base-700 bg-base-900 px-3 py-2 text-xs text-ink-400">
+          <span>
+            Primary strategy: <span className="text-ink-200">{trade.primaryStrategy}</span>
+          </span>
+          {trade.strategyAgreement ? (
+            <span className="flex items-center gap-1.5">
+              Agreement:
+              <Badge className={agreementLevelClasses(trade.strategyAgreement)}>
+                {trade.strategyAgreement}
+              </Badge>
+            </span>
+          ) : null}
+          {trade.overallConfidence !== undefined ? (
+            <span>
+              Overall confidence: <span className="text-ink-200">{trade.overallConfidence}%</span>
+            </span>
+          ) : null}
+          {trade.evidenceSummary ? (
+            <span className="basis-full text-ink-400">{trade.evidenceSummary}</span>
+          ) : null}
+          {trade.riskChecksSummary ? (
+            <span className="basis-full text-ink-500">Risk checks: {trade.riskChecksSummary}</span>
+          ) : null}
+          {trade.scanId ? (
+            <span>
+              Scan: <span className="text-ink-200">{trade.scanId}</span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {trade.intelligence ? (
         <div className="mt-1 flex flex-col gap-3 rounded-xl2 border border-base-700 bg-base-850 px-4 py-3">

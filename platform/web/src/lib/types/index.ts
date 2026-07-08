@@ -6,3 +6,4 @@ export * from "./system-health";
 export * from "./paper-trade";
 export * from "./market-intelligence";
 export * from "./market-data";
+export * from "./strategy-engine";

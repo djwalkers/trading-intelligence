@@ -10,14 +10,14 @@ import { Footer } from "@/components/layout/Footer";
 import { ImportHistoryModal } from "@/components/trading/ImportHistoryModal";
 import { AuthGate } from "@/components/layout/AuthGate";
 
-const AUTH_ROUTES = new Set(["/sign-in", "/sign-up"]);
+const AUTH_ROUTES = new Set(["/sign-in", "/sign-up", "/forgot-password", "/reset-password"]);
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
-  // Sign-in/sign-up render a minimal centered layout — no sidebar, no persistence/import
-  // widgets that assume an authenticated app session — but keep the same dark theme and the
-  // prototype banner.
+  // Sign-in/sign-up/forgot-password/reset-password render a minimal centered layout — no
+  // sidebar, no persistence/import widgets that assume an authenticated app session — but keep
+  // the same dark theme and the prototype banner.
   if (AUTH_ROUTES.has(pathname)) {
     return (
       <div className="flex min-h-screen flex-col bg-base-950">

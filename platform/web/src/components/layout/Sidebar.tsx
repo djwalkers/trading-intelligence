@@ -66,7 +66,7 @@ export function Sidebar() {
 
       <div className="border-t border-base-700 px-4 py-4">
         <p className="text-xs leading-relaxed text-ink-600">
-          Build 1.1.0 &middot; Prototype
+          Build 1.3.0 &middot; Mission 1.1
           <br />
           Mock or external prices. No live trading.
         </p>

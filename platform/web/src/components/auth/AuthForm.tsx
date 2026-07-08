@@ -74,7 +74,14 @@ export function AuthForm({ mode }: AuthFormProps) {
         </label>
 
         <label className="flex flex-col gap-1.5 text-sm">
-          <span className="text-ink-300">Password</span>
+          <div className="flex items-center justify-between">
+            <span className="text-ink-300">Password</span>
+            {mode === "sign-in" ? (
+              <Link href="/forgot-password" className="text-xs text-accent-teal hover:underline">
+                Forgot password?
+              </Link>
+            ) : null}
+          </div>
           <input
             type="password"
             required

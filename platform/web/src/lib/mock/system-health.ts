@@ -21,12 +21,6 @@ export const systemServices: SystemService[] = [
     detail: "Persistence layer not yet provisioned.",
   },
   {
-    id: "strategy-engine",
-    name: "Strategy Engine",
-    state: "running",
-    detail: "Evaluating mock strategies against mock market data.",
-  },
-  {
     id: "risk-engine",
     name: "Risk Engine",
     state: "passive",

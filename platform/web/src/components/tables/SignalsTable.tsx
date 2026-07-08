@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
-import type { PaperTrade, Signal } from "@/lib/types";
+import type { Signal } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { formatDateTime } from "@/lib/utils/format";
 import { signalToneClasses } from "@/lib/utils/style";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
-import { buildPaperTradeFromSignal, isTradeableSignal } from "@/lib/utils/paper-trade";
+import { usePaperTradeEntryFlow } from "@/lib/state/use-paper-trade-entry-flow";
+import { buildPaperTradeFromSignal, isTradeableSignal, quantityForEntryPrice } from "@/lib/utils/paper-trade";
 import { PaperTradeModal } from "@/components/trading/PaperTradeModal";
 
 interface SignalsTableProps {
@@ -15,17 +15,18 @@ interface SignalsTableProps {
 
 export function SignalsTable({ signals }: SignalsTableProps) {
   const { addTrade, hasTradeForSignal } = usePaperTrades();
-  const [pendingTrade, setPendingTrade] = useState<PaperTrade | null>(null);
+  const { pendingSource, entryPriceInfo, isPriceLoading, requestTrade, cancelTrade } =
+    usePaperTradeEntryFlow<Signal>();
 
   if (signals.length === 0) {
     return <p className="px-5 py-6 text-sm text-ink-500">No signals generated yet.</p>;
   }
 
   function handleConfirm() {
-    if (pendingTrade) {
-      addTrade(pendingTrade);
+    if (pendingSource && entryPriceInfo) {
+      addTrade(buildPaperTradeFromSignal(pendingSource, entryPriceInfo));
     }
-    setPendingTrade(null);
+    cancelTrade();
   }
 
   return (
@@ -73,7 +74,7 @@ export function SignalsTable({ signals }: SignalsTableProps) {
                     ) : (
                       <button
                         type="button"
-                        onClick={() => setPendingTrade(buildPaperTradeFromSignal(signal))}
+                        onClick={() => requestTrade(signal.instrumentSymbol, signal)}
                         className="whitespace-nowrap rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-3 py-1.5 text-xs font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
                       >
                         Paper Trade
@@ -87,17 +88,18 @@ export function SignalsTable({ signals }: SignalsTableProps) {
         </table>
       </div>
 
-      {pendingTrade ? (
+      {pendingSource ? (
         <PaperTradeModal
-          instrumentSymbol={pendingTrade.instrumentSymbol}
-          instrumentName={pendingTrade.instrumentName}
-          side={pendingTrade.side}
-          quantity={pendingTrade.quantity}
-          entryPrice={pendingTrade.entryPrice}
-          confidencePercent={pendingTrade.signalConfidence}
-          strategyName={pendingTrade.strategyName}
+          instrumentSymbol={pendingSource.instrumentSymbol}
+          instrumentName={pendingSource.instrumentName}
+          side={pendingSource.signalType === "SELL" ? "SELL" : "BUY"}
+          quantity={entryPriceInfo ? quantityForEntryPrice(entryPriceInfo.price) : null}
+          entryPriceInfo={entryPriceInfo}
+          isPriceLoading={isPriceLoading}
+          confidencePercent={pendingSource.confidencePercent}
+          strategyName={pendingSource.strategyName}
           onConfirm={handleConfirm}
-          onCancel={() => setPendingTrade(null)}
+          onCancel={cancelTrade}
         />
       ) : null}
     </>

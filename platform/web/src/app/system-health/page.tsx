@@ -5,20 +5,27 @@ import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PersistenceStatusPanel } from "@/components/system-health/PersistenceStatusPanel";
 import { MarketDataStatusPanel } from "@/components/system-health/MarketDataStatusPanel";
 import { AuthStatusPanel } from "@/components/system-health/AuthStatusPanel";
-import { marketStatus, systemServices } from "@/lib/mock";
+import { StrategyEngineStatusPanel } from "@/components/system-health/StrategyEngineStatusPanel";
+import { BotRunnerStatusPanel } from "@/components/system-health/BotRunnerStatusPanel";
+import { marketStatus, systemServices, instruments } from "@/lib/mock";
 import { Badge } from "@/components/ui/Badge";
 import { DotIcon } from "@/components/icons";
+import { getStrategyEngine } from "@/lib/strategy-engine";
 
 export const metadata = {
   title: "System Health | Trading Intelligence Platform",
 };
 
 export default function SystemHealthPage() {
+  const { scores: strategyScores, evaluationTimeMs } =
+    getStrategyEngine().evaluateAllWithTiming(instruments);
+  const strategiesLoaded = getStrategyEngine().strategyCount;
+
   return (
     <>
       <PageHeader
         title="System Health"
-        description="Current status of each platform service in Build 1.1.0 of this prototype."
+        description="Current status of each platform service, including Mission 1.1's Bot Runner."
       />
 
       <div className="panel flex items-center justify-between px-5 py-4">
@@ -28,7 +35,7 @@ export default function SystemHealthPage() {
           <span className="text-ink-500">&middot; {marketStatus.nextEvent}</span>
         </div>
         <Badge className="border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
-          Build 1.1.0
+          Build 1.3.0 · Mission 1.1
         </Badge>
       </div>
 
@@ -51,6 +58,24 @@ export default function SystemHealthPage() {
         description="Where instrument prices are currently being sourced from"
       >
         <MarketDataStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Strategy Engine"
+        description="Status of the deterministic strategy evaluation engine"
+      >
+        <StrategyEngineStatusPanel
+          strategiesLoaded={strategiesLoaded}
+          instrumentsEvaluated={strategyScores.length}
+          evaluationTimeMs={evaluationTimeMs}
+        />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Bot Runner"
+        description="Manually-triggered autonomous paper trading status"
+      >
+        <BotRunnerStatusPanel />
       </SectionPanel>
 
       <SectionPanel

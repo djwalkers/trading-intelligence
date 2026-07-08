@@ -1,4 +1,4 @@
-import type { Instrument, MarketDataSource, MarketQuote } from "@/lib/types";
+import type { Instrument, MarketDataSource, MarketQuote, StrategyScore } from "@/lib/types";
 import { formatCompactNumber, formatCurrencyUSD, formatDateTime, formatPercent } from "@/lib/utils/format";
 import { plToneClass } from "@/lib/utils/style";
 import { Badge } from "@/components/ui/Badge";
@@ -7,9 +7,18 @@ interface WatchlistTableProps {
   instruments: Instrument[];
   quotes?: Record<string, MarketQuote>;
   dataSource?: MarketDataSource;
+  strategyScores?: StrategyScore[];
 }
 
-export function WatchlistTable({ instruments, quotes = {}, dataSource }: WatchlistTableProps) {
+export function WatchlistTable({
+  instruments,
+  quotes = {},
+  dataSource,
+  strategyScores,
+}: WatchlistTableProps) {
+  const scoresBySymbol = new Map(
+    (strategyScores ?? []).map((score) => [score.instrumentSymbol, score]),
+  );
   return (
     <div className="overflow-x-auto scrollbar-thin">
       <table className="w-full min-w-[820px] border-collapse text-sm">
@@ -22,6 +31,7 @@ export function WatchlistTable({ instruments, quotes = {}, dataSource }: Watchli
             <th className="px-5 py-2.5 font-medium">Volume</th>
             <th className="px-5 py-2.5 font-medium">Updated</th>
             {dataSource ? <th className="px-5 py-2.5 font-medium">Source</th> : null}
+            {strategyScores ? <th className="px-5 py-2.5 font-medium">Primary strategy</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -30,6 +40,7 @@ export function WatchlistTable({ instruments, quotes = {}, dataSource }: Watchli
             const price = quote?.price ?? instrument.price;
             const changeAbsolute = quote?.changeAbsolute ?? instrument.changeAbsolute;
             const changePercent = quote?.changePercent ?? instrument.changePercent;
+            const score = scoresBySymbol.get(instrument.symbol);
 
             return (
               <tr key={instrument.symbol} className="border-b border-base-700/60 last:border-0">
@@ -62,6 +73,9 @@ export function WatchlistTable({ instruments, quotes = {}, dataSource }: Watchli
                       {dataSource}
                     </Badge>
                   </td>
+                ) : null}
+                {strategyScores ? (
+                  <td className="px-5 py-2.5 text-ink-300">{score?.primaryStrategyName ?? "—"}</td>
                 ) : null}
               </tr>
             );
