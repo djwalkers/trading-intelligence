@@ -1,4 +1,6 @@
 export { runBotScan } from "./bot-runner";
+export { executeBotScan } from "./bot-execution-context";
+export type { BotExecutionContext } from "./bot-execution-context";
 export { reserveScanId } from "./scan-id";
 export {
   buildExposureSnapshot,
@@ -19,4 +21,11 @@ export {
   MIN_ADD_INTERVAL_MINUTES,
 } from "./position-manager";
 export type { PositionContext, PositionDecision } from "./position-manager";
-export type { BotCandidateEvaluation, BotDecision, BotRiskCheck, BotScanResult, BotTraceStep } from "./types";
+export type {
+  BotCandidateEvaluation,
+  BotDecision,
+  BotRiskCheck,
+  BotScanResult,
+  BotTraceStep,
+  ScanTriggerType,
+} from "./types";

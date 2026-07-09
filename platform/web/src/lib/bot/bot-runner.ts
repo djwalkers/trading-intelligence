@@ -14,9 +14,16 @@ import { getMarketDataProvider } from "@/lib/market-data/get-market-data-provide
 import { isTradeableRecommendation, sideForRecommendation } from "@/lib/utils/paper-trade";
 import { buildExposureSnapshot, evaluatePortfolioRisk } from "./portfolio-risk";
 import { buildPositionContext, evaluatePosition } from "./position-manager";
-import type { BotCandidateEvaluation, BotDecision, BotRiskCheck, BotScanResult, BotTraceStep } from "./types";
+import type {
+  BotCandidateEvaluation,
+  BotDecision,
+  BotRiskCheck,
+  BotScanResult,
+  BotTraceStep,
+  ScanTriggerType,
+} from "./types";
 
-// Hardcoded, disclosed, and deliberately simple — this is Mission 1/1.1/2/3, not a configurable
+// Hardcoded, disclosed, and deliberately simple — this is Mission 1/1.1/2/3/4, not a configurable
 // risk engine. Adjusting any of these means editing this file, not a settings screen.
 const MIN_CONFIDENCE = 75;
 const MAX_NOTIONAL_GBP = 250;
@@ -179,6 +186,7 @@ export async function runBotScan(
   instruments: Instrument[],
   trades: PaperTrade[],
   scanId: string,
+  triggerType: ScanTriggerType,
 ): Promise<BotScanResult> {
   const startedAt = performance.now();
   const decisionId = makeDecisionId();
@@ -229,6 +237,7 @@ export async function runBotScan(
         id: decisionId,
         scanId,
         timestamp,
+        triggerType,
         instrumentsScanned,
         candidates: [],
         portfolioSnapshotBefore,
@@ -495,6 +504,7 @@ export async function runBotScan(
         id: decisionId,
         scanId,
         timestamp,
+        triggerType,
         instrumentsScanned,
         candidates: candidateEvaluations,
         portfolioSnapshotBefore,
@@ -524,6 +534,7 @@ export async function runBotScan(
       id: decisionId,
       scanId,
       timestamp,
+      triggerType,
       instrumentsScanned,
       candidates: candidateEvaluations,
       portfolioSnapshotBefore,

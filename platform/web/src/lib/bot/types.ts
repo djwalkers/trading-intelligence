@@ -12,6 +12,11 @@ export interface BotRiskCheck {
   detail: string;
 }
 
+// Whether a scan was triggered by a human clicking "Run Bot Scan" or by the scheduler (Mission 4)
+// ticking on its own. Purely descriptive — every rule (individual, Position Manager, portfolio
+// risk) applies identically regardless of trigger.
+export type ScanTriggerType = "Manual" | "Scheduled";
+
 // One ranked candidate's full evaluation — whether it was the one that opened a trade, was
 // rejected in favour of trying the next-ranked candidate, or (last in the list) rejected with
 // nothing left to fall back to. Every risk check for a candidate always runs and is always
@@ -61,6 +66,7 @@ export interface BotDecision {
   id: string;
   scanId: string;
   timestamp: string;
+  triggerType: ScanTriggerType;
   instrumentsScanned: string[];
   // Every candidate walked during the fallback loop, in ranked order — not just the winner.
   candidates: BotCandidateEvaluation[];

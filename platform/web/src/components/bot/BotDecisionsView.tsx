@@ -56,7 +56,10 @@ export function BotDecisionsView() {
           <div key={decision.id} className="flex flex-col gap-3 px-5 py-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-col gap-0.5">
-                <span className="text-sm font-medium text-ink-100">{decision.scanId}</span>
+                <span className="text-sm font-medium text-ink-100">
+                  {decision.scanId}{" "}
+                  <span className="text-xs font-normal text-ink-500">· {decision.triggerType}</span>
+                </span>
                 <span className="text-xs text-ink-500">{formatDateTime(decision.timestamp)}</span>
               </div>
               <Badge

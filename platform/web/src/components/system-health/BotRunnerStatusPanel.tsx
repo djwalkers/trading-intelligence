@@ -2,6 +2,7 @@
 
 import { Badge } from "@/components/ui/Badge";
 import { useBotDecisionLog } from "@/lib/state/bot-decision-log-context";
+import { useBotScheduler, SCHEDULE_INTERVAL_MINUTES } from "@/lib/state/bot-scheduler-context";
 import { formatDateTime } from "@/lib/utils/format";
 import {
   MAX_CAPITAL_DEPLOYED_PERCENT,
@@ -14,11 +15,18 @@ import {
 } from "@/lib/bot";
 
 // Live, not mocked — reads the same local decision log the Dashboard's "Run Bot Scan" button
-// writes to and the Bot Decisions page reads from.
+// writes to and the Bot Decisions page reads from, plus the shared scheduler state (Mission 4).
+// Ticking only actually advances while the Dashboard's BotRunnerPanel is mounted — this panel can
+// still show the last-known schedule state from any page, it just won't change further until the
+// Dashboard is open again (see docs/product/MISSION-4-SCHEDULED-BOT-SCANS.md).
 export function BotRunnerStatusPanel() {
   const { decisions } = useBotDecisionLog();
+  const scheduler = useBotScheduler();
   const last = decisions[0] ?? null;
+  const lastScheduled = decisions.find((decision) => decision.triggerType === "Scheduled") ?? null;
   const rejectedCount = last ? last.candidates.filter((candidate) => candidate.outcome === "Rejected").length : 0;
+  const schedulerLabel = scheduler.mode === "Manual" ? "Manual" : scheduler.status;
+  const currentIntervalMinutes = SCHEDULE_INTERVAL_MINUTES[scheduler.mode];
 
   return (
     <div className="divide-y divide-base-700/60">
@@ -26,10 +34,70 @@ export function BotRunnerStatusPanel() {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-ink-100">Bot Runner</span>
           <span className="text-xs text-ink-500">
-            Triggered manually from the Dashboard — no scheduled or autonomous runs in this build.
+            Triggered manually from the Dashboard, or automatically on a schedule (Mission 4).
           </span>
         </div>
-        <Badge className="border-base-600 bg-base-800 text-ink-300">Manual Mode</Badge>
+        <Badge
+          className={
+            scheduler.status === "Running"
+              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+              : "border-base-600 bg-base-800 text-ink-300"
+          }
+        >
+          {scheduler.status === "Running" ? "Running" : "Manual Mode"}
+        </Badge>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-ink-100">Scheduler</span>
+          <span className="text-xs text-ink-500">
+            Browser-based only — advances while the Dashboard tab is open (Mission 4).
+          </span>
+        </div>
+        <Badge
+          className={
+            schedulerLabel === "Running"
+              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+              : "border-base-600 bg-base-800 text-ink-300"
+          }
+        >
+          {schedulerLabel}
+        </Badge>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-ink-100">Current interval</span>
+          <span className="text-xs text-ink-500">Time between scheduled scans</span>
+        </div>
+        <span className="text-sm text-ink-300">
+          {currentIntervalMinutes ? `${currentIntervalMinutes} minutes` : "None (manual only)"}
+        </span>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-ink-100">Last scheduled scan</span>
+          <span className="text-xs text-ink-500">
+            {lastScheduled ? lastScheduled.scanId : "No scheduled scans recorded yet in this browser"}
+          </span>
+        </div>
+        <span className="text-sm text-ink-300">
+          {lastScheduled ? formatDateTime(lastScheduled.timestamp) : "Never run"}
+        </span>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-ink-100">Next scheduled scan</span>
+          <span className="text-xs text-ink-500">Only set while the schedule is running</span>
+        </div>
+        <span className="text-sm text-ink-300">
+          {scheduler.status === "Running" && scheduler.nextScanAt
+            ? formatDateTime(scheduler.nextScanAt)
+            : "—"}
+        </span>
       </div>
 
       <div className="flex items-center justify-between gap-4 px-5 py-4">

@@ -4,6 +4,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { AuthProvider } from "@/lib/auth/auth-context";
 import { PaperTradesProvider } from "@/lib/state/paper-trades-context";
 import { BotDecisionLogProvider } from "@/lib/state/bot-decision-log-context";
+import { BotSchedulerProvider } from "@/lib/state/bot-scheduler-context";
 import "./globals.css";
 
 const inter = Inter({
@@ -30,7 +31,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <AuthProvider>
           <PaperTradesProvider>
             <BotDecisionLogProvider>
-              <AppShell>{children}</AppShell>
+              <BotSchedulerProvider>
+                <AppShell>{children}</AppShell>
+              </BotSchedulerProvider>
             </BotDecisionLogProvider>
           </PaperTradesProvider>
         </AuthProvider>

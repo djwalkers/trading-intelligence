@@ -16,7 +16,10 @@ import { AuthRequiredError } from "./auth-required-error";
 // Mission 1, the scan id in Mission 1.1, Portfolio Risk Manager metadata in Mission 2, and Position
 // Manager metadata in Mission 3 (platform/web/supabase/migrations/). Hand-written rather than
 // generated, since no live Supabase project is linked to this repo to codegen against.
-interface PaperTradeRow {
+// Exported for reuse by src/lib/persistence/server-paper-trade-store.ts (Mission 6) — the
+// server-side store mirrors this exact row shape and mapping logic so the two persistence paths
+// (browser anon-key session vs. future worker service-role) can never drift apart.
+export interface PaperTradeRow {
   id: string;
   client_trade_id: string;
   instrument_symbol: string;
@@ -56,7 +59,7 @@ interface PaperTradeRow {
   position_decision_reason: string | null;
 }
 
-interface TradeIntelligenceRow {
+export interface TradeIntelligenceRow {
   paper_trade_id: string;
   recommendation: Recommendation;
   evidence: EvidenceRating[];
@@ -64,7 +67,7 @@ interface TradeIntelligenceRow {
   invalidation_factors: string[];
 }
 
-function toDbTrade(trade: PaperTrade) {
+export function toDbTrade(trade: PaperTrade) {
   return {
     client_trade_id: trade.id,
     instrument_symbol: trade.instrumentSymbol,
@@ -109,7 +112,7 @@ function toNumber(value: number | string | null): number | undefined {
   return typeof value === "number" ? value : Number(value);
 }
 
-function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceRow | null): PaperTrade {
+export function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceRow | null): PaperTrade {
   return {
     id: row.client_trade_id,
     instrumentSymbol: row.instrument_symbol,
