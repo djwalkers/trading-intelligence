@@ -2,6 +2,7 @@ import type { ComponentType, SVGProps } from "react";
 import {
   BotIcon,
   DashboardIcon,
+  DecisionIntelligenceIcon,
   JournalIcon,
   MarketIntelligenceIcon,
   PortfolioIcon,
@@ -25,6 +26,7 @@ export const navItems: NavItem[] = [
   { href: "/portfolio", label: "Paper Portfolio", icon: PortfolioIcon },
   { href: "/trade-journal", label: "Trade Journal", icon: JournalIcon },
   { href: "/bot-decisions", label: "Bot Decisions", icon: BotIcon },
+  { href: "/decision-intelligence", label: "Decision Intelligence", icon: DecisionIntelligenceIcon },
   { href: "/strategies", label: "Strategies", icon: StrategiesIcon },
   { href: "/system-health", label: "System Health", icon: SystemHealthIcon },
 ];

@@ -36,6 +36,18 @@ export interface BotCandidateEvaluation {
   side: PaperTradeSide;
   confidence: number;
   agreement: AgreementLevel;
+  // The individual strategy that drove this candidate's overall call (StrategyScore.
+  // primaryStrategyName) and the plain-language agreement explanation
+  // (StrategyScore.agreementExplanation) — carried onto every candidate, not just the one that
+  // opens a trade, so Mission 7's Decision Intelligence history has strategy attribution for
+  // rejected candidates too, not only accepted ones.
+  primaryStrategyName: string;
+  evidenceSummary: string;
+  // The price a position size was evaluated against (Mission 1's live quote fetch inside
+  // evaluateCandidateRisk) — undefined only for the structurally-unreachable "instrument not
+  // found" branch, where no price was ever fetched. Added in Mission 7 so a rejected candidate's
+  // DecisionRecord still has an entry price to reason about, not just the one that opened a trade.
+  price?: number;
   individualRiskChecks: BotRiskCheck[];
   individualPassed: boolean;
   positionEvaluated: boolean;

@@ -98,6 +98,18 @@ export function BotIcon(props: IconProps) {
   );
 }
 
+// Archive-box shape — long-term record history (Mission 7's Decision Intelligence), deliberately
+// not brain/AI iconography since this mission is explicitly not about AI.
+export function DecisionIntelligenceIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="3.5" y="4.5" width="17" height="4.5" rx="1.25" />
+      <path d="M4.5 9v8.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V9" />
+      <path d="M10 13h4" />
+    </svg>
+  );
+}
+
 export function ChevronRightIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

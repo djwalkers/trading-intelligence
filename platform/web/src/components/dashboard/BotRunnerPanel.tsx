@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import type { Instrument } from "@/lib/types";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
 import { useBotDecisionLog } from "@/lib/state/bot-decision-log-context";
+import { useDecisionHistory } from "@/lib/state/decision-history-context";
 import {
   useBotScheduler,
   SCHEDULE_INTERVAL_MINUTES,
@@ -43,6 +44,7 @@ function candidateStatusLabel(candidate: BotDecision["candidates"][number]) {
 export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
   const { trades, addTrade } = usePaperTrades();
   const { addDecision } = useBotDecisionLog();
+  const { addRecords } = useDecisionHistory();
   const scheduler = useBotScheduler();
   const { isConfigured, isLoading, user } = useAuth();
   const persistenceStatus = usePersistenceStatus();
@@ -66,6 +68,7 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
           loadTrades: async () => trades,
           persistTrade: async (trade) => addTrade(trade),
           persistDecision: async (decision) => addDecision(decision),
+          persistDecisionRecords: async (records) => addRecords(records),
         },
       });
       setLastDecision(decision);

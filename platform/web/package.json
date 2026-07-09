@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "worker": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/worker/run-worker.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.1",
@@ -24,6 +25,7 @@
     "eslint-config-next": "16.2.10",
     "postcss": "^8.4.39",
     "tailwindcss": "^3.4.4",
+    "tsx": "^4.23.0",
     "typescript": "^5.5.3"
   },
   "overrides": {
