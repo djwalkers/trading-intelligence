@@ -50,4 +50,7 @@ export interface HistoricalDataStatus {
   instrumentsLoaded: number;
   fallbackActive: boolean;
   failureReason: string | null;
+  // Maintenance 1.11.2 — minutes since the active provider's oldest cached symbol was fetched, or
+  // null when the active provider doesn't cache (Mock) or nothing has been fetched yet.
+  cacheAgeMinutes: number | null;
 }

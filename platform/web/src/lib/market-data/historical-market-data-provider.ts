@@ -8,4 +8,10 @@ import type { OHLCVCandle } from "@/lib/types";
 // themselves (see buildStrategyContextFromHistory).
 export interface HistoricalMarketDataProvider {
   getHistoricalCandles(symbols: string[], days: number): Promise<OHLCVCandle[]>;
+
+  // Optional — only a provider that actually caches (Maintenance 1.11.2's Alpha Vantage provider)
+  // implements this. Minutes since its oldest still-cached symbol was fetched, or null if nothing
+  // is cached yet. ResilientHistoricalMarketDataProvider reads it when present; a provider that
+  // doesn't implement it (Mock) simply never contributes a cache age to the reported status.
+  getCacheAgeMinutes?(): number | null;
 }

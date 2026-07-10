@@ -36,7 +36,14 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
       instrumentsLoaded: 0,
       fallbackActive: false,
       failureReason: null,
+      cacheAgeMinutes: null,
     };
+  }
+
+  // Only non-null when the currently active provider implements it (Maintenance 1.11.2's Alpha
+  // Vantage provider) — Mock and a provider that's never been called both correctly report null.
+  private currentCacheAgeMinutes(): number | null {
+    return this.active.getCacheAgeMinutes?.() ?? null;
   }
 
   getStatus(): HistoricalDataStatus {
@@ -63,6 +70,7 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
       this.setStatus({
         lastUpdated: new Date().toISOString(),
         instrumentsLoaded: countSymbols(candles),
+        cacheAgeMinutes: this.currentCacheAgeMinutes(),
       });
       return candles;
     }
@@ -73,6 +81,7 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
         mode: "Connected",
         lastUpdated: new Date().toISOString(),
         instrumentsLoaded: countSymbols(candles),
+        cacheAgeMinutes: this.currentCacheAgeMinutes(),
       });
       return candles;
     } catch (error) {
@@ -90,6 +99,7 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
         failureReason: reason,
         lastUpdated: new Date().toISOString(),
         instrumentsLoaded: countSymbols(candles),
+        cacheAgeMinutes: null,
       });
       return candles;
     }

@@ -1,5 +1,6 @@
 import type { Instrument, PaperTrade } from "@/lib/types";
 import type { DecisionRecord } from "@/lib/decision-intelligence/types";
+import type { HistoricalMarketDataProvider } from "@/lib/market-data/historical-market-data-provider";
 import { buildDecisionRecords } from "@/lib/decision-intelligence/build-decision-records";
 import { runBotScan } from "./bot-runner";
 import type { BotDecision, BotScanResult, ScanTriggerType } from "./types";
@@ -30,10 +31,14 @@ export async function executeBotScan(params: {
   scanId: string;
   triggerType: ScanTriggerType;
   context: BotExecutionContext;
+  // Optional — Maintenance 1.11.2. Only the VPS worker passes one (its own server-only,
+  // Alpha-Vantage-capable provider, resolved in src/worker/process-schedule.ts); the browser never
+  // does, so runBotScan()/evaluateAllWithHistory() fall back to the existing client-safe singleton.
+  historicalMarketDataProvider?: HistoricalMarketDataProvider;
 }): Promise<BotScanResult> {
-  const { instruments, scanId, triggerType, context } = params;
+  const { instruments, scanId, triggerType, context, historicalMarketDataProvider } = params;
   const trades = await context.loadTrades();
-  const result = await runBotScan(instruments, trades, scanId, triggerType);
+  const result = await runBotScan(instruments, trades, scanId, triggerType, historicalMarketDataProvider);
   if (result.trade) await context.persistTrade(result.trade);
   await context.persistDecision(result.decision);
   // Every candidate the scan considered becomes a DecisionRecord — accepted and rejected alike —

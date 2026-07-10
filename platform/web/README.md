@@ -352,11 +352,14 @@ A second data layer, parallel to [Market data mode](#market-data-mode) above —
 current-price quotes, this one serves 90 days of daily OHLCV candles per instrument, so the
 Strategy Engine can compute *real* SMA/EMA/RSI/momentum/volume-ratio values instead of proxying
 them off a single day's snapshot. Same architecture as market data mode, file-for-file:
-`HistoricalMarketDataProvider` interface, `MockHistoricalMarketDataProvider` (default),
-`ExternalHistoricalMarketDataProvider` (Finnhub's daily candle endpoint, reusing the exact same
-`NEXT_PUBLIC_MARKET_DATA_PROVIDER`/`NEXT_PUBLIC_MARKET_DATA_API_KEY` pair as live quotes — one
-vendor account, a different endpoint), and `ResilientHistoricalMarketDataProvider` (external when
-configured, mock fallback if it ever fails, tracked status).
+`HistoricalMarketDataProvider` interface, `MockHistoricalMarketDataProvider` (default), and
+`ResilientHistoricalMarketDataProvider` (external when configured, mock fallback if it ever fails,
+tracked status).
+
+**Real candles now come from Alpha Vantage, server-only (Maintenance 1.11.2)** — see
+[Real historical data](#real-historical-data-maintenance-1112) below. Finnhub's historical candle
+endpoint (`ExternalHistoricalMarketDataProvider`) has been removed; Finnhub is still used for live
+current-price quotes only (see [Market data mode](#market-data-mode)).
 
 **Mock candles are deterministic, not random**: a seeded PRNG (seeded from each symbol's own name)
 generates a 90-day random walk, then the whole series is rescaled so its final close lands exactly
@@ -385,7 +388,42 @@ The Dashboard/Market Intelligence/Watchlist display pages deliberately still use
 snapshot-proxy path — a disclosed scoping decision, not an oversight; see
 [`../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md)
 for why. System Health gained a matching "Historical Data" status panel (provider, connection mode,
-instruments loaded, last refresh) alongside the existing Market Data one.
+instruments loaded, last refresh, cache age) alongside the existing Market Data one.
+
+## Real historical data (Maintenance 1.11.2)
+
+`AlphaVantageHistoricalMarketDataProvider` (`src/lib/market-data/`) calls Alpha Vantage's
+`TIME_SERIES_DAILY` endpoint (`outputsize=compact`, ~100 trading days — comfortably covers the
+90-day lookback above) for the app's five-symbol universe (AAPL, MSFT, NVDA, TSLA, SPY), parsing
+`"Time Series (Daily)"` into the existing `OHLCVCandle` model and detecting five distinct failure
+modes (invalid key, rate limit, missing symbol, malformed response, HTTP failure) as a typed
+`AlphaVantageError`.
+
+**Server-only, by construction, not just by convention**: `ALPHA_VANTAGE_API_KEY` is never
+prefixed `NEXT_PUBLIC_`, and the provider file itself is `import "server-only"`. It's constructed
+by exactly one factory, `get-server-historical-market-data-provider.ts` (also server-only), which
+is imported by exactly one caller, `src/worker/process-schedule.ts` — a file the Next.js browser
+bundle never includes (the worker runs via `tsx`, entirely outside the Next.js build). The
+browser's own factory, `get-historical-market-data-provider.ts`, was changed to always resolve to
+Mock — there is no historical provider it can safely construct client-side anymore, since Finnhub's
+historical endpoint is gone and Alpha Vantage's key must never reach the browser. **This means the
+browser's own manual "Run Bot Scan" always uses mock candles now; only the VPS worker's scheduled
+scans use real Alpha Vantage data.**
+
+**Caching, not a request per scan**: each symbol's series is cached for 24 hours, backed by a JSON
+file on disk (`.data/alpha-vantage-historical-cache.json`, gitignored) rather than only in memory,
+so a worker restart doesn't immediately re-fetch every symbol — the mission's "retain cached data
+across restarts where practical" requirement, met without any Supabase schema change. In steady
+state this keeps the worker to at most one Alpha Vantage request per symbol per day, regardless of
+how often a schedule scans (every 15/30/60 minutes) — verified live (see
+[`../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md)).
+
+**Why the System Health "Historical Data" panel still shows Mock**: it reads the browser's own
+factory, which — as above — never resolves to Alpha Vantage. This is the same disclosed
+browser/worker visibility gap as the Server Scheduler panel (Mission 10): the browser has no live
+channel into a separate worker process. The real Alpha Vantage status (source, last refresh,
+symbols loaded, cache age, fallback reason) is reported instead as one plain-English
+`historical_data_status` line in the worker's own log output after every scan.
 
 ## Bot Runner
 
@@ -943,9 +981,12 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
   scoping decision (see `MISSION-9-HISTORICAL-MARKET-DATA.md`), not an oversight
 - `calculateVolatility` (Mission 9) is implemented and available but not read by any strategy or
   risk rule yet — no 4th signal or volatility-aware sizing was in scope this mission
-- `ExternalHistoricalMarketDataProvider` (Mission 9) not live-tested against a real Finnhub API key
-  — no market data key configured in this environment, same standing disclosure as Build 1.0.0's
-  live-quote provider
+- `AlphaVantageHistoricalMarketDataProvider` (Maintenance 1.11.2) replaces Finnhub for historical
+  candles and **has** been live-tested against the real Alpha Vantage API for all 5 universe
+  symbols, including a live-triggered rate-limit response and a live-triggered invalid-key
+  response, both correctly classified and correctly falling back to mock — see
+  `MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`. Finnhub's live-quote provider itself remains
+  untested against a real key, same standing disclosure as Build 1.0.0
 - Not deployed to a real VPS — Mission 8 built and verified (as far as this environment allows) a
   runnable background worker, `npm run worker`, but it has not been run against a real Postgres
   instance under a process supervisor on an actual server
@@ -1004,8 +1045,9 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
   (reload the page to try the real provider again)
 - A deployed/linked Supabase project or CI for running migrations
 - Partial trade closes, position netting, or live/scheduled price movement
-- Multiple external market data vendors (only one Finnhub-shaped adapter exists so far); historical
-  prices, charts, or intraday movement
+- Multiple external market data vendors for live quotes (only one Finnhub-shaped adapter exists);
+  intraday candles, charts, or intraday price movement (Alpha Vantage historical candles, as of
+  Maintenance 1.11.2, are daily-resolution only)
 - Technical indicators or model-generated scoring behind Market Intelligence or the Intelligence
   Score
 - Persistence of Intelligence Scores at the time a trade was opened (scores are computed from
@@ -1039,8 +1081,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/MISSION-8-VPS-WORKER.md`](../../docs/product/MISSION-8-VPS-WORKER.md),
 [`../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md),
 [`../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md),
+[`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md),
 and
-[`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md)
+[`../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

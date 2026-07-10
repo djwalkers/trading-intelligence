@@ -11,6 +11,7 @@ import type {
 import { getInstrumentBySymbol } from "@/lib/mock/instruments";
 import { getStrategyEngine } from "@/lib/strategy-engine";
 import { getMarketDataProvider } from "@/lib/market-data/get-market-data-provider";
+import type { HistoricalMarketDataProvider } from "@/lib/market-data/historical-market-data-provider";
 import { isTradeableRecommendation, sideForRecommendation } from "@/lib/utils/paper-trade";
 import { buildExposureSnapshot, evaluatePortfolioRisk } from "./portfolio-risk";
 import { buildPositionContext, evaluatePosition } from "./position-manager";
@@ -187,6 +188,10 @@ export async function runBotScan(
   trades: PaperTrade[],
   scanId: string,
   triggerType: ScanTriggerType,
+  // Optional — defaults to the client-safe singleton inside evaluateAllWithHistory() when
+  // omitted. The VPS worker passes its own server-only, Alpha-Vantage-capable provider (Maintenance
+  // 1.11.2); the browser never passes one, so nothing here changes for existing callers.
+  historicalMarketDataProvider?: HistoricalMarketDataProvider,
 ): Promise<BotScanResult> {
   const startedAt = performance.now();
   const decisionId = makeDecisionId();
@@ -217,7 +222,7 @@ export async function runBotScan(
   // The three strategies, the ranking, and every risk rule below are completely unchanged — only
   // the confidence/agreement values feeding into them may now differ, since they're computed from
   // real history rather than a single day's snapshot.
-  const scores = await getStrategyEngine().evaluateAllWithHistory(instruments);
+  const scores = await getStrategyEngine().evaluateAllWithHistory(instruments, historicalMarketDataProvider);
 
   // A "valid opportunity" has a clear directional call the app already considers tradeable —
   // this excludes Hold and Avoid before risk checks ever run, the same bar a human applies via

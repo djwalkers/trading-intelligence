@@ -13,6 +13,7 @@ import { rsiReversalStrategy } from "./strategies/rsi-reversal";
 import { momentumStrategy } from "./strategies/momentum";
 import type { Strategy } from "./strategy";
 import { getHistoricalMarketDataProvider } from "@/lib/market-data/get-historical-market-data-provider";
+import type { HistoricalMarketDataProvider } from "@/lib/market-data/historical-market-data-provider";
 
 // How many days of history evaluateAllWithHistory() requests per scan — comfortably above
 // MIN_CANDLES_FOR_HISTORY (build-context.ts) so every registered indicator's lookback window has
@@ -84,9 +85,18 @@ export class StrategyEngine {
   // getHistoricalCandles() already follow), then evaluates each instrument against its own slice.
   // Never throws on missing history for an individual symbol; only a provider-level failure
   // ResilientHistoricalMarketDataProvider itself can't recover from would propagate.
-  async evaluateAllWithHistory(instruments: Instrument[]): Promise<StrategyScore[]> {
+  //
+  // `provider` is optional and defaults to the client-safe singleton (Mock-only as of Maintenance
+  // 1.11.2) — this is what lets this same shared method serve both the browser (which never
+  // passes one) and the VPS worker (which passes its own server-only, Alpha-Vantage-capable
+  // provider, resolved in src/worker/process-schedule.ts) without this file, which the browser
+  // bundle includes, ever statically importing anything server-only.
+  async evaluateAllWithHistory(
+    instruments: Instrument[],
+    provider?: HistoricalMarketDataProvider,
+  ): Promise<StrategyScore[]> {
     const symbols = instruments.map((instrument) => instrument.symbol);
-    const candles = await getHistoricalMarketDataProvider().getHistoricalCandles(
+    const candles = await (provider ?? getHistoricalMarketDataProvider()).getHistoricalCandles(
       symbols,
       HISTORY_LOOKBACK_DAYS,
     );

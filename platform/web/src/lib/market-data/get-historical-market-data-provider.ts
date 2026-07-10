@@ -1,33 +1,18 @@
-import { isExternalMarketDataConfigured } from "./config";
-import { ExternalHistoricalMarketDataProvider } from "./external-historical-market-data-provider";
 import { MockHistoricalMarketDataProvider } from "./mock-historical-market-data-provider";
-import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
 import { ResilientHistoricalMarketDataProvider } from "./resilient-historical-market-data-provider";
 
 let provider: ResilientHistoricalMarketDataProvider | null = null;
 
-function createExternalProvider(): HistoricalMarketDataProvider | null {
-  const providerName = process.env.NEXT_PUBLIC_MARKET_DATA_PROVIDER;
-  const apiKey = process.env.NEXT_PUBLIC_MARKET_DATA_API_KEY;
-  if (!providerName || !apiKey) return null;
-
-  return new ExternalHistoricalMarketDataProvider(providerName, apiKey);
-}
-
-// Same configuration and selection rule as getMarketDataProvider() — external is used when
-// configured (the same NEXT_PUBLIC_MARKET_DATA_PROVIDER/NEXT_PUBLIC_MARKET_DATA_API_KEY pair, one
-// vendor account, a different endpoint), mock is the default and the fallback. Cached at module
-// scope so every caller in the same JS runtime (a browser tab, or a worker process) shares one
-// instance, one status, one in-flight connection.
+// Client-safe factory — used by the browser (Bot Runner's manual scan, the System Health status
+// hook). Always Mock: as of Maintenance 1.11.2, Finnhub's historical candle endpoint is no longer
+// selected here (real history now comes from Alpha Vantage, a server-only key that must never
+// reach the browser — see get-server-historical-market-data-provider.ts, used only by the VPS
+// worker). This is why "primary" is always null here rather than reading any env var — there is
+// no historical provider this factory could safely construct client-side. Cached at module scope
+// so every caller in the same JS runtime (a browser tab) shares one instance, one status.
 export function getHistoricalMarketDataProvider(): ResilientHistoricalMarketDataProvider {
   if (!provider) {
-    const providerName = process.env.NEXT_PUBLIC_MARKET_DATA_PROVIDER ?? "External";
-    const primary = isExternalMarketDataConfigured() ? createExternalProvider() : null;
-    provider = new ResilientHistoricalMarketDataProvider(
-      primary,
-      new MockHistoricalMarketDataProvider(),
-      providerName,
-    );
+    provider = new ResilientHistoricalMarketDataProvider(null, new MockHistoricalMarketDataProvider(), "Mock");
   }
   return provider;
 }

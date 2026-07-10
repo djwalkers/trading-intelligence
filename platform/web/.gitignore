@@ -20,6 +20,9 @@ yarn-error.log*
 # local env files
 .env*.local
 
+# Maintenance 1.11.2 — on-disk Alpha Vantage historical candle cache (worker-only, regenerable)
+/.data/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
