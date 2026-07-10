@@ -12,16 +12,24 @@ export function PositionsTable({ positions }: PositionsTableProps) {
   }
 
   return (
-    <div className="overflow-x-auto scrollbar-thin">
+    <div
+      className="overflow-x-auto scrollbar-thin"
+      role="region"
+      aria-label="Open positions table, scroll horizontally for more columns"
+      tabIndex={0}
+    >
       <table className="w-full min-w-[640px] border-collapse text-sm">
+        <caption className="sr-only">
+          Open paper positions with quantity, entry price, and unrealized P/L
+        </caption>
         <thead>
           <tr className="border-b border-base-700 text-left text-xs uppercase tracking-wide text-ink-500">
-            <th className="px-5 py-2.5 font-medium">Instrument</th>
-            <th className="px-5 py-2.5 font-medium">Quantity</th>
-            <th className="px-5 py-2.5 font-medium">Avg entry</th>
-            <th className="px-5 py-2.5 font-medium">Current price</th>
-            <th className="px-5 py-2.5 font-medium">Market value</th>
-            <th className="px-5 py-2.5 font-medium">Unrealized P/L</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Instrument</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Quantity</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Avg entry</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Current price</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Market value</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Unrealized P/L</th>
           </tr>
         </thead>
         <tbody>

@@ -10,8 +10,24 @@ const RECENT_LIMIT = 5;
 // the same local decision log the full Bot Decisions history page reads (this browser's manual
 // and browser-scheduled scans only — see AIActivityKpis for the same disclosed scope).
 export function RecentAIDecisionsList() {
-  const { decisions } = useBotDecisionLog();
+  const { decisions, isHydrated } = useBotDecisionLog();
   const recent = decisions.slice(0, RECENT_LIMIT);
+
+  if (!isHydrated) {
+    return (
+      <div className="flex flex-col divide-y divide-base-700/60" aria-busy="true">
+        {[0, 1, 2].map((index) => (
+          <div key={index} className="flex items-center justify-between gap-4 px-5 py-3">
+            <div className="flex flex-col gap-1.5">
+              <div className="h-3.5 w-40 animate-pulse rounded bg-base-700/60" />
+              <div className="h-3 w-56 animate-pulse rounded bg-base-700/40" />
+            </div>
+            <div className="h-5 w-16 animate-pulse rounded-full bg-base-700/60" />
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   if (recent.length === 0) {
     return (

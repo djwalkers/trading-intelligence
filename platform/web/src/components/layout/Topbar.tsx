@@ -26,14 +26,18 @@ export function Topbar() {
         </Badge>
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto border-t border-base-700 px-3 py-2 scrollbar-thin md:hidden">
+      <nav
+        aria-label="Main"
+        className="flex gap-1 overflow-x-auto border-t border-base-700 px-3 py-2 scrollbar-thin md:hidden"
+      >
         {navItems.map((item) => {
           const isActive = pathname === item.href;
           return (
             <Link
               key={item.href}
               href={item.href}
-              className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              aria-current={isActive ? "page" : undefined}
+              className={`flex min-h-11 shrink-0 items-center rounded-lg px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 ${
                 isActive ? "bg-base-800 text-ink-100" : "text-ink-400 hover:text-ink-100"
               }`}
             >

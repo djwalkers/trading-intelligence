@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import { useRef } from "react";
 import type { EntryPriceInfo, PaperTradeSide } from "@/lib/types";
 import { formatCurrencyUSD, formatDateTime } from "@/lib/utils/format";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { dataSourceLabel } from "@/lib/utils/style";
 
 interface PaperTradeModalProps {
@@ -33,28 +35,21 @@ export function PaperTradeModal({
   onConfirm,
   onCancel,
 }: PaperTradeModalProps) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onCancel();
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
-
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const isReady = !isPriceLoading && entryPriceInfo !== null && quantity !== null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="paper-trade-modal-title"
+    <Modal
+      labelledBy="paper-trade-modal-title"
+      describedBy="paper-trade-modal-description"
+      onClose={onCancel}
+      initialFocusRef={confirmButtonRef}
     >
       <div className="panel w-full max-w-md p-6">
         <h2 id="paper-trade-modal-title" className="text-base font-semibold text-ink-100">
           Confirm paper trade
         </h2>
-        <p className="mt-1 text-sm text-ink-400">
+        <p id="paper-trade-modal-description" className="mt-1 text-sm text-ink-400">
           Review the details before placing this simulated trade.
         </p>
 
@@ -133,24 +128,14 @@ export function PaperTradeModal({
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-ink-400 transition-colors hover:text-ink-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
-          >
+          <Button variant="secondary" onClick={onCancel}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={!isReady}
-            autoFocus
-            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
+          </Button>
+          <Button variant="primary" onClick={onConfirm} disabled={!isReady} ref={confirmButtonRef}>
             Confirm paper trade
-          </button>
+          </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

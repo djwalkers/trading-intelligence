@@ -26,19 +26,25 @@ export function PaperTradesTable({
   }
 
   return (
-    <div className="overflow-x-auto scrollbar-thin">
+    <div
+      className="overflow-x-auto scrollbar-thin"
+      role="region"
+      aria-label="Paper trades table, scroll horizontally for more columns"
+      tabIndex={0}
+    >
       <table className="w-full min-w-[760px] border-collapse text-sm">
+        <caption className="sr-only">Paper trades with side, quantity, price, and status</caption>
         <thead>
           <tr className="border-b border-base-700 text-left text-xs uppercase tracking-wide text-ink-500">
-            <th className="px-5 py-2.5 font-medium">Instrument</th>
-            <th className="px-5 py-2.5 font-medium">Side</th>
-            <th className="px-5 py-2.5 font-medium">Source</th>
-            <th className="px-5 py-2.5 font-medium">Quantity</th>
-            <th className="px-5 py-2.5 font-medium">Entry price</th>
-            <th className="px-5 py-2.5 font-medium">Current price</th>
-            <th className="px-5 py-2.5 font-medium">Opened</th>
-            <th className="px-5 py-2.5 font-medium">Status</th>
-            <th className="px-5 py-2.5 font-medium">Action</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Instrument</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Side</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Source</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Quantity</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Entry price</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Current price</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Opened</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Status</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Action</th>
           </tr>
         </thead>
         <tbody>

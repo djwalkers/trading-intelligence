@@ -20,7 +20,7 @@ import {
 // Manager, Position Protection) active — condensed to one line per limit group rather than one row
 // per number, so this reads as a health summary, not a checklist. No thresholds changed.
 export function AIEngineActivityPanel() {
-  const { decisions } = useBotDecisionLog();
+  const { decisions, isHydrated } = useBotDecisionLog();
   const last = decisions[0] ?? null;
   const rejectedCount = last ? last.candidates.filter((candidate) => candidate.outcome === "Rejected").length : 0;
 
@@ -41,11 +41,15 @@ export function AIEngineActivityPanel() {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-ink-100">Last scan (this browser)</span>
           <span className="text-xs text-ink-500">
-            {last ? `${last.candidates.length} candidate${last.candidates.length === 1 ? "" : "s"} evaluated · ${rejectedCount} rejected` : "No scans recorded yet in this browser"}
+            {!isHydrated
+              ? "Loading…"
+              : last
+                ? `${last.candidates.length} candidate${last.candidates.length === 1 ? "" : "s"} evaluated · ${rejectedCount} rejected`
+                : "No scans recorded yet in this browser"}
           </span>
         </div>
         <span className="text-sm text-ink-300">
-          {last ? formatDateTime(last.timestamp) : "Never run"}
+          {!isHydrated ? "…" : last ? formatDateTime(last.timestamp) : "Never run"}
         </span>
       </div>
 
@@ -53,7 +57,7 @@ export function AIEngineActivityPanel() {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-ink-100">Last decision</span>
           <span className="max-w-md text-xs text-ink-500">
-            {last?.reason ?? "No decisions recorded yet in this browser."}
+            {!isHydrated ? "Loading…" : (last?.reason ?? "No decisions recorded yet in this browser.")}
           </span>
         </div>
         <Badge

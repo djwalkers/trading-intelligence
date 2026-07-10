@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 1.12.1. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
+Build 1.12.2. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
@@ -709,6 +709,21 @@ detail, including a real bug found and fixed via live testing (a `select=*` agai
 migration hasn't added yet silently omits the key rather than erroring, which the original mapping
 code didn't account for).
 
+## What's new in Build 1.12.2
+
+An accessibility, mobile, and interaction hardening pass: every modal (paper trade confirmation,
+close trade confirmation, import-history prompt) now shares one focus-trap implementation — focus
+moves in on open, Tab/Shift+Tab cycle within the dialog, Escape closes it, and focus returns to
+whatever opened it, all verified live with real keyboard input. `BotDecisionLogProvider` gained the
+same `isHydrated` pattern Build 1.12.1 added to paper trades and decision history, closing the last
+"could flash 0/empty before loading finishes" gap. Every data table now has scoped column headers, a
+screen-reader caption, and a keyboard-focusable scroll region; the one table missing the app's
+otherwise-universal horizontal-scroll pattern was brought in line with the rest. Navigation gained
+visible focus rings, `aria-current`, and larger mobile touch targets. Verified with no horizontal
+overflow at 320/375/430/768px on every route tested. No trading logic, risk rule, schema, or
+terminology changed. See
+[`../../docs/product/BUILD-1.12.2.md`](../../docs/product/BUILD-1.12.2.md) for the full write-up.
+
 ## What's new in Build 1.12.1
 
 A full production-readiness audit across every page: fixed a confirmed data bug (a live price
@@ -1106,8 +1121,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md),
 [`../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md),
 [`../../docs/product/BUILD-1.12.0.md`](../../docs/product/BUILD-1.12.0.md),
+[`../../docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md),
 and
-[`../../docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md)
+[`../../docs/product/BUILD-1.12.2.md`](../../docs/product/BUILD-1.12.2.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

@@ -72,15 +72,17 @@ export function ServerAutomationPanel() {
     <div className="flex flex-col gap-2.5 px-5 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-sm font-medium text-ink-100">Server (always-on)</span>
-        <Badge
-          className={
-            isEnabled
-              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
-              : "border-base-600 bg-base-800 text-ink-300"
-          }
-        >
-          {isEnabled ? "Enabled" : "Disabled"}
-        </Badge>
+        <span aria-live="polite">
+          <Badge
+            className={
+              isEnabled
+                ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+                : "border-base-600 bg-base-800 text-ink-300"
+            }
+          >
+            {isEnabled ? "Enabled" : "Disabled"}
+          </Badge>
+        </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -124,6 +126,11 @@ export function ServerAutomationPanel() {
         >
           Disable
         </button>
+        {isSaving ? (
+          <span role="status" className="text-xs text-ink-500">
+            Saving…
+          </span>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-500">
@@ -139,7 +146,9 @@ export function ServerAutomationPanel() {
       ) : null}
 
       {actionError || error ? (
-        <p className="text-xs text-accent-red">{actionError ?? error}</p>
+        <p role="alert" className="text-xs text-accent-red">
+          {actionError ?? error}
+        </p>
       ) : null}
 
       <p className="text-xs text-ink-500">

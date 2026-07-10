@@ -16,9 +16,13 @@ function isToday(isoTimestamp: string): boolean {
 // browser-based scheduled runs) — always-on server scans are only visible via Settings/Operations
 // Centre, since this browser has no live channel into that separate process.
 export function AIActivityKpis() {
-  const { decisions } = useBotDecisionLog();
+  const { decisions, isHydrated } = useBotDecisionLog();
   const scheduler = useBotScheduler();
   const { schedule } = useServerSchedule();
+  // Build 1.12.2 — while this browser's local decision log is still being read from storage, show
+  // a plain loading marker rather than "0"/"Never", which would otherwise flash before the real
+  // figures arrive (same pattern as PortfolioOverviewKpis.isHydrated).
+  const loadingValue = "…";
 
   const decisionsToday = decisions.filter((decision) => isToday(decision.timestamp)).length;
   const lastScan = decisions[0] ?? null;
@@ -41,10 +45,10 @@ export function AIActivityKpis() {
         valueClassName={automationOn ? "text-accent-teal" : "text-ink-100"}
         sublabel={automationOn ? automationDetail : "Manual only — see Settings"}
       />
-      <StatCard label="AI decisions today" value={String(decisionsToday)} />
+      <StatCard label="AI decisions today" value={isHydrated ? String(decisionsToday) : loadingValue} />
       <StatCard
         label="Last scan (this browser)"
-        value={lastScan ? formatDateTime(lastScan.timestamp) : "Never"}
+        value={!isHydrated ? loadingValue : lastScan ? formatDateTime(lastScan.timestamp) : "Never"}
         sublabel={lastScan ? lastScan.triggerType : undefined}
       />
       <StatCard

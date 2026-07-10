@@ -31,7 +31,24 @@ function RiskCheckList({ checks }: { checks: BotRiskCheck[] }) {
 }
 
 export function BotDecisionsView() {
-  const { decisions } = useBotDecisionLog();
+  const { decisions, isHydrated } = useBotDecisionLog();
+
+  if (!isHydrated) {
+    return (
+      <div className="flex flex-col divide-y divide-base-700/60" aria-busy="true">
+        <p className="sr-only">Loading your bot decision history…</p>
+        {[0, 1, 2].map((index) => (
+          <div key={index} className="flex flex-col gap-3 px-5 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="h-3.5 w-48 animate-pulse rounded bg-base-700/60" />
+              <div className="h-5 w-20 animate-pulse rounded-full bg-base-700/60" />
+            </div>
+            <div className="h-3 w-full max-w-md animate-pulse rounded bg-base-700/40" />
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   if (decisions.length === 0) {
     return (

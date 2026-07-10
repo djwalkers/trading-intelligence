@@ -29,15 +29,17 @@ export function BrowserAutomationPanel() {
     <div className="flex flex-col gap-2.5 px-5 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-sm font-medium text-ink-100">This browser</span>
-        <Badge
-          className={
-            scheduler.status === "Running"
-              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
-              : "border-base-600 bg-base-800 text-ink-300"
-          }
-        >
-          {scheduler.status}
-        </Badge>
+        <span aria-live="polite">
+          <Badge
+            className={
+              scheduler.status === "Running"
+                ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+                : "border-base-600 bg-base-800 text-ink-300"
+            }
+          >
+            {scheduler.status}
+          </Badge>
+        </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">

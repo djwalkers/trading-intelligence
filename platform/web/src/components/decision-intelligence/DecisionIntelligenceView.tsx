@@ -260,28 +260,36 @@ export function DecisionIntelligenceView() {
               : "No records match this filter."}
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+          <div
+            className="overflow-x-auto scrollbar-thin"
+            role="region"
+            aria-label="AI decision history table, scroll horizontally for more columns"
+            tabIndex={0}
+          >
+            <table className="w-full min-w-[1400px] text-left text-xs">
+              <caption className="sr-only">
+                Full AI decision history with candidate evaluation, risk checks, and outcomes
+              </caption>
               <thead>
                 <tr className="border-b border-base-700/60 text-ink-500">
-                  <th className="px-4 py-2 font-medium">Scan</th>
-                  <th className="px-4 py-2 font-medium">Rank</th>
-                  <th className="px-4 py-2 font-medium">Symbol</th>
-                  <th className="px-4 py-2 font-medium">Sector</th>
-                  <th className="px-4 py-2 font-medium">Side</th>
-                  <th className="px-4 py-2 font-medium">Entry price</th>
-                  <th className="px-4 py-2 font-medium">Strategy</th>
-                  <th className="px-4 py-2 font-medium">Agreement</th>
-                  <th className="px-4 py-2 font-medium">Confidence</th>
-                  <th className="px-4 py-2 font-medium">Position action</th>
-                  <th className="px-4 py-2 font-medium">Portfolio risk</th>
-                  <th className="px-4 py-2 font-medium">Action</th>
-                  <th className="px-4 py-2 font-medium">Reason</th>
-                  <th className="px-4 py-2 font-medium">Outcome</th>
-                  <th className="px-4 py-2 font-medium">Realised P/L</th>
-                  <th className="px-4 py-2 font-medium">Realised P/L %</th>
-                  <th className="px-4 py-2 font-medium">Holding duration</th>
-                  <th className="px-4 py-2 font-medium">Recorded</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Scan</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Rank</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Symbol</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Sector</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Side</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Entry price</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Strategy</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Agreement</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Confidence</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Position action</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Portfolio risk</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Action</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Reason</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Outcome</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Realised P/L</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Realised P/L %</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Holding duration</th>
+                  <th scope="col" className="px-4 py-2 font-medium">Recorded</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-base-700/60">

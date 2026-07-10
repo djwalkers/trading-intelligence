@@ -16,6 +16,10 @@ const MAX_ENTRIES = 50;
 
 interface BotDecisionLogContextValue {
   decisions: BotDecision[];
+  // Build 1.12.2 — see PaperTradesContextValue.isHydrated for why this exists: lets a consumer
+  // distinguish "still reading localStorage" from "genuinely no decisions yet" instead of
+  // showing the empty-state prompt prematurely on first paint.
+  isHydrated: boolean;
   addDecision: (decision: BotDecision) => void;
 }
 
@@ -27,18 +31,23 @@ const BotDecisionLogContext = createContext<BotDecisionLogContextValue | null>(n
 // overbuild" — a second storage-agnostic store abstraction for this would be overbuilding.
 export function BotDecisionLogProvider({ children }: { children: ReactNode }) {
   const [decisions, setDecisions] = useState<BotDecision[]>([]);
+  const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     // Deferred into a microtask rather than read synchronously in the effect body — React's
     // purity rule flags a direct setState call there, and this also keeps the very first client
-    // render matching the server's empty state, avoiding a hydration mismatch.
+    // render matching the server's empty state, avoiding a hydration mismatch. Runs exactly once
+    // per mount (empty deps), so Strict Mode's double-invoke just re-reads the same storage key
+    // twice with no duplicate writes or state replacement races.
     Promise.resolve().then(() => {
       try {
         const stored = window.localStorage.getItem(STORAGE_KEY);
         if (stored) setDecisions(JSON.parse(stored));
       } catch {
         // Corrupt or inaccessible storage — start from an empty log.
+      } finally {
+        setIsHydrated(true);
       }
     });
   }, []);
@@ -54,7 +63,7 @@ export function BotDecisionLogProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <BotDecisionLogContext.Provider value={{ decisions, addDecision }}>
+    <BotDecisionLogContext.Provider value={{ decisions, isHydrated, addDecision }}>
       {children}
     </BotDecisionLogContext.Provider>
   );

@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import { useRef } from "react";
 import type { PaperTradeSide } from "@/lib/types";
 import { formatCurrencyUSD, formatPercent, formatSignedNumber } from "@/lib/utils/format";
 import { plToneClass } from "@/lib/utils/style";
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 
 interface CloseTradeModalProps {
   instrumentSymbol: string;
@@ -32,26 +34,20 @@ export function CloseTradeModal({
   onConfirm,
   onCancel,
 }: CloseTradeModalProps) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onCancel();
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="close-trade-modal-title"
+    <Modal
+      labelledBy="close-trade-modal-title"
+      describedBy="close-trade-modal-description"
+      onClose={onCancel}
+      initialFocusRef={confirmButtonRef}
     >
       <div className="panel w-full max-w-md p-6">
         <h2 id="close-trade-modal-title" className="text-base font-semibold text-ink-100">
           Close paper trade
         </h2>
-        <p className="mt-1 text-sm text-ink-400">
+        <p id="close-trade-modal-description" className="mt-1 text-sm text-ink-400">
           Review the estimated outcome before closing this simulated position.
         </p>
 
@@ -97,24 +93,19 @@ export function CloseTradeModal({
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-ink-400 transition-colors hover:text-ink-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
-          >
+          <Button variant="secondary" onClick={onCancel}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="primary"
             onClick={onConfirm}
             disabled={isPriceLoading || currentPrice === null}
-            autoFocus
-            className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-4 py-2 text-sm font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
+            ref={confirmButtonRef}
           >
             Confirm close
-          </button>
+          </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

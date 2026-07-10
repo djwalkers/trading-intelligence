@@ -20,18 +20,24 @@ export function WatchlistTable({
     (strategyScores ?? []).map((score) => [score.instrumentSymbol, score]),
   );
   return (
-    <div className="overflow-x-auto scrollbar-thin">
+    <div
+      className="overflow-x-auto scrollbar-thin"
+      role="region"
+      aria-label="Watchlist table, scroll horizontally for more columns"
+      tabIndex={0}
+    >
       <table className="w-full min-w-[820px] border-collapse text-sm">
+        <caption className="sr-only">Watchlist instruments with live price, change, and range</caption>
         <thead>
           <tr className="border-b border-base-700 text-left text-xs uppercase tracking-wide text-ink-500">
-            <th className="px-5 py-2.5 font-medium">Instrument</th>
-            <th className="px-5 py-2.5 font-medium">Price</th>
-            <th className="px-5 py-2.5 font-medium">Change</th>
-            <th className="px-5 py-2.5 font-medium">Day range</th>
-            <th className="px-5 py-2.5 font-medium">Volume</th>
-            <th className="px-5 py-2.5 font-medium">Updated</th>
-            {dataSource ? <th className="px-5 py-2.5 font-medium">Source</th> : null}
-            {strategyScores ? <th className="px-5 py-2.5 font-medium">Primary strategy</th> : null}
+            <th scope="col" className="px-5 py-2.5 font-medium">Instrument</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Price</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Change</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Day range</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Volume</th>
+            <th scope="col" className="px-5 py-2.5 font-medium">Updated</th>
+            {dataSource ? <th scope="col" className="px-5 py-2.5 font-medium">Source</th> : null}
+            {strategyScores ? <th scope="col" className="px-5 py-2.5 font-medium">Primary strategy</th> : null}
           </tr>
         </thead>
         <tbody>

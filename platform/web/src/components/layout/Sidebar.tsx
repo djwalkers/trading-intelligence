@@ -27,7 +27,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      <nav className="flex flex-1 flex-col gap-0.5 px-3">
+      <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 px-3">
         {navItems.map((item) => {
           const isActive = pathname === item.href;
           const Icon = item.icon;
@@ -36,7 +36,8 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
+              aria-current={isActive ? "page" : undefined}
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 ${
                 isActive
                   ? "bg-base-800 text-ink-100"
                   : "text-ink-400 hover:bg-base-800/60 hover:text-ink-100"
