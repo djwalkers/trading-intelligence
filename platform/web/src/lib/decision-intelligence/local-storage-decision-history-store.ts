@@ -1,5 +1,6 @@
 import type { DecisionRecord } from "./types";
 import type { DecisionHistoryStore } from "./decision-history-store";
+import { applyOutcomeUpdates, type OutcomeUpdate } from "./outcome-analysis";
 
 const STORAGE_KEY = "trading-intelligence.decision-history.v1";
 // A single scan can produce one record per candidate (up to the whole watchlist), several times
@@ -26,6 +27,13 @@ export class LocalStorageDecisionHistoryStore implements DecisionHistoryStore {
     if (typeof window === "undefined") return;
     const current = await this.load();
     const next = [...records, ...current].slice(0, MAX_ENTRIES);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  }
+
+  async updateOutcomes(updates: OutcomeUpdate[]): Promise<void> {
+    if (typeof window === "undefined" || updates.length === 0) return;
+    const current = await this.load();
+    const next = applyOutcomeUpdates(current, updates);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   }
 }

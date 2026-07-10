@@ -148,7 +148,7 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
 
       <div className="flex flex-col gap-2.5 rounded-xl2 border border-base-700 bg-base-850 px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className="text-sm font-medium text-ink-100">Scheduled scans</span>
+          <span className="text-sm font-medium text-ink-100">Browser schedule</span>
           <Badge
             className={
               scheduler.status === "Running"
@@ -212,9 +212,11 @@ export function BotRunnerPanel({ instruments }: BotRunnerPanelProps) {
         ) : null}
 
         <p className="text-xs text-ink-600">
-          Browser-based scheduling only — scans run while this Dashboard tab is open; closing it or
-          navigating away pauses the schedule until you return. True 24/7 scheduling needs a
-          background worker, not yet built (see System Health for the current state from any page).
+          <strong className="font-medium text-ink-500">Browser schedule:</strong> runs only while
+          this Dashboard tab is open — closing it or navigating away pauses the schedule until you
+          return. This is separate from the <strong className="font-medium text-ink-500">server
+          schedule</strong> below, which runs on the VPS worker independently of any browser tab
+          (Mission 10) — the two do not share state and can be configured differently.
         </p>
       </div>
 

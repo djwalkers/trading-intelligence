@@ -73,4 +73,17 @@ export interface DecisionRecord {
   // Only set for the one candidate (per scan, at most) that actually opened a position — lets a
   // future mission join a DecisionRecord back to its PaperTrade without guessing.
   createdTradeId?: string;
+
+  // Mission 11 — populated only once outcome analysis (src/lib/decision-intelligence/
+  // outcome-analysis.ts) has classified this record: never for Rejected candidates, and never
+  // before the linked trade has actually closed. realisedPnl/realisedPnlPercent are copied
+  // straight from the linked PaperTrade at the moment of classification; holdingDurationMinutes is
+  // derived from this record's own timestamp (when the trade opened) and the trade's closedAt;
+  // outcomeRecordedAt is when classification actually ran, which can be later than closedAt if
+  // reconciliation was delayed.
+  realisedPnl?: number;
+  realisedPnlPercent?: number;
+  holdingDurationMinutes?: number;
+  closedAt?: string;
+  outcomeRecordedAt?: string;
 }

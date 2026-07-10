@@ -6,12 +6,14 @@ import type { SignalType } from "./signal";
 // existing Signal domain type.
 export type StrategySignal = SignalType;
 
-// Deterministic inputs for one instrument, handed to every strategy unchanged. The four derived
-// fields (everything but `instrument` itself) come from buildStrategyContext, a pure function of
-// the instrument's existing mock snapshot — there is no historical price series in this
-// prototype, so short/long moving averages, RSI, and volume ratio are proxies computed from
-// price/changeAbsolute/changePercent/volume, not a new synthetic time series. Same instrument in,
-// same context out, every time.
+// Deterministic inputs for one instrument, handed to every strategy unchanged. As of Mission 9,
+// these come from buildStrategyContextFromHistory() (real SMA/EMA/RSI/momentum/volume-ratio
+// calculated from 90 days of OHLCV candles) whenever enough historical data is available, or from
+// buildStrategyContext() (the original Build 1.3.0 snapshot-derived proxies — price minus a drift
+// multiple, percent-change mapped onto the RSI scale, etc.) when it isn't. Either way, same
+// instrument (+ same candles, when present) in, same context out, every time — no randomness.
+// historicalDataAvailable discloses which path produced this particular context, so evidence text
+// and status displays can be honest about where a reading came from.
 export interface StrategyContext {
   instrument: Instrument;
   shortMovingAverage: number;
@@ -19,6 +21,13 @@ export interface StrategyContext {
   rsi: number;
   volumeRatio: number;
   trend: MarketRegime;
+  // The Momentum strategy's short-window price change — instrument.changePercent (today's single
+  // session) in the snapshot fallback, or a real multi-day historical momentum reading when
+  // history is available. Kept as its own context field (Mission 9) rather than read directly off
+  // `instrument` so the Momentum strategy gets the same "from history when possible" upgrade the
+  // other two strategies get through shortMovingAverage/longMovingAverage/rsi.
+  momentumPercent: number;
+  historicalDataAvailable: boolean;
 }
 
 // One strategy's verdict on one instrument.

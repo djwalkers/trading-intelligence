@@ -1,4 +1,11 @@
-import type { Instrument, MarketRegime, StrategyContext } from "@/lib/types";
+import type { Instrument, MarketRegime, OHLCVCandle, StrategyContext } from "@/lib/types";
+import {
+  calculateEMA,
+  calculateMomentumPercent,
+  calculateRSI,
+  calculateSMA,
+  calculateVolumeRatio,
+} from "@/lib/indicators";
 
 // This prototype has no historical price series for any instrument — only a single current
 // snapshot (price, changeAbsolute, changePercent, volume). Rather than inventing a synthetic
@@ -50,6 +57,80 @@ export function buildStrategyContext(instrument: Instrument): StrategyContext {
     rsi: round2(rsi),
     volumeRatio: round2(volumeRatio),
     trend,
+    momentumPercent: instrument.changePercent,
+    historicalDataAvailable: false,
+  };
+}
+
+// Mission 9 — periods for each indicator computed from real OHLCV history. Short/long deliberately
+// mix EMA and SMA rather than using the same average type for both: EMA(12) for the short side
+// (more reactive to recent closes, appropriate for the side meant to react to a crossover first)
+// and SMA(30) for the long side (a smoother anchor the short average crosses against) — a
+// classic-adjacent pairing, not a literal textbook MACD 12/26, chosen so both calculateSMA and
+// calculateEMA are genuinely exercised by the one strategy that needs a moving-average pair.
+const SHORT_EMA_PERIOD = 12;
+const LONG_SMA_PERIOD = 30;
+const RSI_LOOKBACK_PERIOD = 14;
+const VOLUME_RATIO_LOOKBACK_PERIOD = 20;
+const MOMENTUM_LOOKBACK_PERIOD = 5;
+const TREND_MOMENTUM_LOOKBACK_PERIOD = 10;
+
+// The longest lookback (LONG_SMA_PERIOD) plus one extra day, since calculateMomentumPercent and
+// calculateVolumeRatio each look one additional day further back than their own period. Below
+// this, buildStrategyContextFromHistory returns null rather than a context built from a
+// too-short/noisy window — the caller (StrategyEngine.evaluateInstrumentWithHistory) falls back to
+// buildStrategyContext(instrument) in that case, same as an unconfigured/failed provider.
+export const MIN_CANDLES_FOR_HISTORY = LONG_SMA_PERIOD + 1;
+
+// The real-data counterpart to buildStrategyContext() above — same output shape, calculated from
+// actual OHLCV candles (src/lib/indicators/) instead of proxied from a single day's snapshot.
+// Returns null when there isn't enough history yet (a fresh external provider connection, a
+// symbol without enough trading days, etc.), so the caller can fall back to the snapshot proxy
+// rather than run indicators over a window too short to mean anything.
+export function buildStrategyContextFromHistory(
+  instrument: Instrument,
+  candles: OHLCVCandle[],
+): StrategyContext | null {
+  if (candles.length < MIN_CANDLES_FOR_HISTORY) return null;
+
+  const sorted = [...candles].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const closes = sorted.map((candle) => candle.close);
+  const volumes = sorted.map((candle) => candle.volume);
+
+  const shortMovingAverage = calculateEMA(closes, SHORT_EMA_PERIOD);
+  const longMovingAverage = calculateSMA(closes, LONG_SMA_PERIOD);
+  const rsi = calculateRSI(closes, RSI_LOOKBACK_PERIOD);
+  const volumeRatio = calculateVolumeRatio(volumes, VOLUME_RATIO_LOOKBACK_PERIOD);
+  const momentumPercent = calculateMomentumPercent(closes, MOMENTUM_LOOKBACK_PERIOD);
+  const trendMomentum = calculateMomentumPercent(closes, TREND_MOMENTUM_LOOKBACK_PERIOD);
+
+  if (
+    shortMovingAverage === null ||
+    longMovingAverage === null ||
+    rsi === null ||
+    volumeRatio === null ||
+    momentumPercent === null ||
+    trendMomentum === null
+  ) {
+    return null;
+  }
+
+  const trend: MarketRegime =
+    trendMomentum > TREND_THRESHOLD_PERCENT
+      ? "Bullish"
+      : trendMomentum < -TREND_THRESHOLD_PERCENT
+        ? "Bearish"
+        : "Neutral";
+
+  return {
+    instrument,
+    shortMovingAverage: round2(shortMovingAverage),
+    longMovingAverage: round2(longMovingAverage),
+    rsi: round2(clamp(rsi, 0, 100)),
+    volumeRatio: round2(clamp(volumeRatio, VOLUME_RATIO_MIN, VOLUME_RATIO_MAX)),
+    trend,
+    momentumPercent: round2(momentumPercent),
+    historicalDataAvailable: true,
   };
 }
 

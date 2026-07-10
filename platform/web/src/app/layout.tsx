@@ -6,6 +6,7 @@ import { PaperTradesProvider } from "@/lib/state/paper-trades-context";
 import { BotDecisionLogProvider } from "@/lib/state/bot-decision-log-context";
 import { BotSchedulerProvider } from "@/lib/state/bot-scheduler-context";
 import { DecisionHistoryProvider } from "@/lib/state/decision-history-context";
+import { ServerScheduleProvider } from "@/lib/state/server-schedule-context";
 import "./globals.css";
 
 const inter = Inter({
@@ -33,9 +34,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <PaperTradesProvider>
             <BotDecisionLogProvider>
               <DecisionHistoryProvider>
-                <BotSchedulerProvider>
-                  <AppShell>{children}</AppShell>
-                </BotSchedulerProvider>
+                <ServerScheduleProvider>
+                  <BotSchedulerProvider>
+                    <AppShell>{children}</AppShell>
+                  </BotSchedulerProvider>
+                </ServerScheduleProvider>
               </DecisionHistoryProvider>
             </BotDecisionLogProvider>
           </PaperTradesProvider>

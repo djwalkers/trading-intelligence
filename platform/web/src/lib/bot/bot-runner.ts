@@ -211,7 +211,13 @@ export async function runBotScan(
     detail: `${portfolioSnapshotBefore.totalOpenTrades} open trade(s), £${portfolioSnapshotBefore.totalCapitalDeployed.toFixed(2)} deployed, £${portfolioSnapshotBefore.availableCash.toFixed(2)} available cash.`,
   });
 
-  const scores = getStrategyEngine().evaluateAll(instruments);
+  // Mission 9 — real SMA/EMA/RSI/momentum/volume-ratio from 90 days of OHLCV history when
+  // available, falling back per-instrument to the original snapshot-derived proxies otherwise
+  // (buildStrategyContextFromHistory/buildStrategyContext, src/lib/strategy-engine/build-context.ts).
+  // The three strategies, the ranking, and every risk rule below are completely unchanged — only
+  // the confidence/agreement values feeding into them may now differ, since they're computed from
+  // real history rather than a single day's snapshot.
+  const scores = await getStrategyEngine().evaluateAllWithHistory(instruments);
 
   // A "valid opportunity" has a clear directional call the app already considers tradeable —
   // this excludes Hold and Avoid before risk checks ever run, the same bar a human applies via

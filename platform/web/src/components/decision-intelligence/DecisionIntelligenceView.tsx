@@ -5,15 +5,31 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { SectionPanel } from "@/components/ui/SectionPanel";
 import { InfoNote } from "@/components/ui/InfoNote";
 import { Badge } from "@/components/ui/Badge";
+import { OutcomeSummaryPanel } from "@/components/decision-intelligence/OutcomeSummaryPanel";
 import { useDecisionHistory } from "@/lib/state/decision-history-context";
 import { useDecisionHistoryStatus } from "@/lib/state/use-decision-history-status";
-import type { DecisionRecord } from "@/lib/decision-intelligence";
-import { formatCurrencyUSD, formatDateTime } from "@/lib/utils/format";
+import type { DecisionOutcome, DecisionRecord } from "@/lib/decision-intelligence";
+import { formatCurrencyUSD, formatDateTime, formatPercent, formatSignedNumber } from "@/lib/utils/format";
+import { plToneClass } from "@/lib/utils/style";
 
 type ActionFilter = "All" | "Trade Opened" | "Rejected";
 type ConfidenceBand = "All" | "90+" | "75-89" | "60-74" | "<60";
+type OutcomeFilter = "All" | DecisionOutcome;
 
 const ALL = "All";
+
+// Minutes → a short, readable duration string (e.g. "45m", "3h 15m", "2d 4h") — holding durations
+// here range from minutes (a fast reversal) to potentially days, so a single unit would either be
+// unreadable at one extreme or misleadingly precise at the other.
+function formatHoldingDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+}
 
 function matchesConfidenceBand(confidence: number, band: ConfidenceBand): boolean {
   switch (band) {
@@ -44,6 +60,27 @@ function ActionBadge({ record }: { record: DecisionRecord }) {
   );
 }
 
+// Rejected decisions never have a trading outcome — there was no trade to win, lose, or break
+// even on — so this deliberately never shows "Pending" for them (which would misleadingly imply an
+// outcome is still coming). "N/A" is shown instead, visually distinct from every real outcome
+// badge, satisfying the mission's "should not be incorrectly classified as trading wins or losses."
+function OutcomeBadge({ record }: { record: DecisionRecord }) {
+  if (record.actionTaken !== "Trade Opened") {
+    return <span className="text-ink-600">N/A</span>;
+  }
+
+  const className =
+    record.outcome === "Win"
+      ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+      : record.outcome === "Loss"
+        ? "border-accent-red/30 bg-accent-red/10 text-accent-red"
+        : record.outcome === "Neutral"
+          ? "border-accent-blue/25 bg-accent-blue/10 text-accent-blue"
+          : "border-base-600 bg-base-800 text-ink-300";
+
+  return <Badge className={className}>{record.outcome}</Badge>;
+}
+
 export function DecisionIntelligenceView() {
   const { records } = useDecisionHistory();
   const status = useDecisionHistoryStatus();
@@ -53,6 +90,7 @@ export function DecisionIntelligenceView() {
   const [symbolFilter, setSymbolFilter] = useState(ALL);
   const [actionFilter, setActionFilter] = useState<ActionFilter>("All");
   const [confidenceBand, setConfidenceBand] = useState<ConfidenceBand>("All");
+  const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("All");
 
   const strategies = useMemo(
     () => Array.from(new Set(records.map((record) => record.strategyUsed))).sort(),
@@ -73,6 +111,13 @@ export function DecisionIntelligenceView() {
     if (symbolFilter !== ALL && record.symbol !== symbolFilter) return false;
     if (actionFilter !== "All" && record.actionTaken !== actionFilter) return false;
     if (!matchesConfidenceBand(record.confidence, confidenceBand)) return false;
+    // Outcome only ever describes an accepted decision — filtering by any outcome value
+    // deliberately excludes Rejected rows, rather than lumping them in under "Pending" (they have
+    // no trade to have an outcome at all).
+    if (outcomeFilter !== "All") {
+      if (record.actionTaken !== "Trade Opened") return false;
+      if (record.outcome !== outcomeFilter) return false;
+    }
     return true;
   });
 
@@ -97,6 +142,13 @@ export function DecisionIntelligenceView() {
           <span className="font-medium text-accent-red">{rejectedCount}</span> rejected
         </span>
       </div>
+
+      <SectionPanel
+        title="Outcome summary"
+        description="Accepted decisions only — paper-trading evidence, not a strategy performance claim"
+      >
+        <OutcomeSummaryPanel records={records} />
+      </SectionPanel>
 
       <div className="panel flex flex-wrap items-center gap-3 px-4 py-3">
         <label className="flex items-center gap-2 text-xs text-ink-400">
@@ -161,6 +213,21 @@ export function DecisionIntelligenceView() {
         </label>
 
         <label className="flex items-center gap-2 text-xs text-ink-400">
+          Outcome
+          <select
+            value={outcomeFilter}
+            onChange={(event) => setOutcomeFilter(event.target.value as OutcomeFilter)}
+            className="rounded-lg border border-base-600 bg-base-900 px-2 py-1 text-xs text-ink-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
+          >
+            <option value="All">All</option>
+            <option value="Pending">Pending</option>
+            <option value="Win">Win</option>
+            <option value="Loss">Loss</option>
+            <option value="Neutral">Neutral</option>
+          </select>
+        </label>
+
+        <label className="flex items-center gap-2 text-xs text-ink-400">
           Confidence
           <select
             value={confidenceBand}
@@ -209,6 +276,9 @@ export function DecisionIntelligenceView() {
                   <th className="px-4 py-2 font-medium">Action</th>
                   <th className="px-4 py-2 font-medium">Reason</th>
                   <th className="px-4 py-2 font-medium">Outcome</th>
+                  <th className="px-4 py-2 font-medium">Realised P/L</th>
+                  <th className="px-4 py-2 font-medium">Realised P/L %</th>
+                  <th className="px-4 py-2 font-medium">Holding duration</th>
                   <th className="px-4 py-2 font-medium">Recorded</th>
                 </tr>
               </thead>
@@ -234,7 +304,20 @@ export function DecisionIntelligenceView() {
                     <td className="max-w-xs px-4 py-2 text-ink-500">
                       {record.rejectionReason ?? "—"}
                     </td>
-                    <td className="px-4 py-2 text-ink-500">{record.outcome}</td>
+                    <td className="px-4 py-2">
+                      <OutcomeBadge record={record} />
+                    </td>
+                    <td className={`px-4 py-2 ${record.realisedPnl !== undefined ? plToneClass(record.realisedPnl) : "text-ink-600"}`}>
+                      {record.realisedPnl !== undefined ? formatSignedNumber(record.realisedPnl) : "—"}
+                    </td>
+                    <td className={`px-4 py-2 ${record.realisedPnlPercent !== undefined ? plToneClass(record.realisedPnlPercent) : "text-ink-600"}`}>
+                      {record.realisedPnlPercent !== undefined ? formatPercent(record.realisedPnlPercent) : "—"}
+                    </td>
+                    <td className="px-4 py-2 text-ink-500">
+                      {record.holdingDurationMinutes !== undefined
+                        ? formatHoldingDuration(record.holdingDurationMinutes)
+                        : "—"}
+                    </td>
                     <td className="px-4 py-2 text-ink-500">{formatDateTime(record.timestamp)}</td>
                   </tr>
                 ))}
@@ -245,9 +328,12 @@ export function DecisionIntelligenceView() {
       </SectionPanel>
 
       <InfoNote>
-        Outcome is always &quot;Pending&quot; today — this mission records evidence, it does not
-        yet judge whether a decision was a Win, Loss, or Neutral (that is explicit future work).
-        History is stored using the active persistence provider — currently{" "}
+        An accepted decision&apos;s outcome (Win/Loss/Neutral) is classified automatically once its
+        linked paper trade closes (Mission 11) — a Win/Loss threshold of just £0.01 either side of
+        break-even, so a trade that closes essentially flat reads as Neutral rather than an
+        arbitrary Win or Loss. Rejected candidates never have an outcome at all (shown as
+        &quot;N/A&quot;, not &quot;Pending&quot;) — there was no trade to win or lose. History is
+        stored using the active persistence provider — currently{" "}
         <strong className="font-medium text-ink-200">
           {status.mode === "Supabase" ? "Supabase" : "local browser storage"}
         </strong>

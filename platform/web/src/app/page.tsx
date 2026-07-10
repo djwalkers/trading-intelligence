@@ -10,6 +10,7 @@ import { IntelligenceSummaryCard } from "@/components/dashboard/IntelligenceSumm
 import { MarketDataStatusCard } from "@/components/dashboard/MarketDataStatusCard";
 import { StrategyEngineSummaryCard } from "@/components/dashboard/StrategyEngineSummaryCard";
 import { BotRunnerPanel } from "@/components/dashboard/BotRunnerPanel";
+import { ServerSchedulePanel } from "@/components/dashboard/ServerSchedulePanel";
 import {
   instruments,
   opportunities,
@@ -118,6 +119,14 @@ export default function DashboardPage() {
         viewAllHref="/bot-decisions"
       >
         <BotRunnerPanel instruments={instruments} />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Server schedule"
+        description="Runs on the VPS worker (Mission 8), independently of this browser tab — see System Health"
+        viewAllHref="/system-health"
+      >
+        <ServerSchedulePanel />
       </SectionPanel>
 
       <InfoNote>

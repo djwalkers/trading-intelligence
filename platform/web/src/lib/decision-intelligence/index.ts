@@ -4,3 +4,11 @@ export type { DecisionOutcome, DecisionPortfolioRiskResult, DecisionRecord } fro
 export type { DecisionHistoryStore } from "./decision-history-store";
 export type { DecisionHistoryMode, DecisionHistoryStatus } from "./decision-history-status";
 export { getDecisionHistoryStore } from "./get-decision-history-store";
+export {
+  NEUTRAL_PNL_THRESHOLD_GBP,
+  computeOutcomeUpdate,
+  findReconcilableOutcomes,
+  applyOutcomeUpdate,
+  applyOutcomeUpdates,
+} from "./outcome-analysis";
+export type { OutcomeUpdate } from "./outcome-analysis";

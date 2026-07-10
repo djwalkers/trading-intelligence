@@ -1,6 +1,7 @@
 import type { DecisionHistoryStore } from "./decision-history-store";
 import type { DecisionHistoryStatus } from "./decision-history-status";
 import type { DecisionRecord } from "./types";
+import type { OutcomeUpdate } from "./outcome-analysis";
 import { AuthRequiredError } from "@/lib/persistence/auth-required-error";
 
 type StatusListener = (status: DecisionHistoryStatus) => void;
@@ -102,5 +103,11 @@ export class ResilientDecisionHistoryStore implements DecisionHistoryStore {
       recordsStored: this.status.recordsStored + records.length,
       lastRecordedAt: mostRecent,
     });
+  }
+
+  // Not reflected in recordsStored/lastRecordedAt — those track new records being inserted, not
+  // existing ones being reclassified. An update touches no new rows and needs no status change.
+  async updateOutcomes(updates: OutcomeUpdate[]): Promise<void> {
+    await this.run((store) => store.updateOutcomes(updates));
   }
 }

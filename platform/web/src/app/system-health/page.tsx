@@ -4,9 +4,11 @@ import { InfoNote } from "@/components/ui/InfoNote";
 import { SystemHealthList } from "@/components/tables/SystemHealthList";
 import { PersistenceStatusPanel } from "@/components/system-health/PersistenceStatusPanel";
 import { MarketDataStatusPanel } from "@/components/system-health/MarketDataStatusPanel";
+import { HistoricalDataStatusPanel } from "@/components/system-health/HistoricalDataStatusPanel";
 import { AuthStatusPanel } from "@/components/system-health/AuthStatusPanel";
 import { StrategyEngineStatusPanel } from "@/components/system-health/StrategyEngineStatusPanel";
 import { BotRunnerStatusPanel } from "@/components/system-health/BotRunnerStatusPanel";
+import { ServerSchedulerStatusPanel } from "@/components/system-health/ServerSchedulerStatusPanel";
 import { DecisionIntelligenceStatusPanel } from "@/components/system-health/DecisionIntelligenceStatusPanel";
 import { marketStatus, systemServices, instruments } from "@/lib/mock";
 import { Badge } from "@/components/ui/Badge";
@@ -36,7 +38,7 @@ export default function SystemHealthPage() {
           <span className="text-ink-500">&middot; {marketStatus.nextEvent}</span>
         </div>
         <Badge className="border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
-          Build 1.3.0 · Mission 8
+          Build 1.3.0 · Mission 11
         </Badge>
       </div>
 
@@ -62,6 +64,13 @@ export default function SystemHealthPage() {
       </SectionPanel>
 
       <SectionPanel
+        title="Historical Data"
+        description="Where the Strategy Engine's OHLCV candle history comes from (Mission 9)"
+      >
+        <HistoricalDataStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
         title="Strategy Engine"
         description="Status of the deterministic strategy evaluation engine"
       >
@@ -77,6 +86,13 @@ export default function SystemHealthPage() {
         description="Manually-triggered autonomous paper trading status"
       >
         <BotRunnerStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Server Scheduler"
+        description="Server-side schedule stored in Supabase and executed by the VPS worker (Mission 10) — distinct from the browser schedule above"
+      >
+        <ServerSchedulerStatusPanel />
       </SectionPanel>
 
       <SectionPanel

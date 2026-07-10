@@ -11,13 +11,17 @@ const VOLUME_RATIO_THRESHOLD = 1.2;
 // A confirmed move needs two things agreeing, not just price on its own: a change big enough to
 // matter, and volume running above a typical session to confirm real participation rather than a
 // thin drift. Trend acts as a simple guardrail — a price pop against an already-opposing trend
-// isn't treated as confirmed momentum.
+// isn't treated as confirmed momentum. changePercent reads from context.momentumPercent (Mission
+// 9) — a real multi-day historical momentum reading when history is available, or
+// instrument.changePercent (today's single session) in the snapshot fallback — rather than
+// instrument.changePercent directly, so this strategy gets the same "from history when possible"
+// upgrade the other two strategies get through shortMovingAverage/longMovingAverage/rsi.
 export const momentumStrategy: Strategy = {
   id: STRATEGY_ID,
   name: STRATEGY_NAME,
   evaluate(context: StrategyContext): StrategyResult {
-    const { instrument, volumeRatio, trend } = context;
-    const changePercent = instrument.changePercent;
+    const { volumeRatio, trend, momentumPercent } = context;
+    const changePercent = momentumPercent;
     const confidence = Math.round(
       clamp(50 + Math.abs(changePercent) * 8 + (volumeRatio - 1) * 10, 50, 95),
     );

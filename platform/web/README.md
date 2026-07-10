@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 1.3.0 · Mission 8. A dark-themed prototype for a trading intelligence platform, built with Next.js
+Build 1.3.0 · Mission 11. A dark-themed prototype for a trading intelligence platform, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
@@ -93,13 +93,14 @@ npm run worker   # background worker (Mission 8) — see [VPS background worker]
   plus a live Authentication panel (auth enabled/disabled, current user, data scope), a live
   Persistence panel (current mode, connection status, last synchronisation time), a live Market
   Data panel (provider, connection/mode, last successful refresh, failure reason), a live
-  Strategy Engine panel (running status, strategies loaded, evaluation time), a live Bot Runner
-  panel (manual mode, last scan time, last action, candidates evaluated/rejected), a live Scheduler
-  block (Manual/Running/Stopped, current interval, last/next scheduled scan — Mission 4), a Portfolio
-  Risk Manager status block (active, open trade limit, capital deployment limit, sector exposure
-  limit), a Position Manager status block (active, max instrument position, add-to-position
-  confidence improvement, minimum add interval), and a Decision Intelligence status block (Mission 7
-  — status, records stored, last recorded).
+  Historical Data panel (Mission 9 — provider, connection mode, instruments loaded, last refresh),
+  a live Strategy Engine panel (running status, strategies loaded, evaluation time), a live Bot
+  Runner panel (manual mode, last scan time, last action, candidates evaluated/rejected), a live
+  Scheduler block (Manual/Running/Stopped, current interval, last/next scheduled scan — Mission 4),
+  a Portfolio Risk Manager status block (active, open trade limit, capital deployment limit,
+  sector exposure limit), a Position Manager status block (active, max instrument position,
+  add-to-position confidence improvement, minimum add interval), and a Decision Intelligence
+  status block (Mission 7 — status, records stored, last recorded).
 - **Sign in / Sign up / Forgot password / Reset password** — email/password authentication when
   Supabase is configured, styled to match the app's dark theme, including a full password reset
   flow. Every other page requires sign-in in that case; local prototype mode has no sign-in at
@@ -157,11 +158,22 @@ src/
                           called by the running app)
     market-data/          MarketDataProvider interface; MockMarketDataProvider and
                           ExternalMarketDataProvider implementations; ResilientMarketDataProvider
-                          (fallback + status tracking); provider-configured detection
+                          (fallback + status tracking); provider-configured detection. As of
+                          Mission 9, also HistoricalMarketDataProvider and its Mock/External/
+                          Resilient implementations — the same architecture, serving 90-day OHLCV
+                          candles instead of live quotes
+    indicators/             Mission 9 — six pure, reusable functions (calculateSMA, calculateEMA,
+                          calculateRSI, calculateMomentumPercent, calculateVolumeRatio,
+                          calculateVolatility), each a plain number-series-in, number-or-null-out
+                          calculation with no instrument lookups or provider calls
     strategy-engine/       StrategyEngine, the Strategy interface, the three strategy
-                          implementations, deterministic context derivation, and the Dashboard
-                          summary calculation — pure, synchronous, no configuration or failure
-                          mode
+                          implementations, deterministic context derivation (buildStrategyContext,
+                          unchanged since Build 1.3.0, plus Mission 9's
+                          buildStrategyContextFromHistory), and the Dashboard summary calculation.
+                          evaluateAll()/evaluateInstrument() remain pure, synchronous, no
+                          configuration or failure mode; evaluateAllWithHistory()/
+                          evaluateInstrumentWithHistory() (Mission 9) are async and call the
+                          historical market data provider
     bot/                   runBotScan() — ranks tradeable opportunities from the Strategy Engine,
                           applies four hardcoded individual risk rules, then the Position Manager
                           (Mission 3 — classifies a candidate against any existing position as
@@ -313,18 +325,67 @@ Crossover**, **RSI Reversal**, and **Momentum** — against every tracked instru
 them into an overall signal, confidence, recommendation, and **agreement level** (Strong Agreement
 → Moderate Agreement → Mixed Signals → Conflict, based on how much the three strategies agree).
 
-No configuration, no network calls, no failure mode — every strategy is a pure function over
-already-in-memory mock instrument data (there's no historical price series in this prototype, so
-moving averages, RSI, and volume ratio are all deterministic proxies derived from each
-instrument's current snapshot, documented in `build-context.ts`). The same instrument always
-produces the same result.
+The synchronous path (`evaluateAll`/`evaluateInstrument`) has no configuration, no network calls,
+no failure mode — every strategy is a pure function over already-in-memory mock instrument data,
+with moving averages, RSI, and volume ratio computed as deterministic proxies derived from each
+instrument's current snapshot (`buildStrategyContext`, `build-context.ts`). The same instrument
+always produces the same result. This is what Market Intelligence's Generated By / Strategy
+Breakdown / Agreement sections, Watchlist's Primary Strategy column, and the Dashboard's Strategy
+Summary card all still read from.
 
-This powers Market Intelligence's Generated By / Strategy Breakdown / Agreement sections,
-Watchlist's Primary Strategy column, the Dashboard's Strategy Summary card, System Health's
-Strategy Engine panel, and — for trades placed from Market Intelligence — permanent metadata on
-the resulting `PaperTrade` (`primaryStrategy`, `strategyAgreement`, `overallConfidence`,
-`evidenceSummary`, all optional). The Signals/Strategies pages are a separate, older mock system
-(Build 0.1.0) and don't use this engine at all.
+As of Mission 9, a second, async path exists — `evaluateAllWithHistory`/
+`evaluateInstrumentWithHistory` — that computes the same fields from **real** 90-day OHLCV history
+(via `buildStrategyContextFromHistory`) whenever enough is available, falling back to the snapshot
+proxies per-instrument otherwise. The Bot Runner (both the browser and the Mission 8 VPS worker)
+uses this path; the display pages above don't yet — see [Historical market
+data](#historical-market-data-mission-9) below for the full design and why that scoping line was
+drawn there.
+
+For trades placed from Market Intelligence, permanent metadata is still recorded on the resulting
+`PaperTrade` (`primaryStrategy`, `strategyAgreement`, `overallConfidence`, `evidenceSummary`, all
+optional). The Signals/Strategies pages are a separate, older mock system (Build 0.1.0) and don't
+use this engine at all.
+
+## Historical market data (Mission 9)
+
+A second data layer, parallel to [Market data mode](#market-data-mode) above — instead of live
+current-price quotes, this one serves 90 days of daily OHLCV candles per instrument, so the
+Strategy Engine can compute *real* SMA/EMA/RSI/momentum/volume-ratio values instead of proxying
+them off a single day's snapshot. Same architecture as market data mode, file-for-file:
+`HistoricalMarketDataProvider` interface, `MockHistoricalMarketDataProvider` (default),
+`ExternalHistoricalMarketDataProvider` (Finnhub's daily candle endpoint, reusing the exact same
+`NEXT_PUBLIC_MARKET_DATA_PROVIDER`/`NEXT_PUBLIC_MARKET_DATA_API_KEY` pair as live quotes — one
+vendor account, a different endpoint), and `ResilientHistoricalMarketDataProvider` (external when
+configured, mock fallback if it ever fails, tracked status).
+
+**Mock candles are deterministic, not random**: a seeded PRNG (seeded from each symbol's own name)
+generates a 90-day random walk, then the whole series is rescaled so its final close lands exactly
+on that instrument's current mock snapshot price — same instrument in, same 90-day history out,
+every run, every build, matching this app's existing "no randomness anywhere" convention for mock
+data.
+
+Six new pure, reusable indicator functions live in `src/lib/indicators/`: `calculateSMA`,
+`calculateEMA`, `calculateRSI` (Wilder's construction), `calculateMomentumPercent`,
+`calculateVolumeRatio`, `calculateVolatility` — each takes a plain number series and a period,
+returns the latest value or `null` if there isn't enough data yet.
+
+`buildStrategyContextFromHistory()` (`src/lib/strategy-engine/build-context.ts`) uses these to
+compute the same `StrategyContext` fields the original snapshot-proxy `buildStrategyContext()`
+always produced — EMA(12)/SMA(30) for the moving-average pair, RSI(14), a 20-day volume ratio, and
+(new) a 5-day `momentumPercent` field the Momentum strategy now reads instead of
+`instrument.changePercent` directly. Falls back to the snapshot proxy per-instrument when there
+isn't enough history (fewer than 31 candles) — never a hard failure. **Zero changes** were needed
+to the Moving Average Crossover or RSI Reversal strategies themselves; they already read these
+fields from context and don't know or care whether the values are real or proxied.
+
+Wired into the Bot Runner only (`runBotScan()` now calls the new async
+`StrategyEngine.evaluateAllWithHistory()` instead of the synchronous `evaluateAll()`) — both the
+browser and the Mission 8 VPS worker share this one call site, so neither duplicates the upgrade.
+The Dashboard/Market Intelligence/Watchlist display pages deliberately still use the synchronous,
+snapshot-proxy path — a disclosed scoping decision, not an oversight; see
+[`../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md)
+for why. System Health gained a matching "Historical Data" status panel (provider, connection mode,
+instruments loaded, last refresh) alongside the existing Market Data one.
 
 ## Bot Runner
 
@@ -406,8 +467,10 @@ timestamp, trigger type, rank), the opportunity (symbol, sector, side, entry pri
 behind it (which strategy led, agreement, confidence, evidence summary), the portfolio's state at
 that moment (deployed capital, available cash, sector exposure, total open trades), the decision
 itself (action taken, rejection reason, Position Manager action, portfolio risk result), and an
-outcome that is always `"Pending"` today — this mission records evidence, it deliberately does not
-yet judge whether a decision was good or bad.
+outcome — `Pending` until the linked trade closes, then automatically classified as `Win`/`Loss`/
+`Neutral` (Mission 11, see [Outcome analysis](#outcome-analysis-mission-11) below). Rejected
+candidates are never classified — this mission (7) records evidence for them, it doesn't judge
+whether a decision was good or bad.
 
 **Why rejected candidates matter as much as accepted ones**: a `PaperTrade` only ever exists for the
 one candidate (if any) that actually opened a position in a scan. A future Hermes needs to learn
@@ -433,8 +496,8 @@ filterable table — no charts — with independent filters for strategy, agreem
 (`DECISION_RECORD_SCHEMA_VERSION`), so a future Hermes build can evolve the shape without a breaking
 rewrite of history already recorded. See
 [`../../docs/product/MISSION-7-DECISION-INTELLIGENCE.md`](../../docs/product/MISSION-7-DECISION-INTELLIGENCE.md)
-for the full design, including how a future outcome-analysis mission would use the `decision_history`
-table's `update` RLS policy (already in place, unused until then).
+for the full design, including the `decision_history` table's `update` RLS policy — provisioned
+here, first used by Mission 11's outcome analysis.
 
 ## Server architecture preparation (Mission 6)
 
@@ -535,6 +598,111 @@ bypass, always-explicit `user_id`, never exposed to the browser). See
 [`../../docs/product/MISSION-8-VPS-WORKER.md`](../../docs/product/MISSION-8-VPS-WORKER.md) for the
 full lifecycle, deployment overview, environment variables, and verification — including a
 lock-contention test proving a second concurrent claim for the same user is correctly rejected.
+
+## Server schedule activation (Mission 10)
+
+Mission 8's VPS worker has always been able to read `bot_schedules` correctly — nothing in the app
+ever put a row there for it to find. This mission closes that gap: a signed-in user can now create,
+enable, disable, and retune their own server-side schedule directly from the Dashboard, and it's
+picked up automatically by the unmodified Mission 8 worker.
+
+New "Server schedule" panel on the Dashboard (below Bot Runner): an interval selector
+(15/30/60 minutes), Enable/Disable buttons, and live last scan/next scan/last status/last error —
+all read from and written to `bot_schedules` through a new client-safe (anon key, RLS-scoped)
+`ClientScheduleStore`, using a single atomic `upsert` (`bot_schedules.unique(user_id)`) rather than
+a read-then-branch. `user_id` is always stamped from the live session, exactly like every other
+Supabase-backed store in this app. There's no local-storage fallback for this feature specifically
+— a server schedule only means anything when it's genuinely in Supabase for the worker to read, so
+without Supabase configured the panel shows an explicit "unavailable" state instead of silently
+operating on nothing.
+
+**This is a second, independent scheduling system, not a replacement for the browser schedule**
+(Mission 4). The Dashboard now clearly labels both: "Browser schedule" (renamed from "Scheduled
+scans" this mission) runs only while the Dashboard tab is open and is stored in `localStorage`;
+"Server schedule" runs on the VPS worker independently of any browser tab and is stored in
+Supabase. They share no state. System Health gained a matching "Server Scheduler" panel, with an
+explicit disclosure that the browser has no way to detect whether a worker process is actually
+running — "last server scan" is the only indirect evidence of that.
+
+Verified live against the real, connected Supabase project (not a simulation): a schedule created
+via the exact upsert shape the new UI produces was picked up by an unmodified `npm run worker` and
+executed **66 times** over several hours, each one correctly evaluating the real Strategy Engine/
+Position Manager/Portfolio Risk pipeline, writing to `bot_decisions` and `decision_history`, and
+advancing `next_scan_at` by exactly the configured interval every time. See
+[`../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md)
+for the full design, schedule lifecycle, and verification detail.
+
+## Outcome analysis (Mission 11)
+
+Every accepted `DecisionRecord` (Mission 7) carried `outcome: "Pending"` forever, even after its
+linked trade closed. This mission classifies it: when a paper trade closes, its linked decision is
+automatically judged **Win** (realised P/L `> £0.01`), **Loss** (`< -£0.01`), or **Neutral**
+(everything in between, including exactly zero) — one shared threshold constant
+(`NEUTRAL_PNL_THRESHOLD_GBP`), one pure function (`computeOutcomeUpdate()`,
+`src/lib/decision-intelligence/outcome-analysis.ts`) that every trigger path below calls, so they
+can never disagree.
+
+**Two trigger paths, one shared function**: `DecisionHistoryProvider` sits inside
+`PaperTradesProvider` in the provider tree, so it reacts to the trade list changing and classifies
+the linked decision the moment a trade closes in the browser. The VPS worker (Mission 8) calls the
+same logic once per poll cycle, for every user with a server schedule (Mission 10) — no new
+permanent process, just one more step (`reconcileAllUsers()`) at the end of the existing cycle. A
+purely browser-only user (no server schedule) is covered by their own browser's reconciliation
+instead. Classification is idempotent by construction — a record's own `outcome !== "Pending"`
+guard, not a separate flag, makes repeated reconciliation passes a safe no-op once a record is
+classified.
+
+**Rejected decisions are never classified** — they show `"N/A"` on the Decision Intelligence page,
+never a `Pending` badge, so a reader never mistakes "no outcome applies" for "an outcome is coming."
+The page gained an Outcome filter (All/Pending/Win/Loss/Neutral, which only ever matches accepted
+decisions), three new columns (Realised P/L, Realised P/L %, holding duration), and a compact
+**Outcome summary** panel — accepted/closed/pending counts, aggregate realised P/L, win/loss/neutral
+counts, and a win rate computed as Wins ÷ (Wins + Losses) only, explicitly labelled as paper-trading
+evidence, not a claim of strategy profitability.
+
+New migration `0017_decision_outcomes.sql` adds five nullable columns to `decision_history`
+(`realised_pnl`, `realised_pnl_percent`, `holding_duration_minutes`, `closed_at`,
+`outcome_recorded_at`) plus a partial unique index enforcing one decision → at most one trade at the
+database level. **Confirmed not yet applied to the live Supabase project** — must be run manually
+via the SQL Editor (same standing limitation as every migration since Mission 5: no direct
+Postgres/SQL access in this environment). See
+[`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md)
+for the full outcome rules, reconciliation architecture, data-integrity guarantees, and verification
+detail, including a real bug found and fixed via live testing (a `select=*` against a column the
+migration hasn't added yet silently omits the key rather than erroring, which the original mapping
+code didn't account for).
+
+## What's new in Mission 11
+
+Closed paper trades now automatically classify their linked Decision Intelligence record as Win,
+Loss, or Neutral — the first real judgement this app has ever made about its own bot decisions, not
+just a record of what happened. See [Outcome analysis](#outcome-analysis-mission-11) above and
+[`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md)
+for the full write-up, including the still-outstanding manual migration step and the disclosed
+browser-verification gap.
+
+## What's new in Mission 10
+
+A signed-in user can now create, enable, disable, and retune a server-side bot schedule from the
+Dashboard — the missing piece that left Mission 8's VPS worker with nothing real to execute. No
+changes to worker trading logic; the unmodified worker picks up schedules created this way
+automatically. See [Server schedule activation](#server-schedule-activation-mission-10) above and
+[`../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md)
+for the full write-up, including a 66-scan live verification run against the real Supabase project.
+
+## What's new in Mission 9
+
+Real, calculated technical indicators (SMA, EMA, RSI, momentum %, volume ratio, volatility) computed
+from 90 days of deterministic mock (or optional external) OHLCV history, replacing the single-day
+snapshot proxies Moving Average Crossover/RSI Reversal/Momentum have used since Build 1.3.0 —
+wherever enough history is available, falling back to the original proxies otherwise. Wired into
+the Bot Runner (both browser and Mission 8's VPS worker share the one upgraded call site); the
+Dashboard/Market Intelligence/Watchlist display pages are unchanged, a disclosed scoping decision.
+New "Historical Data" System Health panel. No new trading strategies, no Hermes, no live trading.
+See [Historical market data](#historical-market-data-mission-9) above and
+[`../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md)
+for the full design and verification, including live confirmation that the new data genuinely
+changes which candidate the bot ranks first.
 
 ## What's new in Mission 8
 
@@ -770,14 +938,25 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
 
 ## Explicitly out of scope for this build
 
+- Dashboard/Market Intelligence/Watchlist strategy displays still use snapshot-proxy indicators,
+  not real history — only the Bot Runner uses Mission 9's `evaluateAllWithHistory()`, a disclosed
+  scoping decision (see `MISSION-9-HISTORICAL-MARKET-DATA.md`), not an oversight
+- `calculateVolatility` (Mission 9) is implemented and available but not read by any strategy or
+  risk rule yet — no 4th signal or volatility-aware sizing was in scope this mission
+- `ExternalHistoricalMarketDataProvider` (Mission 9) not live-tested against a real Finnhub API key
+  — no market data key configured in this environment, same standing disclosure as Build 1.0.0's
+  live-quote provider
 - Not deployed to a real VPS — Mission 8 built and verified (as far as this environment allows) a
   runnable background worker, `npm run worker`, but it has not been run against a real Postgres
   instance under a process supervisor on an actual server
-- No UI or admin path to create/enable a `bot_schedules` row — the worker (Mission 8) can execute a
-  schedule once one exists, but nothing in the app writes one yet (explicitly out of scope, "no UI
-  redesign")
 - No live concurrency test against a real Supabase project — Mission 8's lock-contention behaviour
   was verified against an in-memory fake client, not real concurrent Postgres UPDATEs
+- The Server Schedule panel's own click-handling (Enable/Disable/interval change) was not verified
+  against a real, live browser session — no test account password was available this session; the
+  exact database write it performs and the store logic it calls were both verified live instead
+  (see `MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`)
+- The browser schedule (Mission 4) and the server schedule (Mission 10) remain deliberately
+  separate systems, sharing no state — reconciling them into one was explicitly out of scope
 - No true 24/7 scheduling *from the browser* — the browser's own schedule (Mission 4) still only
   advances while the Dashboard tab is open; the worker (Mission 8) is the independent, tab-free path
 - No configurable bot risk rules — four individual, five position-level, and six portfolio-level
@@ -787,8 +966,15 @@ plain monochrome bars, colour only on the two score-band extremes (Excellent / A
   the resulting trade's scan id, portfolio risk metadata, and position metadata are persisted to
   Supabase, not the full candidate trace. Decision Intelligence (Mission 7) is the exception to
   this — its `decision_history` table records the full per-candidate detail, Supabase-scoped
-- Decision Intelligence records outcome as always "Pending" — no Win/Loss/Neutral judgement, no
-  outcome analysis, no learning or strategy optimisation from this history yet (Mission 7)
+- Outcome analysis (Mission 11) only classifies accepted decisions whose linked trade has closed —
+  Rejected candidates are never classified, and no learning or strategy-optimisation logic reads
+  these outcomes yet (that's Hermes, still out of scope)
+- Migration `0017_decision_outcomes.sql` (Mission 11) is confirmed **not yet applied** to the live
+  Supabase project — must be run manually via the SQL Editor before real outcome values persist
+- Outcome analysis's interactive browser click-through (running a scan, closing a trade, watching
+  the outcome badge/summary update live) was not verified this session — neither browser-automation
+  tool available to this session was reachable (see `MISSION-11-OUTCOME-ANALYSIS.md`); pure-function
+  and server-rendered-HTML checks were used instead
 - No merge between Decision Intelligence's `decision_history` and Mission 6's dormant
   `bot_decisions` table — they serve different purposes (live per-candidate history vs. a future
   worker's own scan log) and remain separate
@@ -850,8 +1036,11 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/MISSION-5-VERIFICATION-READINESS.md`](../../docs/product/MISSION-5-VERIFICATION-READINESS.md),
 [`../../docs/product/MISSION-6-SERVER-ARCHITECTURE-PREPARATION.md`](../../docs/product/MISSION-6-SERVER-ARCHITECTURE-PREPARATION.md),
 [`../../docs/product/MISSION-7-DECISION-INTELLIGENCE.md`](../../docs/product/MISSION-7-DECISION-INTELLIGENCE.md),
+[`../../docs/product/MISSION-8-VPS-WORKER.md`](../../docs/product/MISSION-8-VPS-WORKER.md),
+[`../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md),
+[`../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md),
 and
-[`../../docs/product/MISSION-8-VPS-WORKER.md`](../../docs/product/MISSION-8-VPS-WORKER.md)
+[`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

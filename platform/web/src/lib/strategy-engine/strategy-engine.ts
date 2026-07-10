@@ -1,16 +1,23 @@
 import type {
   AgreementLevel,
   Instrument,
+  OHLCVCandle,
   Recommendation,
   StrategyResult,
   StrategyScore,
   StrategySignal,
 } from "@/lib/types";
-import { buildStrategyContext } from "./build-context";
+import { buildStrategyContext, buildStrategyContextFromHistory } from "./build-context";
 import { movingAverageCrossoverStrategy } from "./strategies/moving-average-crossover";
 import { rsiReversalStrategy } from "./strategies/rsi-reversal";
 import { momentumStrategy } from "./strategies/momentum";
 import type { Strategy } from "./strategy";
+import { getHistoricalMarketDataProvider } from "@/lib/market-data/get-historical-market-data-provider";
+
+// How many days of history evaluateAllWithHistory() requests per scan — comfortably above
+// MIN_CANDLES_FOR_HISTORY (build-context.ts) so every registered indicator's lookback window has
+// enough data, and matching the mission's "90 daily candles minimum" mock requirement.
+const HISTORY_LOOKBACK_DAYS = 90;
 
 const REGISTERED_STRATEGIES: Strategy[] = [
   movingAverageCrossoverStrategy,
@@ -24,9 +31,13 @@ const REGISTERED_STRATEGIES: Strategy[] = [
 // confidence — a pre-existing asymmetry this build doesn't change.
 const STRONG_BUY_CONFIDENCE_THRESHOLD = 75;
 
-// No configuration, no network calls, no failure mode — every strategy is a pure function over
-// already-in-memory mock data, so unlike MarketDataProvider or the persistence layer, this has
-// nothing to be "resilient" against. It either runs or the process itself is broken.
+// evaluateInstrument()/evaluateAll() below have no configuration, no network calls, no failure
+// mode — every strategy is a pure function over already-in-memory mock data, so this synchronous
+// path has nothing to be "resilient" against; it either runs or the process itself is broken.
+// evaluateInstrumentWithHistory()/evaluateAllWithHistory() (Mission 9) are the exception: they
+// call the historical market data provider, which — like MarketDataProvider — can be configured,
+// can fail, and does have a resilient fallback (to buildStrategyContext()'s snapshot proxies, the
+// same values the synchronous path always used).
 export class StrategyEngine {
   constructor(private readonly strategies: Strategy[] = REGISTERED_STRATEGIES) {}
 
@@ -55,6 +66,41 @@ export class StrategyEngine {
     const scores = this.evaluateAll(instruments);
     const evaluationTimeMs = performance.now() - start;
     return { scores, evaluationTimeMs };
+  }
+
+  // One instrument, given its own candles already fetched — falls back to the snapshot-proxy
+  // context (buildStrategyContext) whenever there isn't enough history for that symbol yet
+  // (MIN_CANDLES_FOR_HISTORY, build-context.ts), so a single thin symbol never turns the whole
+  // scan into a failure. The three strategies themselves are never called differently either way
+  // — they only ever read StrategyContext fields, never know which path produced them.
+  evaluateInstrumentWithHistory(instrument: Instrument, candles: OHLCVCandle[]): StrategyScore {
+    const context = buildStrategyContextFromHistory(instrument, candles) ?? buildStrategyContext(instrument);
+    const results = this.strategies.map((strategy) => strategy.evaluate(context));
+    return aggregateResults(instrument, results);
+  }
+
+  // The history-aware entry point Bot Runner uses (src/lib/bot/bot-runner.ts) — fetches candles
+  // for the whole batch in one call (same "batched, not per-symbol" convention getQuotes() and
+  // getHistoricalCandles() already follow), then evaluates each instrument against its own slice.
+  // Never throws on missing history for an individual symbol; only a provider-level failure
+  // ResilientHistoricalMarketDataProvider itself can't recover from would propagate.
+  async evaluateAllWithHistory(instruments: Instrument[]): Promise<StrategyScore[]> {
+    const symbols = instruments.map((instrument) => instrument.symbol);
+    const candles = await getHistoricalMarketDataProvider().getHistoricalCandles(
+      symbols,
+      HISTORY_LOOKBACK_DAYS,
+    );
+
+    const candlesBySymbol = new Map<string, OHLCVCandle[]>();
+    for (const candle of candles) {
+      const existing = candlesBySymbol.get(candle.symbol);
+      if (existing) existing.push(candle);
+      else candlesBySymbol.set(candle.symbol, [candle]);
+    }
+
+    return instruments.map((instrument) =>
+      this.evaluateInstrumentWithHistory(instrument, candlesBySymbol.get(instrument.symbol) ?? []),
+    );
   }
 }
 

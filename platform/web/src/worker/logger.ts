@@ -17,6 +17,8 @@ export type WorkerLogEvent =
   | "lock_released"
   | "scan_failed"
   | "poll_failed"
+  | "outcomes_reconciled"
+  | "reconcile_failed"
   | "worker_finished";
 
 export function log(event: WorkerLogEvent, details?: Record<string, unknown>): void {

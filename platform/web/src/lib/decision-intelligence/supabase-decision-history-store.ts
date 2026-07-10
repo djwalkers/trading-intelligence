@@ -3,6 +3,7 @@ import type { AgreementLevel, PaperTradeSide, PositionAction } from "@/lib/types
 import type { ScanTriggerType } from "@/lib/bot/types";
 import type { DecisionHistoryStore } from "./decision-history-store";
 import type { DecisionOutcome, DecisionPortfolioRiskResult, DecisionRecord } from "./types";
+import type { OutcomeUpdate } from "./outcome-analysis";
 import { AuthRequiredError } from "@/lib/persistence/auth-required-error";
 
 // Row shape for decision_history (0016_decision_history.sql, Mission 7). Exported so the
@@ -37,6 +38,12 @@ export interface DecisionHistoryRow {
   portfolio_risk_result: DecisionPortfolioRiskResult;
   outcome: DecisionOutcome;
   created_trade_id: string | null;
+  // Mission 11 — null until outcome analysis classifies this record (see outcome-analysis.ts).
+  realised_pnl: number | string | null;
+  realised_pnl_percent: number | string | null;
+  holding_duration_minutes: number | null;
+  closed_at: string | null;
+  outcome_recorded_at: string | null;
 }
 
 function toNumber(value: number | string | null): number {
@@ -72,6 +79,11 @@ export function toDbDecisionRecord(record: DecisionRecord) {
     portfolio_risk_result: record.portfolioRiskResult,
     outcome: record.outcome,
     created_trade_id: record.createdTradeId ?? null,
+    realised_pnl: record.realisedPnl ?? null,
+    realised_pnl_percent: record.realisedPnlPercent ?? null,
+    holding_duration_minutes: record.holdingDurationMinutes ?? null,
+    closed_at: record.closedAt ?? null,
+    outcome_recorded_at: record.outcomeRecordedAt ?? null,
   };
 }
 
@@ -103,6 +115,15 @@ export function fromDbDecisionRecord(row: DecisionHistoryRow): DecisionRecord {
     portfolioRiskResult: row.portfolio_risk_result,
     outcome: row.outcome,
     createdTradeId: row.created_trade_id ?? undefined,
+    // Loose nullish checks (not strict === null): until migration 0017 is applied to a given
+    // Supabase project, these columns don't exist yet, so a `select("*")` response omits the key
+    // entirely (row.realised_pnl is `undefined`, not `null`) — both cases must map to `undefined`
+    // here, not fall through to toNumber(undefined), which would silently produce NaN.
+    realisedPnl: row.realised_pnl == null ? undefined : toNumber(row.realised_pnl),
+    realisedPnlPercent: row.realised_pnl_percent == null ? undefined : toNumber(row.realised_pnl_percent),
+    holdingDurationMinutes: row.holding_duration_minutes ?? undefined,
+    closedAt: row.closed_at ?? undefined,
+    outcomeRecordedAt: row.outcome_recorded_at ?? undefined,
   };
 }
 
@@ -140,5 +161,31 @@ export class SupabaseDecisionHistoryStore implements DecisionHistoryStore {
     const rows = records.map((record) => ({ ...toDbDecisionRecord(record), user_id: userId }));
     const { error } = await this.client.from("decision_history").insert(rows);
     if (error) throw new Error(error.message);
+  }
+
+  // One UPDATE per record rather than a single batched call — PostgREST has no clean way to
+  // upsert-with-different-values-per-row in one request, and reconciliation only ever touches a
+  // handful of newly-closed trades at a time, so the simplicity is worth more than the round trips
+  // here. Matched on client_record_id + user_id, both already indexed via RLS's own
+  // auth.uid() = user_id policy and the table's primary access pattern.
+  async updateOutcomes(updates: OutcomeUpdate[]): Promise<void> {
+    if (updates.length === 0) return;
+    const userId = await this.requireUserId();
+
+    for (const update of updates) {
+      const { error } = await this.client
+        .from("decision_history")
+        .update({
+          outcome: update.outcome,
+          realised_pnl: update.realisedPnl,
+          realised_pnl_percent: update.realisedPnlPercent,
+          holding_duration_minutes: update.holdingDurationMinutes,
+          closed_at: update.closedAt,
+          outcome_recorded_at: update.outcomeRecordedAt,
+        })
+        .eq("client_record_id", update.recordId)
+        .eq("user_id", userId);
+      if (error) throw new Error(error.message);
+    }
   }
 }
