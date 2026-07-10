@@ -1,5 +1,6 @@
 import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { getServerConfig } from "@/lib/config/server-config";
 
 // Server-only (see the "server-only" import above — Next.js fails the build if any client
 // component ever imports this module, even transitively). SUPABASE_SERVICE_ROLE_KEY is
@@ -17,10 +18,9 @@ export function getServiceRoleClient(): SupabaseClient | null {
   if (attempted) return client;
   attempted = true;
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceRoleKey) return null;
+  const { supabaseUrl, supabaseServiceRoleKey } = getServerConfig();
+  if (!supabaseUrl || !supabaseServiceRoleKey) return null;
 
-  client = createClient(url, serviceRoleKey, { auth: { persistSession: false } });
+  client = createClient(supabaseUrl, supabaseServiceRoleKey, { auth: { persistSession: false } });
   return client;
 }

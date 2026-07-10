@@ -3,6 +3,8 @@ import type { DecisionHistoryStatus } from "./decision-history-status";
 import type { DecisionRecord } from "./types";
 import type { OutcomeUpdate } from "./outcome-analysis";
 import { AuthRequiredError } from "@/lib/persistence/auth-required-error";
+import { logger } from "@/lib/logger/logger";
+import { pushToastOnce } from "@/lib/notifications/toast-bus";
 
 type StatusListener = (status: DecisionHistoryStatus) => void;
 
@@ -18,6 +20,7 @@ export class ResilientDecisionHistoryStore implements DecisionHistoryStore {
   private fallenBack = false;
   private readonly listeners = new Set<StatusListener>();
   private status: DecisionHistoryStatus;
+  private readonly fallbackWarnedRef = { current: false };
 
   constructor(primary: DecisionHistoryStore | null, fallback: DecisionHistoryStore) {
     this.fallback = fallback;
@@ -68,7 +71,16 @@ export class ResilientDecisionHistoryStore implements DecisionHistoryStore {
       }
 
       const reason = error instanceof Error ? error.message : "Unknown persistence error";
-      console.error("[decision-history] Supabase unavailable, falling back to local storage:", error);
+      logger.error("Supabase unavailable, falling back to local storage", {
+        component: "decision-history",
+        errorCode: "PERSISTENCE_ERROR",
+        reason,
+      });
+      pushToastOnce(
+        "warning",
+        "Your database is unavailable — AI decision history is being saved to this browser only until you reload.",
+        this.fallbackWarnedRef,
+      );
 
       this.fallenBack = true;
       this.active = this.fallback;

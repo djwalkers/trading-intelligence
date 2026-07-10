@@ -1,6 +1,7 @@
 import type { MarketDataStatus } from "@/lib/types";
 import type { MarketQuote } from "@/lib/types";
 import type { MarketDataProvider } from "./market-data-provider";
+import { logger } from "@/lib/logger/logger";
 
 type StatusListener = (status: MarketDataStatus) => void;
 
@@ -66,7 +67,11 @@ export class ResilientMarketDataProvider implements MarketDataProvider {
       return quotes;
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown market data error";
-      console.error("[market-data] External provider unavailable, falling back to mock:", error);
+      logger.error("External provider unavailable, falling back to mock", {
+        component: "market-data",
+        errorCode: "MARKET_DATA_ERROR",
+        reason,
+      });
 
       this.fallenBack = true;
       this.active = this.fallback;

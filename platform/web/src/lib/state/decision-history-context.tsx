@@ -5,6 +5,7 @@ import type { DecisionRecord } from "@/lib/decision-intelligence";
 import { getDecisionHistoryStore, findReconcilableOutcomes, applyOutcomeUpdates } from "@/lib/decision-intelligence";
 import { useAuth } from "@/lib/auth/auth-context";
 import { usePaperTrades } from "@/lib/state/paper-trades-context";
+import { logger } from "@/lib/logger/logger";
 
 interface DecisionHistoryContextValue {
   records: DecisionRecord[];
@@ -84,18 +85,30 @@ export function DecisionHistoryProvider({ children }: { children: ReactNode }) {
     getDecisionHistoryStore()
       .updateOutcomes(updates)
       .catch((error) => {
-        console.error("[decision-history] Failed to persist outcome update:", error);
+        logger.error("Failed to persist outcome update", {
+          component: "decision-history",
+          errorCode: "PERSISTENCE_ERROR",
+          reason: error instanceof Error ? error.message : "Unknown error",
+        });
       });
   }, [trades, loaded.records, isHydrated]);
 
   function addRecords(records: DecisionRecord[]) {
     if (records.length === 0) return;
     setLoaded((previous) => ({ key: previous.key, records: [...records, ...previous.records] }));
-    // Same fire-and-forget handling as PaperTradesProvider.addTrade — AuthRequiredError or a
-    // genuine Supabase failure already gets surfaced via the resilient store's status, not here.
+    // AuthRequiredError or a genuine Supabase failure already gets surfaced via the resilient
+    // store's status elsewhere — this just makes sure a failure (including the local-storage
+    // fallback itself now failing, Build 1.13.0) is never silently swallowed without at least a
+    // logged diagnostic event.
     getDecisionHistoryStore()
       .addRecords(records)
-      .catch(() => {});
+      .catch((error) => {
+        logger.error("Failed to persist decision records", {
+          component: "decision-history",
+          errorCode: "PERSISTENCE_ERROR",
+          reason: error instanceof Error ? error.message : "Unknown error",
+        });
+      });
   }
 
   return (

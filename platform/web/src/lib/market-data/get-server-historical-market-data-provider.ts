@@ -1,4 +1,5 @@
 import "server-only";
+import { getServerConfig } from "@/lib/config/server-config";
 import { AlphaVantageHistoricalMarketDataProvider } from "./alpha-vantage-historical-market-data-provider";
 import { MockHistoricalMarketDataProvider } from "./mock-historical-market-data-provider";
 import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
@@ -9,13 +10,13 @@ let provider: ResilientHistoricalMarketDataProvider | null = null;
 // Purely informational — mirrors isExternalMarketDataConfigured()'s "presence check, not a
 // guarantee it works" convention.
 export function isAlphaVantageConfigured(): boolean {
-  return Boolean(process.env.ALPHA_VANTAGE_API_KEY);
+  return getServerConfig().isAlphaVantageConfigured;
 }
 
 function createAlphaVantageProvider(): HistoricalMarketDataProvider | null {
-  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
-  if (!apiKey) return null;
-  return new AlphaVantageHistoricalMarketDataProvider(apiKey);
+  const { alphaVantageApiKey } = getServerConfig();
+  if (!alphaVantageApiKey) return null;
+  return new AlphaVantageHistoricalMarketDataProvider(alphaVantageApiKey);
 }
 
 // Maintenance 1.11.2 — the server-only counterpart to get-historical-market-data-provider.ts

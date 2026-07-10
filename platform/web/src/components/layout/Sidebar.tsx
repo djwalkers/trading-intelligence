@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { navItems } from "@/components/layout/nav-items";
 import { useAuth } from "@/lib/auth/auth-context";
+import { APP_VERSION } from "@/lib/version";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -67,7 +68,7 @@ export function Sidebar() {
 
       <div className="border-t border-base-700 px-4 py-4">
         <p className="text-xs leading-relaxed text-ink-500">
-          Build 1.12.0
+          Build {APP_VERSION}
           <br />
           Paper trading only. No live trading.
         </p>

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { useAuth } from "@/lib/auth/auth-context";
 import { useServerSchedule } from "@/lib/state/server-schedule-context";
 import { formatDateTime } from "@/lib/utils/format";
+import { useToast } from "@/lib/notifications/use-toast";
 
 const INTERVAL_OPTIONS = [15, 30, 60] as const;
 const DEFAULT_INTERVAL_MINUTES = 30;
@@ -21,16 +22,26 @@ export function ServerAutomationPanel() {
   const [intervalOverride, setIntervalOverride] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const { notify } = useToast();
 
   const intervalMinutes = intervalOverride ?? schedule?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
 
-  async function handleSave(nextEnabled: boolean, nextIntervalMinutes: number) {
+  async function handleSave(
+    nextEnabled: boolean,
+    nextIntervalMinutes: number,
+    kind: "enable" | "disable" | "interval",
+  ) {
     setIsSaving(true);
     setActionError(null);
     try {
       await save(nextEnabled, nextIntervalMinutes);
+      if (kind === "enable") notify("success", "Always-on automatic scanning enabled.");
+      else if (kind === "disable") notify("info", "Always-on automatic scanning disabled.");
+      else notify("success", "Settings saved.");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to save automatic scanning settings.");
+      const message = err instanceof Error ? err.message : "Failed to save automatic scanning settings.";
+      setActionError(message);
+      notify("error", message);
     } finally {
       setIsSaving(false);
     }
@@ -97,7 +108,7 @@ export function ServerAutomationPanel() {
               // the next scan time from now), rather than silently waiting for the old cadence to
               // elapse — the same "acting on a value takes effect right away" behaviour Enable/
               // Disable has below.
-              if (isEnabled) void handleSave(true, next);
+              if (isEnabled) void handleSave(true, next, "interval");
             }}
             disabled={isSaving}
             className="rounded-lg border border-base-600 bg-base-900 px-2 py-1 text-xs text-ink-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -112,7 +123,7 @@ export function ServerAutomationPanel() {
 
         <button
           type="button"
-          onClick={() => handleSave(true, intervalMinutes)}
+          onClick={() => handleSave(true, intervalMinutes, "enable")}
           disabled={isSaving || isEnabled}
           className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-3 py-1.5 text-xs font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >
@@ -120,7 +131,7 @@ export function ServerAutomationPanel() {
         </button>
         <button
           type="button"
-          onClick={() => handleSave(false, intervalMinutes)}
+          onClick={() => handleSave(false, intervalMinutes, "disable")}
           disabled={isSaving || !isEnabled}
           className="rounded-lg border border-base-600 bg-base-800 px-3 py-1.5 text-xs font-medium text-ink-300 transition-colors hover:bg-base-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >

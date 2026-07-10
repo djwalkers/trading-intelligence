@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { BotDecision } from "@/lib/bot";
+import { setItemSafely } from "@/lib/persistence/safe-local-storage";
 
 // Bumped to v2 in Mission 1.1 (candidates/trace/scanId replaced the old flat riskChecks list), to
 // v3 in Mission 2 (candidates gained individual/portfolio risk fields, decisions gained a
@@ -55,9 +56,7 @@ export function BotDecisionLogProvider({ children }: { children: ReactNode }) {
   function addDecision(decision: BotDecision) {
     setDecisions((previous) => {
       const next = [decision, ...previous].slice(0, MAX_ENTRIES);
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      }
+      setItemSafely(STORAGE_KEY, JSON.stringify(next), "bot-decision-log");
       return next;
     });
   }

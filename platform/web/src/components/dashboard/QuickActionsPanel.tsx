@@ -30,6 +30,12 @@ export function QuickActionsPanel({ instruments }: QuickActionsPanelProps) {
   async function handleScan() {
     setAnnouncement("Scan started.");
     const decision = await runScan("Manual");
+    if (!decision) {
+      // A failure toast has already been shown by useBotScanRunner — this just keeps the
+      // sr-only announcement in sync rather than leaving "Scan started." as the last thing read.
+      setAnnouncement("Scan failed. See the notification for details.");
+      return;
+    }
     setAnnouncement(
       decision.tradeCreated
         ? `Scan complete. Trade opened for ${decision.selectedInstrument ?? "an instrument"}.`

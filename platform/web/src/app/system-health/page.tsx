@@ -13,6 +13,7 @@ import { TradingModeStatusPanel } from "@/components/system-health/TradingModeSt
 import { AIDecisionHistoryStatusPanel } from "@/components/system-health/AIDecisionHistoryStatusPanel";
 import { instruments } from "@/lib/mock";
 import { getStrategyEngine } from "@/lib/strategy-engine";
+import { APP_VERSION } from "@/lib/version";
 
 export const metadata = {
   title: "Operations Centre | Trading Intelligence Platform",
@@ -84,6 +85,20 @@ export default function SystemHealthPage() {
         description="Long-term record of every candidate the AI Engine has evaluated"
       >
         <AIDecisionHistoryStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Diagnostics"
+        description="Build identity and where deployment monitoring can check platform status"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <span className="text-sm text-ink-300">Build {APP_VERSION}</span>
+          <span className="text-xs text-ink-500">
+            This platform exposes a <code className="text-ink-300">/api/health</code> endpoint for
+            external uptime monitoring — it reports application, persistence, and market data
+            status, and never triggers a scan or trade.
+          </span>
+        </div>
       </SectionPanel>
 
       <InfoNote>

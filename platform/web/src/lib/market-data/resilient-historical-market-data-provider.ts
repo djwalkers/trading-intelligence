@@ -1,6 +1,7 @@
 import type { HistoricalDataStatus } from "@/lib/types";
 import type { OHLCVCandle } from "@/lib/types";
 import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
+import { logger } from "@/lib/logger/logger";
 
 type StatusListener = (status: HistoricalDataStatus) => void;
 
@@ -86,7 +87,11 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
       return candles;
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown historical data error";
-      console.error("[historical-market-data] External provider unavailable, falling back to mock:", error);
+      logger.error("External provider unavailable, falling back to mock", {
+        component: "historical-market-data",
+        errorCode: "MARKET_DATA_ERROR",
+        reason,
+      });
 
       this.fallenBack = true;
       this.active = this.fallback;

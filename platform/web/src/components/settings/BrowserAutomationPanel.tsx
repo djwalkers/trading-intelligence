@@ -7,6 +7,7 @@ import {
   type SchedulerMode,
 } from "@/lib/state/bot-scheduler-context";
 import { formatDateTime } from "@/lib/utils/format";
+import { useToast } from "@/lib/notifications/use-toast";
 
 const MODE_OPTIONS: { value: SchedulerMode; label: string }[] = [
   { value: "Manual", label: "Manual only" },
@@ -24,6 +25,7 @@ const MODE_OPTIONS: { value: SchedulerMode; label: string }[] = [
 export function BrowserAutomationPanel() {
   const scheduler = useBotScheduler();
   const currentIntervalMinutes = SCHEDULE_INTERVAL_MINUTES[scheduler.mode];
+  const { notify } = useToast();
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
@@ -60,7 +62,10 @@ export function BrowserAutomationPanel() {
 
         <button
           type="button"
-          onClick={() => scheduler.start()}
+          onClick={() => {
+            scheduler.start();
+            notify("success", "Automatic scanning enabled for this browser.");
+          }}
           disabled={scheduler.mode === "Manual" || scheduler.status === "Running"}
           className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-3 py-1.5 text-xs font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >
@@ -68,7 +73,10 @@ export function BrowserAutomationPanel() {
         </button>
         <button
           type="button"
-          onClick={() => scheduler.stop()}
+          onClick={() => {
+            scheduler.stop();
+            notify("info", "Automatic scanning disabled for this browser.");
+          }}
           disabled={scheduler.status !== "Running"}
           className="rounded-lg border border-base-600 bg-base-800 px-3 py-1.5 text-xs font-medium text-ink-300 transition-colors hover:bg-base-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >

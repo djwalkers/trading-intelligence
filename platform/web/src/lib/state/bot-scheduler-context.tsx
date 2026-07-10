@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { setItemSafely } from "@/lib/persistence/safe-local-storage";
 
 export type SchedulerMode = "Manual" | "Every15" | "Every30" | "Every60";
 export type SchedulerStatus = "Stopped" | "Running";
@@ -51,8 +52,7 @@ function nextScanFrom(epochMs: number, mode: SchedulerMode): string | null {
 }
 
 function writeStorage(state: BotSchedulerState) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  setItemSafely(STORAGE_KEY, JSON.stringify(state), "bot-scheduler");
 }
 
 // Deliberately local-browser-only, like the bot decision log (Mission 1) — this is scheduling

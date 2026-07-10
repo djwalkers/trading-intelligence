@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 1.12.2. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
+Build 1.13.0. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
@@ -30,8 +30,49 @@ Other scripts:
 npm run build    # production build
 npm run start    # serve the production build
 npm run lint     # lint the project
+npm test         # run the test suite (Vitest — config validation, health endpoint, hydration, modal focus trap, accessibility scan)
 npm run worker   # background worker (Mission 8) — see [VPS background worker](#vps-background-worker-mission-8) below
 ```
+
+## Environment configuration
+
+Every environment variable is optional — the app runs fully standalone with none of them set (local
+prototype mode: mock market data, browser-storage persistence, no authentication). Copy
+`.env.example` to `.env.local` and fill in only what you need; its header documents every variable's
+required/optional and server-only/client-safe status in full.
+
+**Local development**: no `.env.local` needed at all to get started — `npm run dev` works
+immediately in local prototype mode.
+
+**Production configuration**: same variables, set via your process manager's environment (see
+[`docs/operations/DEPLOYMENT.md`](../../docs/operations/DEPLOYMENT.md)) rather than a `.env.local`
+file. `NODE_ENV=production` (set automatically by `next start`/PM2) also switches the structured
+logger (`src/lib/logger/logger.ts`) to quieter, single-line JSON output.
+
+**Worker configuration**: the worker (`npm run worker`) additionally needs
+`SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_SUPABASE_URL` to have anything to do — without them it
+logs a clear `scan_failed` reason and exits rather than retry-looping uselessly.
+
+**Client-exposed variable rules**: only `NEXT_PUBLIC_`-prefixed variables ever reach the browser
+bundle, and only because Next.js statically inlines that exact literal at build time — this project
+centralises that read in `src/lib/config/client-config.ts` rather than scattering
+`process.env.NEXT_PUBLIC_*` reads throughout the app. `ALPHA_VANTAGE_API_KEY` and
+`SUPABASE_SERVICE_ROLE_KEY` are never prefixed this way and are further protected by the
+`server-only` package, which fails the production build if a client component ever imports a module
+that touches them, even transitively.
+
+**Common startup failures**: as of Build 1.13.0, the only way a valid environment configuration
+fails validation is a *half-set pair* — e.g. `NEXT_PUBLIC_SUPABASE_URL` set without
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` — which throws a clear error naming exactly which variable is
+missing, at startup, rather than silently behaving as if Supabase were entirely unconfigured. Fully
+unset (everything optional, nothing set) and fully set (a complete, valid pair) are both always
+valid.
+
+**How configuration validation behaves**: `src/lib/config/env.ts` provides small, dependency-free
+parsing primitives (`parseBoolean`, `parseInteger`, `parseUrl`, `requirePairing`); `client-config.ts`
+and `server-config.ts` use them to validate their respective variables once per process lifetime,
+caching the result (and the same error, if any) for every subsequent read. See
+[`docs/product/BUILD-1.13.0.md`](../../docs/product/BUILD-1.13.0.md) for the full design.
 
 ## What's included
 
@@ -709,6 +750,22 @@ detail, including a real bug found and fixed via live testing (a `select=*` agai
 migration hasn't added yet silently omits the key rather than erroring, which the original mapping
 code didn't account for).
 
+## What's new in Build 1.13.0
+
+A production-readiness and operational-hardening pass: a validated, central environment
+configuration layer (`src/lib/config/`) that fails loudly on a half-configured variable pair
+instead of silently misbehaving; a shared `AppError` normalisation layer and structured logger used
+at every important boundary; route-segment and root error boundaries (`error.tsx`/`global-error.tsx`
+— didn't exist before); a lightweight toast notification system covering trade/scan/automation/
+persistence events, fully accessible via `aria-live`; a small health model and a new
+production-safe `/api/health` endpoint for deployment monitoring; a persistence-diagnostics audit
+that found and fixed several unguarded `localStorage` writes; a single source of truth for the app
+version (fixing two UI locations stuck on a stale "Build 1.12.0"); and a new Vitest + Testing
+Library + axe-core test suite (39 tests, including an automated accessibility scan). Also new:
+`docs/operations/DEPLOYMENT.md`, `docs/operations/RUNBOOK.md`, and a PM2 `ecosystem.config.js`. No
+trading calculation, strategy, risk rule, or terminology changed. See
+[`../../docs/product/BUILD-1.13.0.md`](../../docs/product/BUILD-1.13.0.md) for the full write-up.
+
 ## What's new in Build 1.12.2
 
 An accessibility, mobile, and interaction hardening pass: every modal (paper trade confirmation,
@@ -1122,10 +1179,13 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md),
 [`../../docs/product/BUILD-1.12.0.md`](../../docs/product/BUILD-1.12.0.md),
 [`../../docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md),
+[`../../docs/product/BUILD-1.12.2.md`](../../docs/product/BUILD-1.12.2.md),
 and
-[`../../docs/product/BUILD-1.12.2.md`](../../docs/product/BUILD-1.12.2.md)
+[`../../docs/product/BUILD-1.13.0.md`](../../docs/product/BUILD-1.13.0.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
-schema and setup guide; and
+schema and setup guide; [`../../docs/operations/DEPLOYMENT.md`](../../docs/operations/DEPLOYMENT.md)
+and [`../../docs/operations/RUNBOOK.md`](../../docs/operations/RUNBOOK.md) for deployment and
+operational procedures; and
 [`../../sprints/sprint-001/SPRINT-001.md`](../../sprints/sprint-001/SPRINT-001.md) for sprint notes
 and the next recommended build.

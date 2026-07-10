@@ -1,10 +1,15 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { PaperTrade } from "@/lib/types";
 import { getPaperTradeStore } from "@/lib/persistence/get-paper-trade-store";
 import { LocalStoragePaperTradeStore } from "@/lib/persistence/local-storage-paper-trade-store";
+import { AuthRequiredError } from "@/lib/persistence/auth-required-error";
 import { useAuth } from "@/lib/auth/auth-context";
+import { useToast } from "@/lib/notifications/use-toast";
+import { pushToastOnce } from "@/lib/notifications/toast-bus";
+import { logger } from "@/lib/logger/logger";
+import { formatSignedNumber } from "@/lib/utils/format";
 
 const IMPORT_PROMPT_RESOLVED_KEY = "trading-intelligence.import-prompt-resolved.v1";
 
@@ -50,6 +55,12 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
   const [loaded, setLoaded] = useState<LoadedTrades>({ key: "", trades: [] });
   const [importCandidate, setImportCandidate] = useState<PaperTrade[] | null>(null);
   const { isConfigured, isLoading: isAuthLoading, user } = useAuth();
+  const { notify } = useToast();
+  // Build 1.13.0 — "avoid repeatedly displaying the same warning": only the first write failure
+  // in a session surfaces a toast; the underlying page (trade lists, KPIs) still reflects the
+  // in-memory state regardless, per the persistence-diagnostics requirement that a failed write
+  // must never lose what's already on screen.
+  const writeFailureWarnedRef = useRef(false);
 
   // Identifies "whose trades should currently be loaded." Local prototype mode never changes
   // (single shared key); Supabase mode changes whenever the signed-in user changes — including
@@ -109,10 +120,27 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
 
   function addTrade(trade: PaperTrade) {
     setLoaded((previous) => ({ key: previous.key, trades: [trade, ...previous.trades] }));
-    // AuthRequiredError (no session) or a genuine Supabase failure already gets its own handling
-    // — AuthGate redirects to sign-in, or the persistence fallback banner appears — so there is
-    // nothing further to do with the rejection here beyond not letting it go unhandled.
-    getPaperTradeStore().addTrade(trade).catch(() => {});
+    notify("success", `Trade opened: ${trade.side} ${trade.instrumentSymbol}.`);
+    // AuthRequiredError (no session) already gets its own handling — AuthGate redirects to
+    // sign-in — so there is nothing further to surface for that case. A genuine Supabase failure
+    // is different: the persistence fallback banner covers ongoing degraded status, but a single
+    // failed write specifically risks silently losing this one trade on reload, worth its own
+    // one-time warning.
+    getPaperTradeStore()
+      .addTrade(trade)
+      .catch((error) => {
+        if (error instanceof AuthRequiredError) return;
+        logger.error("Failed to persist new trade", {
+          component: "paper-trades",
+          errorCode: "PERSISTENCE_ERROR",
+          reason: error instanceof Error ? error.message : "Unknown error",
+        });
+        pushToastOnce(
+          "warning",
+          "Your changes may not be saved right now. They're still visible in this session.",
+          writeFailureWarnedRef,
+        );
+      });
   }
 
   function closeTrade(closedTrade: PaperTrade) {
@@ -120,7 +148,26 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
       key: previous.key,
       trades: previous.trades.map((trade) => (trade.id === closedTrade.id ? closedTrade : trade)),
     }));
-    getPaperTradeStore().closeTrade(closedTrade).catch(() => {});
+    const pnl = closedTrade.realisedPnl;
+    notify(
+      "info",
+      `Position closed: ${closedTrade.instrumentSymbol}${pnl !== undefined ? ` (${formatSignedNumber(pnl)})` : ""}.`,
+    );
+    getPaperTradeStore()
+      .closeTrade(closedTrade)
+      .catch((error) => {
+        if (error instanceof AuthRequiredError) return;
+        logger.error("Failed to persist closed trade", {
+          component: "paper-trades",
+          errorCode: "PERSISTENCE_ERROR",
+          reason: error instanceof Error ? error.message : "Unknown error",
+        });
+        pushToastOnce(
+          "warning",
+          "Your changes may not be saved right now. They're still visible in this session.",
+          writeFailureWarnedRef,
+        );
+      });
   }
 
   function hasTradeForSignal(signalId: string) {
@@ -144,7 +191,13 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
     }
 
     runImport()
-      .catch(() => {})
+      .catch((error) => {
+        logger.error("Failed to import local trade history", {
+          component: "paper-trades",
+          errorCode: "PERSISTENCE_ERROR",
+          reason: error instanceof Error ? error.message : "Unknown error",
+        });
+      })
       .finally(() => {
         markImportPromptResolved();
         setImportCandidate(null);

@@ -1,5 +1,6 @@
 import type { PaperTrade } from "@/lib/types";
 import type { PaperTradeStore } from "./paper-trade-store";
+import { setItemOrThrow } from "./safe-local-storage";
 
 const STORAGE_KEY = "trading-intelligence.paper-trades.v1";
 
@@ -38,7 +39,6 @@ export class LocalStoragePaperTradeStore implements PaperTradeStore {
   }
 
   private async writeAll(trades: PaperTrade[]): Promise<void> {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
+    setItemOrThrow(STORAGE_KEY, JSON.stringify(trades), "local-storage-paper-trade-store");
   }
 }

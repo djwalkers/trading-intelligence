@@ -23,6 +23,9 @@ yarn-error.log*
 # Maintenance 1.11.2 — on-disk Alpha Vantage historical candle cache (worker-only, regenerable)
 /.data/
 
+# Build 1.13.0 — PM2 log output (see ecosystem.config.js)
+/.pm2-logs/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

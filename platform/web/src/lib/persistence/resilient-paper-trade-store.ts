@@ -2,6 +2,8 @@ import type { PaperTrade } from "@/lib/types";
 import type { PaperTradeStore } from "./paper-trade-store";
 import type { PersistenceStatus } from "./persistence-status";
 import { AuthRequiredError } from "./auth-required-error";
+import { logger } from "@/lib/logger/logger";
+import { pushToastOnce } from "@/lib/notifications/toast-bus";
 
 type StatusListener = (status: PersistenceStatus) => void;
 
@@ -18,6 +20,10 @@ export class ResilientPaperTradeStore implements PaperTradeStore {
   private fallenBack = false;
   private readonly listeners = new Set<StatusListener>();
   private status: PersistenceStatus;
+  // Build 1.13.0 — "avoid repeatedly displaying the same warning": the fallback-to-local-storage
+  // toast fires at most once per store instance (i.e. once per session), even though `run()` is
+  // called on every trade action.
+  private readonly fallbackWarnedRef = { current: false };
 
   constructor(primary: PaperTradeStore | null, fallback: PaperTradeStore) {
     this.fallback = fallback;
@@ -69,7 +75,16 @@ export class ResilientPaperTradeStore implements PaperTradeStore {
       }
 
       const reason = error instanceof Error ? error.message : "Unknown persistence error";
-      console.error("[persistence] Supabase unavailable, falling back to local storage:", error);
+      logger.error("Supabase unavailable, falling back to local storage", {
+        component: "persistence",
+        errorCode: "PERSISTENCE_ERROR",
+        reason,
+      });
+      pushToastOnce(
+        "warning",
+        "Your database is unavailable — trades are being saved to this browser only until you reload.",
+        this.fallbackWarnedRef,
+      );
 
       this.fallenBack = true;
       this.active = this.fallback;

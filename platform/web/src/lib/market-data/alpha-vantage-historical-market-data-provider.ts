@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { OHLCVCandle } from "@/lib/types";
 import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
+import { logger } from "@/lib/logger/logger";
 
 const ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query";
 
@@ -147,7 +148,11 @@ export class AlphaVantageHistoricalMarketDataProvider implements HistoricalMarke
       // Persistence failing (read-only filesystem, permissions) shouldn't fail the scan — the
       // in-memory cache still works for the rest of this process's lifetime, it just won't
       // survive a restart this time.
-      console.error("[alpha-vantage] Failed to persist historical data cache to disk:", error);
+      logger.error("Failed to persist historical data cache to disk", {
+        component: "alpha-vantage",
+        errorCode: "PERSISTENCE_ERROR",
+        reason: error instanceof Error ? error.message : "Unknown cache write error",
+      });
     }
   }
 

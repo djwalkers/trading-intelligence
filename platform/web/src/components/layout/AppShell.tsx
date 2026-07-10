@@ -10,6 +10,7 @@ import { Footer } from "@/components/layout/Footer";
 import { ImportHistoryModal } from "@/components/trading/ImportHistoryModal";
 import { AuthGate } from "@/components/layout/AuthGate";
 import { AutomationRunner } from "@/components/automation/AutomationRunner";
+import { ToastViewport } from "@/components/ui/ToastViewport";
 
 const AUTH_ROUTES = new Set(["/sign-in", "/sign-up", "/forgot-password", "/reset-password"]);
 
@@ -24,6 +25,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex min-h-screen flex-col bg-base-950">
         <PrototypeBanner />
         <main className="flex flex-1 items-center justify-center px-4 py-10">{children}</main>
+        <ToastViewport />
       </div>
     );
   }
@@ -46,6 +48,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
       <ImportHistoryModal />
       <AutomationRunner />
+      <ToastViewport />
     </div>
   );
 }
