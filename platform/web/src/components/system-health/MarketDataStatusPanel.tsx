@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/Badge";
 import { useMarketDataStatus } from "@/lib/state/use-market-data-status";
 import { formatDateTime } from "@/lib/utils/format";
+import { dataModeLabel } from "@/lib/utils/style";
 
 // Live, not mocked — mirrors PersistenceStatusPanel, reading the same status object the
 // ResilientMarketDataProvider itself tracks.
@@ -51,7 +52,7 @@ export function MarketDataStatusPanel() {
                 : "border-base-600 bg-base-800 text-ink-300"
           }
         >
-          {status.mode}
+          {dataModeLabel(status.mode)}
         </Badge>
       </div>
 

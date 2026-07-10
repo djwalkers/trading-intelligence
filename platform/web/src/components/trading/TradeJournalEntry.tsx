@@ -5,6 +5,7 @@ import {
   formatCurrencyUSD,
   formatDateTime,
   formatPercent,
+  formatScanId,
   formatSignedNumber,
 } from "@/lib/utils/format";
 import {
@@ -97,9 +98,7 @@ export function TradeJournalEntry({ trade, onCloseTrade }: TradeJournalEntryProp
             <span className="basis-full text-ink-500">Risk checks: {trade.riskChecksSummary}</span>
           ) : null}
           {trade.scanId ? (
-            <span>
-              Scan: <span className="text-ink-200">{trade.scanId}</span>
-            </span>
+            <span className="text-ink-200">{formatScanId(trade.scanId)}</span>
           ) : null}
           {trade.portfolioRiskStatus ? (
             <span>

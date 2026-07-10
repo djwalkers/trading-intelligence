@@ -37,7 +37,7 @@ export function RecommendationPanel({
               </button>
             )
           ) : (
-            <span className="text-xs text-ink-600">Not tradeable — for monitoring only</span>
+            <span className="text-xs text-ink-500">Not tradeable — for monitoring only</span>
           )}
         </div>
 

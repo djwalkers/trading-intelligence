@@ -142,7 +142,7 @@ export function ServerAutomationPanel() {
         <p className="text-xs text-accent-red">{actionError ?? error}</p>
       ) : null}
 
-      <p className="text-xs text-ink-600">
+      <p className="text-xs text-ink-500">
         <strong className="font-medium text-ink-500">Server (always-on):</strong> runs on a
         dedicated background service, independently of this or any browser tab — it keeps scanning
         even when no one has the app open. Enabling it here only configures <em>when</em> a scan

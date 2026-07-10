@@ -62,8 +62,8 @@ export default function SystemHealthPage() {
       </SectionPanel>
 
       <SectionPanel
-        title="VPS Worker"
-        description="Always-on automatic scanning, independent of any browser tab — configured in Settings"
+        title="Always-On Scanning"
+        description="Runs independently of any browser tab, so it keeps working even when you're not — configured in Settings"
       >
         <VPSWorkerStatusPanel />
       </SectionPanel>
@@ -88,8 +88,8 @@ export default function SystemHealthPage() {
 
       <InfoNote>
         This platform runs on simulated paper trading — no broker connection, no live execution.
-        &quot;Not enabled&quot; or &quot;Coming soon&quot; above describe features planned for a
-        future release, not something broken today.
+        &quot;Not enabled&quot; or &quot;Not available yet&quot; above describe features planned
+        for a future release, not something broken today.
       </InfoNote>
     </>
   );

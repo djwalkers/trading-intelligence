@@ -68,7 +68,7 @@ export function SignalsTable({ signals }: SignalsTableProps) {
                   </td>
                   <td className="px-5 py-2.5">
                     {!tradeable ? (
-                      <span className="text-xs text-ink-600">Not tradeable</span>
+                      <span className="text-xs text-ink-500">Not tradeable</span>
                     ) : alreadyTraded ? (
                       <Badge className="border-base-600 bg-base-800 text-ink-400">Trade placed</Badge>
                     ) : (

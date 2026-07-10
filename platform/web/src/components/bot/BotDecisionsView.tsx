@@ -2,7 +2,7 @@
 
 import { Badge } from "@/components/ui/Badge";
 import { useBotDecisionLog } from "@/lib/state/bot-decision-log-context";
-import { formatCurrencyGBP, formatDateTime } from "@/lib/utils/format";
+import { formatCurrencyGBP, formatDateTime, formatScanId } from "@/lib/utils/format";
 import type { BotRiskCheck } from "@/lib/bot";
 
 const POSITION_ACTION_TONE: Record<string, string> = {
@@ -36,7 +36,9 @@ export function BotDecisionsView() {
   if (decisions.length === 0) {
     return (
       <p className="px-5 py-6 text-sm text-ink-500">
-        No bot scans yet. Run one from the &quot;Run Bot Scan&quot; button on the Dashboard.
+        Your AI has not completed any scans yet. Use the &quot;Run scan now&quot; button on the
+        Dashboard, or turn on automatic scanning in Settings — every scan and its outcome will be
+        recorded here.
       </p>
     );
   }
@@ -57,7 +59,7 @@ export function BotDecisionsView() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-col gap-0.5">
                 <span className="text-sm font-medium text-ink-100">
-                  {decision.scanId}{" "}
+                  {formatScanId(decision.scanId)}{" "}
                   <span className="text-xs font-normal text-ink-500">· {decision.triggerType}</span>
                 </span>
                 <span className="text-xs text-ink-500">{formatDateTime(decision.timestamp)}</span>
@@ -176,7 +178,7 @@ export function BotDecisionsView() {
                           <RiskCheckList checks={candidate.positionChecks} />
                         </>
                       ) : (
-                        <p className="mt-2 text-xs text-ink-600">
+                        <p className="mt-2 text-xs text-ink-500">
                           Position Protection not evaluated — individual checks failed first.
                         </p>
                       )}
@@ -192,7 +194,7 @@ export function BotDecisionsView() {
                           <RiskCheckList checks={candidate.portfolioRiskChecks} />
                         </>
                       ) : (
-                        <p className="mt-2 text-xs text-ink-600">
+                        <p className="mt-2 text-xs text-ink-500">
                           Portfolio risk not evaluated —{" "}
                           {!candidate.individualPassed
                             ? "individual checks failed first."

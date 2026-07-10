@@ -91,7 +91,7 @@ export function BrowserAutomationPanel() {
         <p className="text-xs text-accent-amber">Stopped automatically: {scheduler.stopReason}</p>
       ) : null}
 
-      <p className="text-xs text-ink-600">
+      <p className="text-xs text-ink-500">
         <strong className="font-medium text-ink-500">This browser:</strong> keeps scanning as long
         as this browser is open in any tab — it does not need to stay on any particular page. Closing
         the browser entirely pauses it until you return. For scanning that continues even when your

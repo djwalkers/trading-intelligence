@@ -12,7 +12,7 @@ let provider: ResilientHistoricalMarketDataProvider | null = null;
 // so every caller in the same JS runtime (a browser tab) shares one instance, one status.
 export function getHistoricalMarketDataProvider(): ResilientHistoricalMarketDataProvider {
   if (!provider) {
-    provider = new ResilientHistoricalMarketDataProvider(null, new MockHistoricalMarketDataProvider(), "Mock");
+    provider = new ResilientHistoricalMarketDataProvider(null, new MockHistoricalMarketDataProvider(), "Sample data");
   }
   return provider;
 }

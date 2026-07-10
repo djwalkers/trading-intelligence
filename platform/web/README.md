@@ -1,6 +1,6 @@
 # Trading Intelligence — Web Prototype
 
-Build 1.12.0. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
+Build 1.12.1. A dark-themed platform for monitoring signals and paper trading performance, built with Next.js
 (App Router), TypeScript, and Tailwind CSS. The platform's philosophy: **understand first, decide
 second, trade last** — every recommendation explains its reasoning and what would change it.
 Signal and strategy data is mocked — there is no broker connection and no live trading. Paper
@@ -709,6 +709,19 @@ detail, including a real bug found and fixed via live testing (a `select=*` agai
 migration hasn't added yet silently omits the key rather than erroring, which the original mapping
 code didn't account for).
 
+## What's new in Build 1.12.1
+
+A full production-readiness audit across every page: fixed a confirmed data bug (a live price
+could render outside its own displayed day range — now structurally impossible), replaced remaining
+developer wording ("Mock" → "Sample data", "VPS Worker" → "Always-On Scanning", "Coming soon" →
+"Not available yet", raw scan ids → "Scan #N"), fixed a real WCAG contrast failure across 13 files,
+clarified two genuinely confusing duplications (Paper Portfolio's illustrative starting positions
+vs. real trades; the Signals/Strategies pages vs. the AI Engine), rewrote empty states to explain
+why they're empty and how to populate them, and added loading states for database-backed accounts
+so the Dashboard and AI Decision History never show misleading "£0.00" or "no scans yet" flashes.
+No trading logic, risk rule, or schema changed. See
+[`../../docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md) for the full write-up.
+
 ## What's new in Build 1.12.0
 
 The Dashboard, Settings, and Operations Centre (formerly System Health) were redesigned around one
@@ -1092,8 +1105,9 @@ See [`../../docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md),
 [`../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md),
 [`../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md),
+[`../../docs/product/BUILD-1.12.0.md`](../../docs/product/BUILD-1.12.0.md),
 and
-[`../../docs/product/BUILD-1.12.0.md`](../../docs/product/BUILD-1.12.0.md)
+[`../../docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md)
 for the full build records; [`../../docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md)
 and [`../../docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md) for the
 schema and setup guide; and

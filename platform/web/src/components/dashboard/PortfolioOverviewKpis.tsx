@@ -16,14 +16,24 @@ interface PortfolioOverviewKpisProps {
 // is the same pure function the AI Engine's own risk checks use (src/lib/bot/portfolio-risk.ts),
 // and paperPortfolio.currentValue/dailyPl are the same mock figures the Paper Portfolio page shows.
 export function PortfolioOverviewKpis({ paperPortfolio }: PortfolioOverviewKpisProps) {
-  const { trades } = usePaperTrades();
+  const { trades, isHydrated } = usePaperTrades();
   const snapshot = buildExposureSnapshot(trades);
+  // Build 1.12.1 — while trades are still loading (most noticeable for a database-backed account
+  // over the network), show a plain loading marker instead of a misleading "£0.00 / 0" that would
+  // otherwise flash before the real figures arrive.
+  const loadingValue = "…";
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard label="Portfolio value" value={formatCurrencyGBP(paperPortfolio.currentValue)} />
-      <StatCard label="Cash available" value={formatCurrencyGBP(snapshot.availableCash)} />
-      <StatCard label="Open positions" value={String(snapshot.totalOpenTrades)} />
+      <StatCard
+        label="Cash available"
+        value={isHydrated ? formatCurrencyGBP(snapshot.availableCash) : loadingValue}
+      />
+      <StatCard
+        label="Open positions"
+        value={isHydrated ? String(snapshot.totalOpenTrades) : loadingValue}
+      />
       <StatCard
         label="Today's P/L"
         value={formatCurrencyGBP(paperPortfolio.dailyPl)}

@@ -9,7 +9,7 @@ import { OutcomeSummaryPanel } from "@/components/decision-intelligence/OutcomeS
 import { useDecisionHistory } from "@/lib/state/decision-history-context";
 import { useDecisionHistoryStatus } from "@/lib/state/use-decision-history-status";
 import type { DecisionOutcome, DecisionRecord } from "@/lib/decision-intelligence";
-import { formatCurrencyUSD, formatDateTime, formatPercent, formatSignedNumber } from "@/lib/utils/format";
+import { formatCurrencyUSD, formatDateTime, formatPercent, formatScanId, formatSignedNumber } from "@/lib/utils/format";
 import { plToneClass } from "@/lib/utils/style";
 
 type ActionFilter = "All" | "Trade Opened" | "Rejected";
@@ -66,7 +66,7 @@ function ActionBadge({ record }: { record: DecisionRecord }) {
 // badge, satisfying the mission's "should not be incorrectly classified as trading wins or losses."
 function OutcomeBadge({ record }: { record: DecisionRecord }) {
   if (record.actionTaken !== "Trade Opened") {
-    return <span className="text-ink-600">N/A</span>;
+    return <span className="text-ink-500">N/A</span>;
   }
 
   const className =
@@ -82,7 +82,7 @@ function OutcomeBadge({ record }: { record: DecisionRecord }) {
 }
 
 export function DecisionIntelligenceView() {
-  const { records } = useDecisionHistory();
+  const { records, isHydrated } = useDecisionHistory();
   const status = useDecisionHistoryStatus();
 
   const [strategyFilter, setStrategyFilter] = useState(ALL);
@@ -251,10 +251,12 @@ export function DecisionIntelligenceView() {
             : `${filteredRecords.length} of ${records.length} records shown`
         }
       >
-        {filteredRecords.length === 0 ? (
+        {!isHydrated ? (
+          <p className="px-5 py-6 text-sm text-ink-500">Loading your decision history…</p>
+        ) : filteredRecords.length === 0 ? (
           <p className="px-5 py-6 text-sm text-ink-500">
             {records.length === 0
-              ? "No decision records yet. Run a Bot Scan from the Dashboard to start building history."
+              ? "Your AI has not completed any scans yet. Run one from the Dashboard's “Run scan now” button, or turn on automatic scanning in Settings — every candidate it evaluates, accepted or rejected, will appear here."
               : "No records match this filter."}
           </p>
         ) : (
@@ -285,7 +287,7 @@ export function DecisionIntelligenceView() {
               <tbody className="divide-y divide-base-700/60">
                 {filteredRecords.map((record) => (
                   <tr key={record.id} className="text-ink-300">
-                    <td className="px-4 py-2 text-ink-500">{record.scanId}</td>
+                    <td className="px-4 py-2 text-ink-500">{formatScanId(record.scanId)}</td>
                     <td className="px-4 py-2">#{record.rank}</td>
                     <td className="px-4 py-2 text-ink-100">{record.symbol}</td>
                     <td className="px-4 py-2 text-ink-500">{record.sector}</td>
@@ -307,10 +309,10 @@ export function DecisionIntelligenceView() {
                     <td className="px-4 py-2">
                       <OutcomeBadge record={record} />
                     </td>
-                    <td className={`px-4 py-2 ${record.realisedPnl !== undefined ? plToneClass(record.realisedPnl) : "text-ink-600"}`}>
+                    <td className={`px-4 py-2 ${record.realisedPnl !== undefined ? plToneClass(record.realisedPnl) : "text-ink-500"}`}>
                       {record.realisedPnl !== undefined ? formatSignedNumber(record.realisedPnl) : "—"}
                     </td>
-                    <td className={`px-4 py-2 ${record.realisedPnlPercent !== undefined ? plToneClass(record.realisedPnlPercent) : "text-ink-600"}`}>
+                    <td className={`px-4 py-2 ${record.realisedPnlPercent !== undefined ? plToneClass(record.realisedPnlPercent) : "text-ink-500"}`}>
                       {record.realisedPnlPercent !== undefined ? formatPercent(record.realisedPnlPercent) : "—"}
                     </td>
                     <td className="px-4 py-2 text-ink-500">

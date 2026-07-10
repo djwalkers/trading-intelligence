@@ -1,6 +1,6 @@
 import type { Instrument, MarketDataSource, MarketQuote, StrategyScore } from "@/lib/types";
 import { formatCompactNumber, formatCurrencyUSD, formatDateTime, formatPercent } from "@/lib/utils/format";
-import { plToneClass } from "@/lib/utils/style";
+import { dataSourceLabel, plToneClass } from "@/lib/utils/style";
 import { Badge } from "@/components/ui/Badge";
 
 interface WatchlistTableProps {
@@ -41,6 +41,14 @@ export function WatchlistTable({
             const changeAbsolute = quote?.changeAbsolute ?? instrument.changeAbsolute;
             const changePercent = quote?.changePercent ?? instrument.changePercent;
             const score = scoresBySymbol.get(instrument.symbol);
+            // Bug fix (Build 1.12.1): dayHigh/dayLow are authored once as static mock data, but the
+            // displayed price can move independently (mock drift, or a live quote) — without this,
+            // the current price could render outside its own displayed day range, which is never
+            // correct for a real day-range figure. Widening the bounds to include the current price
+            // keeps the invariant true without altering the underlying mock data or any calculation
+            // the AI Engine reads (buildExposureSnapshot etc. never read dayHigh/dayLow).
+            const dayLow = Math.min(instrument.dayLow, price);
+            const dayHigh = Math.max(instrument.dayHigh, price);
 
             return (
               <tr key={instrument.symbol} className="border-b border-base-700/60 last:border-0">
@@ -55,7 +63,7 @@ export function WatchlistTable({
                   {formatSignedCurrency(changeAbsolute)} ({formatPercent(changePercent)})
                 </td>
                 <td className="whitespace-nowrap px-5 py-2.5 text-ink-400">
-                  {formatCurrencyUSD(instrument.dayLow)} &ndash; {formatCurrencyUSD(instrument.dayHigh)}
+                  {formatCurrencyUSD(dayLow)} &ndash; {formatCurrencyUSD(dayHigh)}
                 </td>
                 <td className="px-5 py-2.5 text-ink-400">{formatCompactNumber(instrument.volume)}</td>
                 <td className="whitespace-nowrap px-5 py-2.5 text-ink-500">
@@ -70,7 +78,7 @@ export function WatchlistTable({
                           : "border-base-600 bg-base-800 text-ink-300"
                       }
                     >
-                      {dataSource}
+                      {dataSourceLabel(dataSource)}
                     </Badge>
                   </td>
                 ) : null}

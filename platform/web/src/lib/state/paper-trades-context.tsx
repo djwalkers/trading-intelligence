@@ -10,6 +10,11 @@ const IMPORT_PROMPT_RESOLVED_KEY = "trading-intelligence.import-prompt-resolved.
 
 interface PaperTradesContextValue {
   trades: PaperTrade[];
+  // Build 1.12.1 — false only during the brief window before this identity's trades have loaded
+  // (most noticeable the first time a database-backed account loads over the network). Lets a
+  // consumer show a genuine loading state instead of misreading "not hydrated yet" as "zero
+  // trades" — see PortfolioOverviewKpis for the one place this currently matters most.
+  isHydrated: boolean;
   addTrade: (trade: PaperTrade) => void;
   closeTrade: (closedTrade: PaperTrade) => void;
   hasTradeForSignal: (signalId: string) => boolean;
@@ -155,6 +160,7 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
     <PaperTradesContext.Provider
       value={{
         trades,
+        isHydrated,
         addTrade,
         closeTrade,
         hasTradeForSignal,

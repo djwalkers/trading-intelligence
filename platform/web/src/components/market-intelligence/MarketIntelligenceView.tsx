@@ -184,10 +184,10 @@ export function MarketIntelligenceView({
       </SectionPanel>
 
       <InfoNote>
-        Market Intelligence is generated from mock analytical rules for prototyping purposes. It is
-        not financial advice and should not be used to make real trading decisions. Understand the
-        evidence first, form your own view second, and only ever trade with capital you can afford
-        to lose.
+        Market Intelligence is generated from a fixed set of analytical rules over sample market
+        data. It is not financial advice and should not be used to make real trading decisions.
+        Understand the evidence first, form your own view second, and only ever trade with capital
+        you can afford to lose.
       </InfoNote>
 
       {pendingSource ? (

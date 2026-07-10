@@ -13,7 +13,7 @@ export function BrokerSettingsPanel() {
           no real orders can be placed.
         </span>
       </div>
-      <Badge className="border-base-600 bg-base-800 text-ink-300">Coming soon</Badge>
+      <Badge className="border-base-600 bg-base-800 text-ink-300">Not available yet</Badge>
     </div>
   );
 }

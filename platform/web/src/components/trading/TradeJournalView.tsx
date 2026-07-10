@@ -101,7 +101,7 @@ export function TradeJournalView() {
           onCloseTrade={requestClose}
           emptyMessage={
             trades.length === 0
-              ? "No paper trades yet. Place one from the Signals or Market Intelligence page."
+              ? "No paper trades yet. Place one from Signals or Market Intelligence, or let the AI Engine trade automatically — every trade, open or closed, will be recorded here."
               : "No trades match this filter."
           }
         />

@@ -21,7 +21,7 @@ export class ResilientMarketDataProvider implements MarketDataProvider {
     this.usingExternal = primary !== null;
     this.active = primary ?? fallback;
     this.status = {
-      provider: this.usingExternal ? providerName : "Mock",
+      provider: this.usingExternal ? providerName : "Sample data",
       source: this.usingExternal ? "External" : "Mock",
       mode: this.usingExternal ? "Connected" : "Mocked",
       lastUpdated: null,
@@ -72,7 +72,7 @@ export class ResilientMarketDataProvider implements MarketDataProvider {
       this.active = this.fallback;
       const quotes = await this.fallback.getQuotes(symbols);
       this.setStatus({
-        provider: "Mock",
+        provider: "Sample data",
         source: "Mock",
         mode: "Fallback",
         fallbackActive: true,

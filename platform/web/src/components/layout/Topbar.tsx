@@ -18,7 +18,7 @@ export function Topbar() {
             className={marketStatus.isOpen ? "text-accent-teal" : "text-ink-500"}
           />
           <span className="text-ink-100">{marketStatus.label}</span>
-          <span className="hidden text-ink-600 sm:inline">&middot; {marketStatus.nextEvent}</span>
+          <span className="hidden text-ink-500 sm:inline">&middot; {marketStatus.nextEvent}</span>
         </div>
 
         <Badge className="border-accent-amber/30 bg-accent-amber/10 text-accent-amber">

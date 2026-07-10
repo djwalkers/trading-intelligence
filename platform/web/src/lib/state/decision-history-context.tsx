@@ -8,6 +8,10 @@ import { usePaperTrades } from "@/lib/state/paper-trades-context";
 
 interface DecisionHistoryContextValue {
   records: DecisionRecord[];
+  // Build 1.12.1 — see PaperTradesContextValue.isHydrated for why this exists: lets a consumer
+  // distinguish "still loading" from "genuinely no records yet" instead of showing the empty-state
+  // prompt prematurely.
+  isHydrated: boolean;
   addRecords: (records: DecisionRecord[]) => void;
 }
 
@@ -95,7 +99,7 @@ export function DecisionHistoryProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <DecisionHistoryContext.Provider value={{ records, addRecords }}>
+    <DecisionHistoryContext.Provider value={{ records, isHydrated, addRecords }}>
       {children}
     </DecisionHistoryContext.Provider>
   );

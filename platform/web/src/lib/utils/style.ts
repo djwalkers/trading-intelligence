@@ -11,6 +11,19 @@ import type {
   VolatilityLevel,
 } from "@/lib/types";
 
+// Build 1.12.1 — the underlying MarketDataSource/HistoricalDataSource type keeps its internal
+// "Mock" value (branching logic elsewhere compares against it directly), but a first-time user
+// should never see the word "Mock" — this is the one place that maps it to plain language for
+// display. Works for both market-data and historical-data sources/modes since the unions are
+// structurally identical.
+export function dataSourceLabel(source: "Mock" | "External"): string {
+  return source === "External" ? "Live" : "Sample data";
+}
+
+export function dataModeLabel(mode: "Connected" | "Mocked" | "Fallback"): string {
+  return mode === "Mocked" ? "Sample data" : mode;
+}
+
 export function signalToneClasses(signalType: SignalType): string {
   switch (signalType) {
     case "BUY":

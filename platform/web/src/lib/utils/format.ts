@@ -42,6 +42,19 @@ export function formatDateTime(isoString: string): string {
   }).format(new Date(isoString));
 }
 
+// Build 1.12.1 — scan ids are internal identifiers (a browser-local counter like "SCAN-000001", or
+// a server process-namespaced one like "WORKER-83691-000042") that should never surface their raw
+// form to a first-time user — the worker-style id in particular exposes an OS process id, exactly
+// the kind of implementation detail this build's terminology audit flags. This extracts the
+// trailing sequence number and presents it as a plain "Scan #N", regardless of which system
+// produced it — the underlying stored value is unchanged, only how it's displayed.
+export function formatScanId(scanId: string): string {
+  const match = scanId.match(/(\d+)$/);
+  const digits = match?.[1];
+  if (!digits) return scanId;
+  return `Scan #${parseInt(digits, 10)}`;
+}
+
 export function formatRelativeTime(isoString: string): string {
   const diffMs = Date.now() - new Date(isoString).getTime();
   const diffMinutes = Math.round(diffMs / 60_000);

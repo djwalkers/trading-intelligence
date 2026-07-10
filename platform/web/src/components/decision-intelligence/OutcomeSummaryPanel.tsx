@@ -49,7 +49,7 @@ export function OutcomeSummaryPanel({ records }: { records: DecisionRecord[] }) 
         <SummaryStat label="Neutral" value={String(neutral)} />
         <SummaryStat label="Win rate" value={winRate === null ? "—" : `${winRate}%`} />
       </div>
-      <p className="text-xs text-ink-600">
+      <p className="text-xs text-ink-500">
         Win rate is Wins ÷ (Wins + Losses) only — Neutral and Pending outcomes are excluded, and
         Rejected candidates are never counted here at all. This is a small paper-trading sample,
         not proof of strategy profitability.

@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import type { EntryPriceInfo, PaperTradeSide } from "@/lib/types";
 import { formatCurrencyUSD, formatDateTime } from "@/lib/utils/format";
 import { Badge } from "@/components/ui/Badge";
+import { dataSourceLabel } from "@/lib/utils/style";
 
 interface PaperTradeModalProps {
   instrumentSymbol: string;
@@ -97,7 +98,9 @@ export function PaperTradeModal({
                       : "border-base-600 bg-base-800 text-ink-300"
                   }
                 >
-                  {entryPriceInfo.source} &middot; {entryPriceInfo.provider}
+                  {entryPriceInfo.source === "External"
+                    ? `${dataSourceLabel(entryPriceInfo.source)} · ${entryPriceInfo.provider}`
+                    : dataSourceLabel(entryPriceInfo.source)}
                 </Badge>
               )}
             </dd>

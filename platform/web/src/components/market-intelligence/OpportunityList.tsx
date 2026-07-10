@@ -59,7 +59,7 @@ export function OpportunityList({
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
-                  <span className="text-xs text-ink-600">#{index + 1}</span>
+                  <span className="text-xs text-ink-500">#{index + 1}</span>
                   <div className="flex flex-col">
                     <span className="font-medium text-ink-100">{opportunity.instrumentName}</span>
                     <span className="text-xs text-ink-500">{opportunity.instrumentSymbol}</span>
@@ -73,7 +73,7 @@ export function OpportunityList({
                     {opportunity.confidencePercent}%
                   </span>
                   <span className="flex items-center gap-1">
-                    <span className="text-[10px] uppercase tracking-wide text-ink-600">Score</span>
+                    <span className="text-[10px] uppercase tracking-wide text-ink-500">Score</span>
                     <IntelligenceScoreDisplay overall={overall} compact />
                   </span>
                 </div>

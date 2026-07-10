@@ -29,7 +29,7 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
     this.usingExternal = primary !== null;
     this.active = primary ?? fallback;
     this.status = {
-      provider: this.usingExternal ? providerName : "Mock",
+      provider: this.usingExternal ? providerName : "Sample data",
       source: this.usingExternal ? "External" : "Mock",
       mode: this.usingExternal ? "Connected" : "Mocked",
       lastUpdated: null,
@@ -92,7 +92,7 @@ export class ResilientHistoricalMarketDataProvider implements HistoricalMarketDa
       this.active = this.fallback;
       const candles = await this.fallback.getHistoricalCandles(symbols, days);
       this.setStatus({
-        provider: "Mock",
+        provider: "Sample data",
         source: "Mock",
         mode: "Fallback",
         fallbackActive: true,

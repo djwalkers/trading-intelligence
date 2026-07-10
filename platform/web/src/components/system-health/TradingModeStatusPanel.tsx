@@ -32,7 +32,7 @@ export function TradingModeStatusPanel() {
           <span className="text-sm font-medium text-ink-100">Broker connection</span>
           <span className="text-xs text-ink-500">See Settings for details.</span>
         </div>
-        <Badge className="border-base-600 bg-base-800 text-ink-300">Coming soon</Badge>
+        <Badge className="border-base-600 bg-base-800 text-ink-300">Not available yet</Badge>
       </div>
     </div>
   );

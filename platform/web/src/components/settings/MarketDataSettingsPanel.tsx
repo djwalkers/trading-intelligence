@@ -36,14 +36,14 @@ export function MarketDataSettingsPanel() {
           <span className="text-sm font-medium text-ink-100">Historical market data</span>
           <span className="text-xs text-ink-500">
             Powers the AI Engine&apos;s indicators (moving averages, RSI, momentum). Configured for
-            the automatic server-based scanning worker; this browser always uses sample history.
+            always-on server-based scanning; this browser always uses sample history.
           </span>
         </div>
         <Badge className="border-base-600 bg-base-800 text-ink-300">Configured on server</Badge>
       </div>
 
       <div className="px-5 py-4">
-        <p className="text-xs leading-relaxed text-ink-600">
+        <p className="text-xs leading-relaxed text-ink-500">
           Provider connections are set up once by whoever manages this platform&apos;s deployment,
           not from this page. Contact your administrator to change which market data providers are
           connected.

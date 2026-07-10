@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/Badge";
 import { useHistoricalDataStatus } from "@/lib/state/use-historical-data-status";
 import { formatDateTime } from "@/lib/utils/format";
+import { dataModeLabel } from "@/lib/utils/style";
 
 // Live, not mocked — mirrors MarketDataStatusPanel, reading the status
 // ResilientHistoricalMarketDataProvider tracks. Populated once a scan has run in this browser tab.
@@ -56,7 +57,7 @@ export function HistoricalDataStatusPanel() {
                 : "border-base-600 bg-base-800 text-ink-300"
           }
         >
-          {status.mode}
+          {dataModeLabel(status.mode)}
         </Badge>
       </div>
 
@@ -91,7 +92,7 @@ export function HistoricalDataStatusPanel() {
       </div>
 
       <div className="px-5 py-4">
-        <p className="text-xs leading-relaxed text-ink-600">
+        <p className="text-xs leading-relaxed text-ink-500">
           Real historical data requires a server-side connection, so it is only available to the
           always-on server-based scanning described in Settings — this browser tab&apos;s own
           manual scans always use sample history instead.

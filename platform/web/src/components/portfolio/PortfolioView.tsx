@@ -94,7 +94,7 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
 
       <SectionPanel
         title="Open positions"
-        description={`${paperPortfolio.positions.length} positions`}
+        description="Illustrative starting holdings, shown for reference — separate from the trades you place yourself, tracked below"
       >
         <PositionsTable positions={paperPortfolio.positions} />
       </SectionPanel>
@@ -108,7 +108,7 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
           trades={openTrades.slice(0, RECENT_TRADES_LIMIT)}
           prices={prices}
           onCloseTrade={requestClose}
-          emptyMessage="No open paper trades. Place one from the Signals or Market Intelligence page."
+          emptyMessage="No open trades yet. Place one from Signals or Market Intelligence, or let the AI Engine open one automatically — it will appear here with live pricing."
         />
       </SectionPanel>
 
@@ -121,13 +121,13 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
           trades={closedTrades.slice(0, RECENT_TRADES_LIMIT)}
           prices={prices}
           onCloseTrade={requestClose}
-          emptyMessage="No closed paper trades yet."
+          emptyMessage="No closed trades yet. Trades you close will appear here with their final profit or loss."
         />
       </SectionPanel>
 
       <InfoNote>
-        This is a simulated, paper-only portfolio. Prices and fills are mocked; no broker connection
-        or real execution exists in this build. Paper trades open and close at mock prices only —
+        This is a simulated, paper-only portfolio. Prices and fills use sample data; no broker
+        connection or real execution exists yet. Paper trades open and close at sample prices only —
         nothing here is a real order or real capital.
       </InfoNote>
 

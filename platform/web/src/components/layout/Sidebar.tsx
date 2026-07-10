@@ -65,7 +65,7 @@ export function Sidebar() {
       ) : null}
 
       <div className="border-t border-base-700 px-4 py-4">
-        <p className="text-xs leading-relaxed text-ink-600">
+        <p className="text-xs leading-relaxed text-ink-500">
           Build 1.12.0
           <br />
           Paper trading only. No live trading.
