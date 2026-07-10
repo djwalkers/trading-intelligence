@@ -161,7 +161,7 @@ export function BotDecisionsView() {
                       {candidate.positionEvaluated ? (
                         <>
                           <p className="mt-2 text-xs font-medium text-ink-400">
-                            Position Manager —{" "}
+                            Position Protection —{" "}
                             <span className={POSITION_ACTION_TONE[candidate.positionAction ?? ""] ?? "text-ink-300"}>
                               {candidate.positionAction}
                             </span>
@@ -177,7 +177,7 @@ export function BotDecisionsView() {
                         </>
                       ) : (
                         <p className="mt-2 text-xs text-ink-600">
-                          Position Manager not evaluated — individual checks failed first.
+                          Position Protection not evaluated — individual checks failed first.
                         </p>
                       )}
 
@@ -196,7 +196,7 @@ export function BotDecisionsView() {
                           Portfolio risk not evaluated —{" "}
                           {!candidate.individualPassed
                             ? "individual checks failed first."
-                            : "the Position Manager did not allow a new or added position."}
+                            : "Position Protection did not allow a new or added position."}
                         </p>
                       )}
                     </li>

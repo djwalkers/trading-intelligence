@@ -13,11 +13,11 @@ export function MarketDataStatusPanel() {
     <div className="divide-y divide-base-700/60">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-ink-100">Provider</span>
+          <span className="text-sm font-medium text-ink-100">Live prices</span>
           <span className="text-xs text-ink-500">
             {status.source === "External"
-              ? "Prices are fetched from an external market data provider."
-              : "Prices are served from mock instrument data."}
+              ? "Prices are fetched from a connected market data provider."
+              : "Prices are served from sample instrument data."}
           </span>
         </div>
         <Badge

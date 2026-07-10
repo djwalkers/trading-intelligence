@@ -19,18 +19,18 @@ export function StrategyEngineStatusPanel({
     <div className="divide-y divide-base-700/60">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-ink-100">Strategy Engine</span>
+          <span className="text-sm font-medium text-ink-100">Strategy calculations</span>
           <span className="text-xs text-ink-500">
-            Deterministic, in-memory strategy evaluation — no network calls, no external
-            dependency to fail.
+            Always available — a deterministic, in-memory calculation with no external dependency
+            to fail.
           </span>
         </div>
-        <Badge className="border-accent-teal/30 bg-accent-teal/10 text-accent-teal">Running</Badge>
+        <Badge className="border-accent-teal/30 bg-accent-teal/10 text-accent-teal">Active</Badge>
       </div>
 
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-ink-100">Strategies loaded</span>
+          <span className="text-sm font-medium text-ink-100">Strategies active</span>
           <span className="text-xs text-ink-500">
             Moving Average Crossover, RSI Reversal, Momentum
           </span>
@@ -40,7 +40,7 @@ export function StrategyEngineStatusPanel({
 
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-ink-100">Evaluation time</span>
+          <span className="text-sm font-medium text-ink-100">Evaluation speed</span>
           <span className="text-xs text-ink-500">
             {instrumentsEvaluated} instrument{instrumentsEvaluated === 1 ? "" : "s"} evaluated on
             this request

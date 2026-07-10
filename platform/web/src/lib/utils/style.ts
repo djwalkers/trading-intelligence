@@ -6,7 +6,6 @@ import type {
   Recommendation,
   RiskLevel,
   ScoreBand,
-  ServiceState,
   SignalType,
   StrategyStatus,
   VolatilityLevel,
@@ -31,36 +30,6 @@ export function strategyStatusClasses(status: StrategyStatus): string {
       return "bg-ink-500/10 text-ink-400 border-ink-500/30";
     case "backtesting":
       return "bg-accent-blue/10 text-accent-blue border-accent-blue/30";
-  }
-}
-
-export function serviceStateClasses(state: ServiceState): string {
-  switch (state) {
-    case "running":
-      return "bg-accent-teal/10 text-accent-teal border-accent-teal/30";
-    case "mocked":
-      return "bg-accent-blue/10 text-accent-blue border-accent-blue/30";
-    case "passive":
-      return "bg-accent-amber/10 text-accent-amber border-accent-amber/30";
-    case "not_connected":
-      return "bg-ink-500/10 text-ink-400 border-ink-500/30";
-    case "disabled":
-      return "bg-accent-red/10 text-accent-red border-accent-red/30";
-  }
-}
-
-export function serviceStateLabel(state: ServiceState): string {
-  switch (state) {
-    case "running":
-      return "Running";
-    case "mocked":
-      return "Mocked";
-    case "passive":
-      return "Passive";
-    case "not_connected":
-      return "Not Connected";
-    case "disabled":
-      return "Disabled";
   }
 }
 

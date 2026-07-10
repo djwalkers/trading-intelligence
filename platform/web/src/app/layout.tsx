@@ -23,7 +23,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Trading Intelligence Platform",
-  description: "A calm, evidence-driven prototype for monitoring signals and paper trading performance.",
+  description: "A calm, evidence-driven platform for monitoring signals and paper trading performance.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

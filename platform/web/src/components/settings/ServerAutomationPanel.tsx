@@ -9,12 +9,11 @@ import { formatDateTime } from "@/lib/utils/format";
 const INTERVAL_OPTIONS = [15, 30, 60] as const;
 const DEFAULT_INTERVAL_MINUTES = 30;
 
-// Mission 10 — the browser-side control surface for a `bot_schedules` row: create it, enable/
-// disable it, change its interval. Deliberately separate from BotRunnerPanel's "Browser schedule"
-// section above it on the Dashboard — this schedule is executed by the VPS worker (Mission 8),
-// not by anything running in this tab; see the disclosure at the bottom of this panel and
-// BotRunnerPanel's own cross-reference.
-export function ServerSchedulePanel() {
+// Build 1.12.0 — renamed and relocated from the Dashboard's "Server schedule" panel (Mission 10)
+// to Settings, alongside its browser-based counterpart. Unchanged behaviour: this is the
+// browser-side control surface for a database-stored automatic-scanning schedule, executed by the
+// always-on VPS worker, independently of this or any browser tab.
+export function ServerAutomationPanel() {
   const { isConfigured, isLoading: isAuthLoading, user } = useAuth();
   const { schedule, isAvailable, isHydrated, error, save } = useServerSchedule();
   // Only set once the user actively changes the selector — otherwise the displayed interval is
@@ -31,7 +30,7 @@ export function ServerSchedulePanel() {
     try {
       await save(nextEnabled, nextIntervalMinutes);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to save server schedule.");
+      setActionError(err instanceof Error ? err.message : "Failed to save automatic scanning settings.");
     } finally {
       setIsSaving(false);
     }
@@ -40,10 +39,10 @@ export function ServerSchedulePanel() {
   if (!isConfigured) {
     return (
       <div className="flex flex-col gap-2 px-5 py-4">
-        <span className="text-sm font-medium text-ink-100">Server schedule</span>
+        <span className="text-sm font-medium text-ink-100">Server (always-on)</span>
         <p className="text-xs text-ink-500">
-          Server-side scheduling requires Supabase to be configured (see System Health) — in local
-          prototype mode, only the browser schedule above is available.
+          Always-on automatic scanning requires a connected database (see Operations Centre) — in
+          local mode, only the browser-based scanning above is available.
         </p>
       </div>
     );
@@ -52,7 +51,7 @@ export function ServerSchedulePanel() {
   if (isAuthLoading || !isHydrated) {
     return (
       <div className="flex flex-col gap-2 px-5 py-4">
-        <span className="text-sm font-medium text-ink-100">Server schedule</span>
+        <span className="text-sm font-medium text-ink-100">Server (always-on)</span>
         <p className="text-xs text-ink-500">Loading…</p>
       </div>
     );
@@ -61,8 +60,8 @@ export function ServerSchedulePanel() {
   if (!user || !isAvailable) {
     return (
       <div className="flex flex-col gap-2 px-5 py-4">
-        <span className="text-sm font-medium text-ink-100">Server schedule</span>
-        <p className="text-xs text-ink-500">Sign in to create and manage a server-side schedule.</p>
+        <span className="text-sm font-medium text-ink-100">Server (always-on)</span>
+        <p className="text-xs text-ink-500">Sign in to create and manage always-on automatic scanning.</p>
       </div>
     );
   }
@@ -72,7 +71,7 @@ export function ServerSchedulePanel() {
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <span className="text-sm font-medium text-ink-100">Server schedule</span>
+        <span className="text-sm font-medium text-ink-100">Server (always-on)</span>
         <Badge
           className={
             isEnabled
@@ -93,9 +92,9 @@ export function ServerSchedulePanel() {
               const next = Number(event.target.value);
               setIntervalOverride(next);
               // Changing the interval while already enabled takes effect immediately (recomputes
-              // next_scan_at from now), rather than silently waiting for the old cadence to elapse
-              // — the same "acting on a value takes effect right away" behaviour Enable/Disable
-              // has below.
+              // the next scan time from now), rather than silently waiting for the old cadence to
+              // elapse — the same "acting on a value takes effect right away" behaviour Enable/
+              // Disable has below.
               if (isEnabled) void handleSave(true, next);
             }}
             disabled={isSaving}
@@ -115,7 +114,7 @@ export function ServerSchedulePanel() {
           disabled={isSaving || isEnabled}
           className="rounded-lg border border-accent-teal/30 bg-accent-teal/10 px-3 py-1.5 text-xs font-medium text-accent-teal transition-colors hover:bg-accent-teal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Enable schedule
+          Enable
         </button>
         <button
           type="button"
@@ -123,7 +122,7 @@ export function ServerSchedulePanel() {
           disabled={isSaving || !isEnabled}
           className="rounded-lg border border-base-600 bg-base-800 px-3 py-1.5 text-xs font-medium text-ink-300 transition-colors hover:bg-base-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Disable schedule
+          Disable
         </button>
       </div>
 
@@ -136,7 +135,7 @@ export function ServerSchedulePanel() {
       </div>
 
       {schedule?.lastError ? (
-        <p className="text-xs text-accent-amber">Last worker error: {schedule.lastError}</p>
+        <p className="text-xs text-accent-amber">Last automation error: {schedule.lastError}</p>
       ) : null}
 
       {actionError || error ? (
@@ -144,12 +143,11 @@ export function ServerSchedulePanel() {
       ) : null}
 
       <p className="text-xs text-ink-600">
-        <strong className="font-medium text-ink-500">Server schedule:</strong> stored in Supabase
-        and executed by the VPS worker (`npm run worker`, Mission 8), independently of this or any
-        browser tab. Enabling it here only configures <em>when</em> a scan should run — it does not
-        start a worker. If no worker process is running, this schedule stays enabled but nothing
-        executes it; see System Health for the last-known execution result, which is the only
-        evidence this browser has of whether a worker is actually running.
+        <strong className="font-medium text-ink-500">Server (always-on):</strong> runs on a
+        dedicated background service, independently of this or any browser tab — it keeps scanning
+        even when no one has the app open. Enabling it here only configures <em>when</em> a scan
+        should run; see the Operations Centre for the last-known result, which is the clearest
+        evidence that the background service is actively running.
       </p>
     </div>
   );

@@ -108,11 +108,11 @@ export function TradeJournalView() {
       </SectionPanel>
 
       <InfoNote>
-        Trade history is stored using the active persistence provider — currently{" "}
+        Trade history is stored using{" "}
         <strong className="font-medium text-ink-200">
-          {persistenceStatus.mode === "Supabase" ? "Supabase" : "local browser storage"}
+          {persistenceStatus.mode === "Supabase" ? "your database" : "local browser storage"}
         </strong>
-        . Supabase is used when configured; local browser storage is used as a fallback. Nothing
+        , with local browser storage used as a fallback if the database is unavailable. Nothing
         here represents a real order or real capital.
       </InfoNote>
 

@@ -127,8 +127,8 @@ export function DecisionIntelligenceView() {
   return (
     <>
       <PageHeader
-        title="Decision Intelligence"
-        description="Every candidate the Bot Runner has ever evaluated — accepted and rejected alike — recorded as long-term analytical history for a future Hermes to learn from."
+        title="AI Decision History"
+        description="Every candidate the AI Engine has ever evaluated — accepted and rejected alike — kept as a long-term record for future analysis."
       />
 
       <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 px-5 py-4 text-xs text-ink-500">
@@ -329,15 +329,15 @@ export function DecisionIntelligenceView() {
 
       <InfoNote>
         An accepted decision&apos;s outcome (Win/Loss/Neutral) is classified automatically once its
-        linked paper trade closes (Mission 11) — a Win/Loss threshold of just £0.01 either side of
+        linked paper trade closes — a Win/Loss threshold of just £0.01 either side of
         break-even, so a trade that closes essentially flat reads as Neutral rather than an
         arbitrary Win or Loss. Rejected candidates never have an outcome at all (shown as
         &quot;N/A&quot;, not &quot;Pending&quot;) — there was no trade to win or lose. History is
-        stored using the active persistence provider — currently{" "}
+        stored using{" "}
         <strong className="font-medium text-ink-200">
-          {status.mode === "Supabase" ? "Supabase" : "local browser storage"}
+          {status.mode === "Supabase" ? "your database" : "local browser storage"}
         </strong>
-        . Rejected candidates are included deliberately: a future Hermes needs to learn from ideas
+        . Rejected candidates are included deliberately, so future analysis can learn from ideas
         that didn&apos;t clear risk checks, not only from trades that were placed. Each record also
         captures the portfolio&apos;s deployed capital, available cash, and sector exposure at the
         moment of the decision — not shown as table columns here to keep this view simple, but

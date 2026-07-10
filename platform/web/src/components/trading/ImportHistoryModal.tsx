@@ -35,9 +35,9 @@ export function ImportHistoryModal() {
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-ink-400">
           This browser has {importCandidate.length} paper trade
-          {importCandidate.length === 1 ? "" : "s"} saved locally, and your connected Supabase
-          project has none yet. Import your local history so it&apos;s available wherever you
-          sign in from now on, or skip to start fresh in Supabase.
+          {importCandidate.length === 1 ? "" : "s"} saved locally, and your account&apos;s database
+          has none yet. Import your local history so it&apos;s available wherever you sign in from
+          now on, or skip to start fresh.
         </p>
 
         <div className="mt-5 rounded-xl2 border border-accent-blue/25 bg-accent-blue/10 px-4 py-3 text-xs leading-relaxed text-accent-blue">

@@ -9,6 +9,7 @@ import { PersistenceFallbackBanner } from "@/components/layout/PersistenceFallba
 import { Footer } from "@/components/layout/Footer";
 import { ImportHistoryModal } from "@/components/trading/ImportHistoryModal";
 import { AuthGate } from "@/components/layout/AuthGate";
+import { AutomationRunner } from "@/components/automation/AutomationRunner";
 
 const AUTH_ROUTES = new Set(["/sign-in", "/sign-up", "/forgot-password", "/reset-password"]);
 
@@ -44,6 +45,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </div>
       <ImportHistoryModal />
+      <AutomationRunner />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
   JournalIcon,
   MarketIntelligenceIcon,
   PortfolioIcon,
+  SettingsIcon,
   SignalsIcon,
   StrategiesIcon,
   SystemHealthIcon,
@@ -26,7 +27,8 @@ export const navItems: NavItem[] = [
   { href: "/portfolio", label: "Paper Portfolio", icon: PortfolioIcon },
   { href: "/trade-journal", label: "Trade Journal", icon: JournalIcon },
   { href: "/bot-decisions", label: "Bot Decisions", icon: BotIcon },
-  { href: "/decision-intelligence", label: "Decision Intelligence", icon: DecisionIntelligenceIcon },
+  { href: "/decision-intelligence", label: "AI Decision History", icon: DecisionIntelligenceIcon },
   { href: "/strategies", label: "Strategies", icon: StrategiesIcon },
-  { href: "/system-health", label: "System Health", icon: SystemHealthIcon },
+  { href: "/settings", label: "Settings", icon: SettingsIcon },
+  { href: "/system-health", label: "Operations Centre", icon: SystemHealthIcon },
 ];

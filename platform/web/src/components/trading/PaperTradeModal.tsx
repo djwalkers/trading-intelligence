@@ -126,7 +126,7 @@ export function PaperTradeModal({
         ) : null}
 
         <div className="mt-5 rounded-xl2 border border-accent-amber/30 bg-accent-amber/10 px-4 py-3 text-xs leading-relaxed text-accent-amber">
-          This is prototype paper trading only. No real order will be placed.
+          This is paper trading only. No real order will be placed.
         </div>
 
         <div className="mt-6 flex justify-end gap-3">

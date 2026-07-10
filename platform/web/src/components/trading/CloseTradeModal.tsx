@@ -93,7 +93,7 @@ export function CloseTradeModal({
         </dl>
 
         <div className="mt-5 rounded-xl2 border border-accent-amber/30 bg-accent-amber/10 px-4 py-3 text-xs leading-relaxed text-accent-amber">
-          This is prototype paper trading only. Closing this trade does not place a real order.
+          This is paper trading only. Closing this trade does not place a real order.
         </div>
 
         <div className="mt-6 flex justify-end gap-3">

@@ -23,7 +23,7 @@ export function Sidebar() {
         </div>
         <div className="flex flex-col leading-tight">
           <span className="text-sm font-semibold text-ink-100">Trading Intelligence</span>
-          <span className="text-[11px] text-ink-500">Prototype workspace</span>
+          <span className="text-[11px] text-ink-500">Paper trading platform</span>
         </div>
       </div>
 
@@ -66,9 +66,9 @@ export function Sidebar() {
 
       <div className="border-t border-base-700 px-4 py-4">
         <p className="text-xs leading-relaxed text-ink-600">
-          Build 1.3.0 &middot; Mission 11
+          Build 1.12.0
           <br />
-          Mock or external prices. No live trading.
+          Paper trading only. No live trading.
         </p>
       </div>
     </aside>
