@@ -27,8 +27,15 @@ Related: [`docs/product/BUILD-0.1.0.md`](../../docs/product/BUILD-0.1.0.md),
 [`docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md`](../../docs/product/MISSION-9-HISTORICAL-MARKET-DATA.md),
 [`docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md`](../../docs/product/MISSION-10-SERVER-SCHEDULE-ACTIVATION.md),
 [`docs/product/MISSION-11-OUTCOME-ANALYSIS.md`](../../docs/product/MISSION-11-OUTCOME-ANALYSIS.md),
+[`docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md`](../../docs/product/MAINTENANCE-1.11.2-REAL-MARKET-DATA.md),
+[`docs/product/BUILD-1.12.0.md`](../../docs/product/BUILD-1.12.0.md),
+[`docs/product/BUILD-1.12.1.md`](../../docs/product/BUILD-1.12.1.md),
+[`docs/product/BUILD-1.12.2.md`](../../docs/product/BUILD-1.12.2.md),
+[`docs/product/BUILD-1.13.0.md`](../../docs/product/BUILD-1.13.0.md),
 [`docs/database/SUPABASE-PERSISTENCE-PLAN.md`](../../docs/database/SUPABASE-PERSISTENCE-PLAN.md),
 [`docs/database/SUPABASE-SETUP.md`](../../docs/database/SUPABASE-SETUP.md),
+[`docs/operations/DEPLOYMENT.md`](../../docs/operations/DEPLOYMENT.md),
+[`docs/operations/RUNBOOK.md`](../../docs/operations/RUNBOOK.md),
 [`infrastructure/supabase/README.md`](../../infrastructure/supabase/README.md)
 
 ## Goal
@@ -836,6 +843,154 @@ health) using mock data only.
   reachable; judged low-risk given the pure-function suite and SSR checks cover the same logic and
   rendering paths. No new Supabase rows were created during this mission's testing
 
+**Build 1.12.0 (Operations Centre & UX Polish)**
+
+- Pure UX, terminology, and information-architecture build — no trading logic, risk rule, strategy
+  calculation, or database schema changed
+- Dashboard rebuilt around "what is my AI doing right now": Portfolio overview, AI activity, Recent
+  AI decisions, Market overview, Quick actions — all scheduler configuration moved off it
+- New Settings page (`/settings`) hosts both automatic-scanning systems (this browser + always-on
+  server-based), market data provider info, and a broker connection placeholder
+- The tick that fires a scheduled browser scan moved from the Dashboard's own panel into a new
+  headless `AutomationRunner`, mounted app-wide — automatic scanning now keeps running regardless
+  of which page is open, not just the Dashboard (previously undisclosed limitation, now fixed)
+- System Health redesigned into an Operations Centre (route unchanged at `/system-health`): a top
+  Platform Health % verdict plus seven grouped panels (Market Data, AI Engine, VPS Worker, Database,
+  Trading Mode, AI Decision History). The static, always-inaccurate `systemServices` mock list
+  (permanently reporting "Database: Not Connected" and "Execution Engine: Disabled" regardless of
+  actual configuration) was deleted and replaced with a Trading Mode panel that honestly reports
+  paper trading as **Enabled**
+- Terminology sweep across every visible page: Persistence → Database, Scheduler → Automatic
+  Scanning, Decision Intelligence → AI Decision History, Position Manager → Position Protection,
+  "Supabase" → "your database" in user copy, "Prototype mode" → "Paper trading only", Mission
+  numbers removed from all user-visible copy (kept only in source comments and `docs/product/`
+  history)
+- Fixed a real accuracy bug found during the sweep: the Bot Decisions page's disclosure still said
+  "there is no scheduled or autonomous triggering in this build," stale since Mission 4 added
+  scheduling
+- **Verified live**: `npm run lint`/`npm run build`/`npx tsc --noEmit` all clean throughout; local
+  prototype mode browser session confirmed no console errors on Dashboard/Settings/Operations
+  Centre, a manual scan run from the Dashboard correctly updated AI Activity/Recent AI
+  Decisions/Bot Decisions/AI Decision History, and automatic scanning started from Settings was
+  confirmed still "Running" with a correct next-scan time after navigating to the Dashboard and the
+  Operations Centre — proof the new app-wide automation runner works
+
+**Build 1.12.1 (Production Readiness & UX Refinement)**
+
+- Full audit pass — terminology, consistency, empty/loading states, accessibility, data
+  presentation — across every page; no trading logic, risk rule, or schema changed
+- **Confirmed and fixed a real data bug**: a displayed current price could sit outside its own
+  displayed day range (4 of 5 instruments affected — the mock live-quote drift was applied on top
+  of a day-high/day-low authored once as static data). Fixed by widening the displayed range to
+  always include the current price; no mock data or calculation changed, purely a display fix in
+  `WatchlistTable.tsx`
+- Replaced remaining developer wording: "Mock"/"Mocked" → "Sample data" (Watchlist, Settings,
+  Operations Centre, trade confirmation modals), "VPS Worker" → "Always-On Scanning", "Coming soon"
+  → "Not available yet", raw scan ids (one of which exposed an OS process id) → a uniform
+  `Scan #N` via a new `formatScanId()` helper, "prototype"/"mock"/"in this build" phrasing removed
+  from the 404 page, page metadata, and the Market Intelligence/Signals/Paper Portfolio info notes
+- Fixed a confirmed WCAG AA contrast failure: `text-ink-600` (~2.6:1, below the 4.5:1 minimum for
+  normal text) used across 13 files, replaced with the already-dominant `text-ink-500` (~4.6:1) —
+  an accessibility fix that also reduced the number of "muted text" shades in circulation
+- Clarified two real duplication/confusion points found during the audit: Paper Portfolio's
+  illustrative starting "Open positions" table vs. the user's own real "Open trades" (previously
+  unexplained, now explicitly labelled as separate); and the Signals/Strategies pages' relationship
+  to the AI Engine (different strategy names, easy to conflate — now stated explicitly)
+- Rewrote every generic empty state (AI Decision History, Bot Decisions, Trade Journal, Open/Closed
+  trades) to explain why it's empty, how to populate it, and what will appear there
+- Added `isHydrated` to `PaperTradesProvider`/`DecisionHistoryProvider` and used it on the
+  Dashboard's Portfolio Overview and the AI Decision History page, so a database-backed account
+  loading over the network shows a genuine loading state instead of a misleading "£0.00 / 0" or
+  premature "no scans yet" flash
+- **Verified live**: `npm run lint`/`npm run build`/`npx tsc --noEmit` all clean; local prototype
+  mode browser session confirmed the day-range fix on all 5 Watchlist instruments via page-text
+  extraction, "Sample data"/"Not available yet" rendering correctly across Watchlist/Settings/
+  Operations Centre, the clarified Paper Portfolio and Signals copy, and zero console errors on
+  every page visited
+
+**Build 1.12.2 (Accessibility, Mobile and Interaction Hardening)**
+
+- A shared `Modal` component (`src/components/ui/Modal.tsx`) replaces three duplicated hand-rolled
+  dialog implementations (PaperTradeModal, CloseTradeModal, ImportHistoryModal): focus moves into
+  the dialog on open (falling back past a disabled initial control to the first genuinely focusable
+  one), Tab/Shift+Tab cycle within it, Escape closes it, background scroll locks, and focus returns
+  to the trigger element on close — all confirmed with real keyboard input in a live browser session,
+  not just code inspection. A companion `Button` component consolidates the same three modals'
+  duplicated hover/focus/disabled styling
+- `BotDecisionLogProvider` gained the same `isHydrated` flag Build 1.12.1 added to
+  `PaperTradesProvider`/`DecisionHistoryProvider` — closes the last local-storage-backed "could
+  flash 0/empty before the deferred read resolves" gap, across all four consumers (two Dashboard
+  widgets, the Bot Decisions page, and the Operations Centre's AI Engine panel)
+- Every data table (Watchlist, Signals, Positions, Paper Trades, the Market Intelligence comparison
+  table, AI Decision History) now has `scope="col"` headers, a screen-reader `<caption>`, and a
+  labelled, keyboard-focusable (`tabIndex={0}`) horizontal-scroll region — the existing
+  horizontal-scroll pattern was kept and hardened rather than replaced with per-table mobile card
+  layouts, since it was already consistent everywhere except the AI Decision History table (18
+  columns, missing the `min-w`/`scrollbar-thin` every other table had), which was brought in line
+- Navigation accessibility: `aria-current="page"` and a visible focus ring on both the desktop
+  sidebar and the mobile pill nav (previously hover-only), plus a 44px-minimum touch target on the
+  mobile nav strip
+- `aria-live="polite"` status regions for scan start/completion (Dashboard's "Run scan now") and
+  automatic-scanning enable/disable (Settings); `role="alert"` on the server-schedule save error; a
+  visible "Saving…" indicator added where a control could go disabled with no other visible reason
+- Verified no horizontal overflow at 320/375/430/768px on every route tested, confirmed the
+  automatic-scanning tick still fires correctly in the background (no regression to Build 1.12.0's
+  always-on runner), and confirmed all three `BotDecisionLogProvider` hydration states (existing
+  decisions, emptied storage, absent key) render correctly with no premature empty state
+- **Verified live**: `npm run lint`/`npm run build`/`npx tsc --noEmit` all clean; live keyboard
+  testing of the full modal focus-trap flow and the main navigation's tab order; zero console errors
+  or hydration warnings across every route and viewport tested
+
+**Build 1.13.0 (Production Readiness and Operational Hardening)**
+
+- A central, validated environment configuration layer (`src/lib/config/`) replaces scattered
+  `process.env` reads: half-set variable pairs (e.g. a Supabase URL with no anon key) now throw a
+  clear error at startup instead of silently behaving as fully unconfigured; a malformed
+  `WORKER_POLL_INTERVAL_MS` now fails loudly instead of silently becoming `NaN`
+- A shared `AppError` normalisation layer + structured logger (`src/lib/errors/`, `src/lib/logger/`),
+  applied to every existing meaningful `console.error` call site and to a genuine bug found in the
+  process: `useBotScanRunner.runScan()` had no top-level try/catch — a scan failure from the
+  scheduled tick (which calls it without awaiting or catching) was an **uncaught promise
+  rejection**; every path now resolves and surfaces a toast instead
+- Route-segment and root error boundaries (`src/app/error.tsx`, `global-error.tsx` — neither existed
+  before this build): a safe message, a reference id (Next's own `error.digest`), a retry action, and
+  a Dashboard link, verified live via a deliberately-triggered, immediately-reverted test error —
+  confirmed the rest of the app (sidebar, navigation) stayed usable while the failing route was
+  isolated
+- A lightweight toast notification system (`src/lib/notifications/toast-bus.ts`, a plain external
+  store rather than a React Context, since persistence failures need to be reportable from
+  non-component modules): trade opened/closed, scan started/completed/failed, automation
+  enabled/disabled/save-failed, settings saved, and persistence failure (deduplicated to once per
+  session) all covered; `aria-live="polite"` region, `role="alert"` on error toasts, capped at 4
+  visible, 6-second auto-dismiss, positioned to never overlap the mobile nav
+- A small `HealthStatus` model and a new production-safe `/api/health` endpoint — configuration-
+  presence based (no live network calls, safe for frequent polling), honestly reports
+  `automation: "unknown"` since this process has no channel to the separate VPS worker, matching
+  `VPSWorkerStatusPanel`'s existing disclosure
+- A persistence-diagnostics audit across all six localStorage-backed stores found several
+  **unguarded `localStorage.setItem` calls** (paper trades, decision history, bot decisions, bot
+  scheduler) with no try/catch around the write itself — fixed via two shared helpers
+  (`setItemOrThrow` for async store methods with an existing `.catch()` up the chain,
+  `setItemSafely` for call sites inside a `setState` updater, where throwing would crash the render)
+- A single source of truth for the app version (`src/lib/version.ts`, derived from `package.json`)
+  fixed a real bug: the Sidebar and Footer had drifted to a stale "Build 1.12.0" while the rest of
+  the app had already moved on
+- A new Vitest + Testing Library + axe-core test suite (39 tests, 8 files) — config validation
+  (including every half-set-pair case), `AppError` normalisation, the health endpoint's shape and
+  safety, `BotDecisionLogProvider` hydration (existing/empty/absent), the modal focus trap with real
+  simulated keyboard input, and an automated accessibility scan (zero violations) — chosen over
+  Playwright since this sandboxed environment cannot reliably download a real browser binary
+- `ecosystem.config.js` (PM2, new) defines both the web process and the worker process;
+  `docs/operations/DEPLOYMENT.md` and `docs/operations/RUNBOOK.md` (both new) cover prerequisites,
+  environment configuration, build/start/worker commands, the health endpoint, process supervision,
+  rollback, and symptom-based troubleshooting for 13 operational scenarios
+- **Verified live**: `npm run lint`/`npx tsc --noEmit`/`npm run build`/`npm test` all clean;
+  `/api/health` confirmed returning the documented shape live; toast notifications observed firing
+  from both the automatic-scanning tick and a manual scan; the error boundary verified live via a
+  deliberate, immediately-reverted test error; version string consistent across Sidebar/Footer/health
+  endpoint; no horizontal overflow at 375px mobile width; zero console errors across every route
+  tested
+
 ## What is intentionally not included yet
 
 - No true 24/7 scheduling *from the browser* — the browser's own schedule only advances while the
@@ -897,6 +1052,26 @@ health) using mock data only.
   live mock data on every render)
 - Per-user scoping of the first-run import prompt (single browser-wide flag)
 - Financial advice language of any kind
+- The Signals/Strategies pages' relationship to the AI Engine is now clearly labelled (Build
+  1.12.1), not resolved — whether they should eventually be merged, renamed, or retired is a
+  product decision, not a UX one
+- `aria-live` announcement coverage now reaches trade-opened/closed and scan-outcome events too
+  (Build 1.13.0's toast system), but not per-candidate trade-rejection within a scan — a single scan
+  can reject several candidates, and per-candidate toasts would violate "avoid stacking without
+  limit," so rejection is folded into one "scan complete, no trade opened" toast instead
+- An automated accessibility scan now exists (axe-core, Build 1.13.0) but is component-level
+  (jsdom-rendered, not a real browser) and covers five representative components (Bot Decisions,
+  Settings' browser automation panel, Paper Portfolio, an open modal, the toast viewport), not every
+  route individually and not the `color-contrast` rule (jsdom does no layout/paint) — Build 1.12.2's
+  manual, real-browser contrast audit remains the actual contrast coverage
+- No real browser E2E test suite (Playwright or similar) exists (Build 1.13.0) — the test suite is
+  Vitest + jsdom, chosen because this sandboxed environment cannot reliably download a real browser
+  binary; full-page SSR and real CSS layout are not exercised by any automated test
+- The health endpoint (Build 1.13.0, `/api/health`) reports configuration presence, not live
+  connectivity — it cannot currently tell you whether Supabase is actually reachable right now, only
+  whether it's validly configured
+- `ecosystem.config.js` (Build 1.13.0) has been written and documented but not run against a real
+  VPS — like the worker itself since Mission 8, it remains unexercised in a genuine deployment
 
 ## How to run
 
@@ -908,18 +1083,26 @@ npm run dev
 
 ## Next recommended build
 
-**Mission 12**: with outcome analysis (Mission 11) built, tested, and confirmed safe, but migration
-`0017` still not applied to the live Supabase project, the natural next step is to **apply that
-migration and observe the full loop end-to-end**: run a real scheduled or manual scan, let a trade
-close, and confirm a real Win/Loss/Neutral value lands in `decision_history` — the one proof Mission
-11 couldn't complete without the migration being live. Two longer-standing candidates remain open
-independently: (1) **Live concurrency test against real Postgres** — run two worker processes (or a
-worker and a browser-triggered scan) against the same user at the same time to confirm the advisory
-lock (Mission 6/8) behaves under genuine concurrent load the way the in-memory simulation predicted;
-Mission 10 proved repeated correct single-worker execution but not concurrent contention. (2) **Wire
-the Dashboard/Market Intelligence/Watchlist display pages to Mission 9's historical data path** (the
-Bot Runner already benefits from real indicators; unifying the display pages needs a real answer for
-the server/client status-singleton question Mission 9 deliberately left open). Also still open: a
-strategy or risk rule that uses Mission 9's `calculateVolatility` (implemented, unused); a richer
-mock instrument/sector universe (flagged repeatedly since Mission 2); a fourth Strategy Engine
-strategy; or exit-price provenance to mirror Build 1.2.0's entry-price work.
+With the interface honestly describing the platform, production-ready at the UX layer, hardened for
+keyboard/mobile/screen-reader use, and now operationally hardened with configuration validation,
+error boundaries, health monitoring, and structured logging (Builds 1.12.0-1.13.0), the outstanding
+items are the genuinely architectural ones that have been disclosed since Missions 6-11: (1) **apply
+migration `0017` to the live Supabase project and observe the outcome-analysis loop end-to-end** —
+run a real scheduled or manual scan, let a trade close, and confirm a real Win/Loss/Neutral value
+lands in `decision_history`, the one proof Mission 11 couldn't complete without the migration being
+live. (2) **Live concurrency test against real Postgres** — run two worker processes (or a worker
+and a browser-triggered scan) against the same user at the same time to confirm the advisory lock
+(Mission 6/8) behaves under genuine concurrent load the way the in-memory simulation predicted;
+Mission 10 proved repeated correct single-worker execution but not concurrent contention. (3) **Run
+`ecosystem.config.js` against a real VPS** — Build 1.13.0 wrote and documented PM2 process
+definitions and a full deployment/runbook pair, but neither has been exercised against a genuine
+server; this would be the first real-world validation of the worker's entire deployment story since
+Mission 8. (4) **Wire the Market Intelligence/Watchlist display pages to Mission 9's/Maintenance
+1.11.2's real historical data path** (only the AI Engine's own scans currently benefit from real
+Alpha Vantage-backed indicators — the display pages still read snapshot-proxy indicators over sample
+data). Independently: connect a real broker sandbox behind Settings' placeholder now that the UI has
+a home for it; a real browser E2E suite (Playwright + axe) to close the gap Build 1.13.0's
+jsdom-based tests deliberately left open; a strategy or risk rule that uses Mission 9's
+`calculateVolatility` (implemented, unused); a richer mock instrument/sector universe (flagged
+repeatedly since Mission 2); a fourth Strategy Engine strategy; or exit-price provenance to mirror
+Build 1.2.0's entry-price work.
