@@ -1,5 +1,6 @@
 import type {
   AgreementLevel,
+  DataProvenance,
   PaperTrade,
   PaperTradeSide,
   PortfolioExposureSnapshot,
@@ -94,6 +95,11 @@ export interface BotDecision {
   tradeCreated: boolean;
   createdTradeId?: string;
   executionTimeMs: number;
+  // Sprint 290 — determined from the market-data telemetry this scan's own historical fetch and
+  // any risk-evaluated candidate's quote fetch actually reported (data-source-result.ts), never
+  // inferred from timestamps, scan ids, or trigger type. Required — every BotDecision must always
+  // carry a real provenance value; there is no code path that constructs one without it.
+  dataProvenance: DataProvenance;
 }
 
 export interface BotScanResult {

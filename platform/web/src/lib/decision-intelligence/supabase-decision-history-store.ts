@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { AgreementLevel, PaperTradeSide, PositionAction } from "@/lib/types";
+import type { AgreementLevel, DataProvenance, PaperTradeSide, PositionAction } from "@/lib/types";
 import type { ScanTriggerType } from "@/lib/bot/types";
 import type { DecisionHistoryStore } from "./decision-history-store";
 import type { DecisionOutcome, DecisionPortfolioRiskResult, DecisionRecord } from "./types";
@@ -44,6 +44,9 @@ export interface DecisionHistoryRow {
   holding_duration_minutes: number | null;
   closed_at: string | null;
   outcome_recorded_at: string | null;
+  // Sprint 290 — nullable at the row-type level only to tolerate reading a genuinely pre-migration
+  // legacy row, same rationale as PaperTradeRow.data_provenance in supabase-paper-trade-store.ts.
+  data_provenance: DataProvenance | null;
 }
 
 function toNumber(value: number | string | null): number {
@@ -84,6 +87,7 @@ export function toDbDecisionRecord(record: DecisionRecord) {
     holding_duration_minutes: record.holdingDurationMinutes ?? null,
     closed_at: record.closedAt ?? null,
     outcome_recorded_at: record.outcomeRecordedAt ?? null,
+    data_provenance: record.dataProvenance,
   };
 }
 
@@ -124,6 +128,9 @@ export function fromDbDecisionRecord(row: DecisionHistoryRow): DecisionRecord {
     holdingDurationMinutes: row.holding_duration_minutes ?? undefined,
     closedAt: row.closed_at ?? undefined,
     outcomeRecordedAt: row.outcome_recorded_at ?? undefined,
+    // Sprint 290 — same conservative-legacy-fallback rationale as fromDbTrade in
+    // supabase-paper-trade-store.ts.
+    dataProvenance: row.data_provenance ?? "sample_data",
   };
 }
 

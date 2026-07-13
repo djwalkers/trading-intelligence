@@ -1,5 +1,6 @@
 import type {
   AgreementLevel,
+  DataProvenance,
   EvidenceRating,
   MarketDataSource,
   PaperTrade,
@@ -57,6 +58,11 @@ export interface PaperTradeRow {
   existing_position_value: number | string | null;
   position_value_after_trade: number | string | null;
   position_decision_reason: string | null;
+  // Sprint 290 — nullable at the row-type level only to tolerate reading a genuinely pre-migration
+  // legacy row (see supabase/migrations/0020_data_provenance_constraints.sql's deployment
+  // procedure); every row this app writes going forward always sets a real value, and the
+  // migration's NOT NULL constraint enforces that for every row it applies to.
+  data_provenance: DataProvenance | null;
 }
 
 export interface TradeIntelligenceRow {
@@ -104,6 +110,7 @@ export function toDbTrade(trade: PaperTrade) {
     existing_position_value: trade.existingPositionValue ?? null,
     position_value_after_trade: trade.positionValueAfterTrade ?? null,
     position_decision_reason: trade.positionDecisionReason ?? null,
+    data_provenance: trade.dataProvenance,
   };
 }
 
@@ -149,6 +156,10 @@ export function fromDbTrade(row: PaperTradeRow, intelligence: TradeIntelligenceR
     existingPositionValue: toNumber(row.existing_position_value),
     positionValueAfterTrade: toNumber(row.position_value_after_trade),
     positionDecisionReason: row.position_decision_reason ?? undefined,
+    // Sprint 290 — a genuinely pre-migration legacy row (see PaperTradeRow.data_provenance above)
+    // falls back to the same conservative default normalizeTrade() uses for pre-Sprint-290
+    // local-storage records, rather than surfacing null through a type that declares this required.
+    dataProvenance: row.data_provenance ?? "sample_data",
     intelligence: intelligence
       ? {
           recommendation: intelligence.recommendation,

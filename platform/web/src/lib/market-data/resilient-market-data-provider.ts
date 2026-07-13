@@ -1,4 +1,4 @@
-import type { MarketDataStatus } from "@/lib/types";
+import type { MarketDataStatus, QuoteFetchResult } from "@/lib/types";
 import type { MarketQuote } from "@/lib/types";
 import type { MarketDataProvider } from "./market-data-provider";
 import { logger } from "@/lib/logger/logger";
@@ -86,6 +86,97 @@ export class ResilientMarketDataProvider implements MarketDataProvider {
         instrumentsLoaded: quotes.length,
       });
       return quotes;
+    }
+  }
+
+  // Sprint 290 — mirrors getQuotes's exact branch decisions and existing setStatus() calls
+  // (untouched), but additionally constructs and returns a FRESH telemetry object inline in each
+  // branch — never read back from `this.status` afterward. See the identical rationale on
+  // ResilientHistoricalMarketDataProvider.getHistoricalCandlesWithTelemetry.
+  async getQuotesWithTelemetry(symbols: string[]): Promise<QuoteFetchResult> {
+    if (symbols.length === 0) {
+      return {
+        quotes: [],
+        telemetry: {
+          symbolsRequested: [],
+          symbolsServedExternally: [],
+          symbolsServedFromFallback: [],
+          symbolsFailed: [],
+          usedFallback: false,
+          source: this.status.source,
+          provider: this.status.provider,
+        },
+      };
+    }
+
+    if (this.fallenBack || !this.usingExternal) {
+      const quotes = await this.active.getQuotes(symbols);
+      this.setStatus({ lastUpdated: new Date().toISOString(), instrumentsLoaded: quotes.length });
+      return {
+        quotes,
+        telemetry: {
+          symbolsRequested: symbols,
+          symbolsServedExternally: [],
+          symbolsServedFromFallback: symbols,
+          symbolsFailed: [],
+          usedFallback: this.fallenBack,
+          source: "Mock",
+          provider: "Sample data",
+        },
+      };
+    }
+
+    try {
+      const quotes = await this.active.getQuotes(symbols);
+      this.setStatus({
+        mode: "Connected",
+        lastUpdated: new Date().toISOString(),
+        instrumentsLoaded: quotes.length,
+      });
+      return {
+        quotes,
+        telemetry: {
+          symbolsRequested: symbols,
+          symbolsServedExternally: symbols,
+          symbolsServedFromFallback: [],
+          symbolsFailed: [],
+          usedFallback: false,
+          source: "External",
+          provider: this.status.provider,
+        },
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown market data error";
+      logger.error("External provider unavailable, falling back to mock", {
+        component: "market-data",
+        errorCode: "MARKET_DATA_ERROR",
+        reason,
+      });
+
+      this.fallenBack = true;
+      this.active = this.fallback;
+      const quotes = await this.fallback.getQuotes(symbols);
+      this.setStatus({
+        provider: "Sample data",
+        source: "Mock",
+        mode: "Fallback",
+        fallbackActive: true,
+        failureReason: reason,
+        lastUpdated: new Date().toISOString(),
+        instrumentsLoaded: quotes.length,
+      });
+      return {
+        quotes,
+        telemetry: {
+          symbolsRequested: symbols,
+          symbolsServedExternally: [],
+          symbolsServedFromFallback: symbols,
+          symbolsFailed: [],
+          usedFallback: true,
+          source: "Mock",
+          provider: "Sample data",
+        },
+      };
     }
   }
 }

@@ -1,7 +1,7 @@
 import "server-only";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import type { OHLCVCandle } from "@/lib/types";
+import type { HistoricalFetchResult, OHLCVCandle } from "@/lib/types";
 import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
 import { logger } from "@/lib/logger/logger";
 
@@ -96,6 +96,29 @@ export class AlphaVantageHistoricalMarketDataProvider implements HistoricalMarke
       results.push(...candles.slice(-days));
     }
     return results;
+  }
+
+  // Sprint 290 — a thin, additive wrapper: getHistoricalCandles above loops sequentially and
+  // throws for the WHOLE call the instant any single symbol's fetch fails (a mid-loop exception
+  // aborts before any partial results are ever returned), so today's real behaviour is honestly
+  // all-or-nothing — either every requested symbol was served externally, or this call throws
+  // (propagated unchanged, exactly like getHistoricalCandles) and never returns at all. The
+  // telemetry shape supports per-symbol granularity for a future provider that could report a
+  // genuinely mixed result; this one cannot, so it never fabricates one.
+  async getHistoricalCandlesWithTelemetry(symbols: string[], days: number): Promise<HistoricalFetchResult> {
+    const candles = await this.getHistoricalCandles(symbols, days);
+    return {
+      candles,
+      telemetry: {
+        symbolsRequested: symbols,
+        symbolsServedExternally: symbols,
+        symbolsServedFromFallback: [],
+        symbolsFailed: [],
+        usedFallback: false,
+        source: "External",
+        provider: "Alpha Vantage",
+      },
+    };
   }
 
   // Minutes since the oldest still-cached symbol was fetched, or null if the cache is empty —

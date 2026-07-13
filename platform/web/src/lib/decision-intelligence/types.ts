@@ -1,4 +1,4 @@
-import type { AgreementLevel, PaperTradeSide, PositionAction } from "@/lib/types";
+import type { AgreementLevel, DataProvenance, PaperTradeSide, PositionAction } from "@/lib/types";
 import type { ScanTriggerType } from "@/lib/bot/types";
 
 // Mission 7 — Decision Intelligence. Bumped whenever a field is added, removed, or reinterpreted,
@@ -86,4 +86,9 @@ export interface DecisionRecord {
   holdingDurationMinutes?: number;
   closedAt?: string;
   outcomeRecordedAt?: string;
+
+  // Sprint 290 — required, not optional: inherited exactly from the originating BotDecision's
+  // provenance (see buildDecisionRecords) — every candidate from one scan shares that scan's
+  // single provenance value, whether it opened a trade or was rejected.
+  dataProvenance: DataProvenance;
 }

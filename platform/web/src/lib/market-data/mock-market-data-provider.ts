@@ -1,5 +1,5 @@
 import { getInstrumentBySymbol } from "@/lib/mock/instruments";
-import type { MarketQuote } from "@/lib/types";
+import type { MarketQuote, QuoteFetchResult } from "@/lib/types";
 import type { MarketDataProvider } from "./market-data-provider";
 
 // Fixed per-instrument drift, carried over from the Build 0.5.0 paper-trade P/L mock (previously
@@ -36,5 +36,24 @@ export class MockMarketDataProvider implements MarketDataProvider {
       const quote: MarketQuote = { symbol, price, changeAbsolute, changePercent, lastUpdated };
       return [quote];
     });
+  }
+
+  // A raw Mock provider called directly (never wrapped by Resilient) has no concept of "standing
+  // in for a failure" — that concept belongs only to the Resilient wrapper, which is the only
+  // caller that ever falls back to this provider.
+  async getQuotesWithTelemetry(symbols: string[]): Promise<QuoteFetchResult> {
+    const quotes = await this.getQuotes(symbols);
+    return {
+      quotes,
+      telemetry: {
+        symbolsRequested: symbols,
+        symbolsServedExternally: [],
+        symbolsServedFromFallback: symbols,
+        symbolsFailed: [],
+        usedFallback: false,
+        source: "Mock",
+        provider: "Sample data",
+      },
+    };
   }
 }

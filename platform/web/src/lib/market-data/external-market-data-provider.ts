@@ -1,4 +1,4 @@
-import type { MarketQuote } from "@/lib/types";
+import type { MarketQuote, QuoteFetchResult } from "@/lib/types";
 import type { MarketDataProvider } from "./market-data-provider";
 
 interface FinnhubQuoteResponse {
@@ -22,6 +22,25 @@ export class ExternalMarketDataProvider implements MarketDataProvider {
 
   async getQuotes(symbols: string[]): Promise<MarketQuote[]> {
     return Promise.all(symbols.map((symbol) => this.getQuote(symbol)));
+  }
+
+  // Sprint 290 — a thin, additive wrapper: getQuotes above uses Promise.all(), so one bad symbol's
+  // rejection discards the whole call (propagated unchanged, exactly like getQuotes) rather than
+  // partially succeeding — today's real behaviour is honestly all-or-nothing.
+  async getQuotesWithTelemetry(symbols: string[]): Promise<QuoteFetchResult> {
+    const quotes = await this.getQuotes(symbols);
+    return {
+      quotes,
+      telemetry: {
+        symbolsRequested: symbols,
+        symbolsServedExternally: symbols,
+        symbolsServedFromFallback: [],
+        symbolsFailed: [],
+        usedFallback: false,
+        source: "External",
+        provider: this.providerName,
+      },
+    };
   }
 
   private async getQuote(symbol: string): Promise<MarketQuote> {

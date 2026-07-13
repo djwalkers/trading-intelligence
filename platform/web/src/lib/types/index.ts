@@ -9,3 +9,4 @@ export * from "./market-data";
 export * from "./strategy-engine";
 export * from "./portfolio-risk";
 export * from "./position-manager";
+export * from "./data-provenance";

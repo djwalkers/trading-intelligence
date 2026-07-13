@@ -8,8 +8,14 @@ const STORAGE_KEY = "trading-intelligence.paper-trades.v1";
 // requires one — treat them as Signal-sourced, since that was the only paper trade flow that
 // existed at the time. Every field added since (source, intelligence, exitPrice, closedAt,
 // realisedPnl, realisedPnlPercent) is optional on the type, so no other migration is needed.
+//
+// Sprint 290 — dataProvenance is a newly REQUIRED field, so the same backward-compatibility
+// pattern applies: a trade saved before this sprint has no such value on disk. Defaulted to the
+// most conservative value (sample_data) rather than guessed from source/timestamp — this browser
+// local-storage log has never been genuinely "verified_external_data" in the first place (only
+// the worker's Supabase-backed bot_decisions ever reaches that classification).
 function normalizeTrade(trade: Partial<PaperTrade>): PaperTrade {
-  return { source: "Signal", ...trade } as PaperTrade;
+  return { source: "Signal", dataProvenance: "sample_data", ...trade } as PaperTrade;
 }
 
 export class LocalStoragePaperTradeStore implements PaperTradeStore {

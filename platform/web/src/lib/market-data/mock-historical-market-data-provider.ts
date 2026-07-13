@@ -1,5 +1,5 @@
 import { getInstrumentBySymbol } from "@/lib/mock/instruments";
-import type { OHLCVCandle } from "@/lib/types";
+import type { HistoricalFetchResult, OHLCVCandle } from "@/lib/types";
 import type { HistoricalMarketDataProvider } from "./historical-market-data-provider";
 
 // Daily volatility and intraday high/low spread, both tuned to produce believable-looking mock
@@ -65,6 +65,26 @@ function round2(value: number): number {
 export class MockHistoricalMarketDataProvider implements HistoricalMarketDataProvider {
   async getHistoricalCandles(symbols: string[], days: number): Promise<OHLCVCandle[]> {
     return symbols.flatMap((symbol) => this.buildCandles(symbol, days));
+  }
+
+  // A raw Mock provider called directly (never wrapped by Resilient) has no concept of "standing
+  // in for a failure" — that concept belongs only to the Resilient wrapper, which is the only
+  // caller that ever falls back to this provider. Called directly, generating deterministic mock
+  // candles is simply the intended behaviour, so usedFallback is always false here.
+  async getHistoricalCandlesWithTelemetry(symbols: string[], days: number): Promise<HistoricalFetchResult> {
+    const candles = await this.getHistoricalCandles(symbols, days);
+    return {
+      candles,
+      telemetry: {
+        symbolsRequested: symbols,
+        symbolsServedExternally: [],
+        symbolsServedFromFallback: symbols,
+        symbolsFailed: [],
+        usedFallback: false,
+        source: "Mock",
+        provider: "Sample data",
+      },
+    };
   }
 
   private buildCandles(symbol: string, days: number): OHLCVCandle[] {

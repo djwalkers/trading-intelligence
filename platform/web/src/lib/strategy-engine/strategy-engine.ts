@@ -17,8 +17,10 @@ import type { HistoricalMarketDataProvider } from "@/lib/market-data/historical-
 
 // How many days of history evaluateAllWithHistory() requests per scan — comfortably above
 // MIN_CANDLES_FOR_HISTORY (build-context.ts) so every registered indicator's lookback window has
-// enough data, and matching the mission's "90 daily candles minimum" mock requirement.
-const HISTORY_LOOKBACK_DAYS = 90;
+// enough data, and matching the mission's "90 daily candles minimum" mock requirement. Exported
+// (Sprint 290) so runBotScan (src/lib/bot/bot-runner.ts) can request the same window when it fetches
+// candles itself via getHistoricalCandlesWithTelemetry, instead of duplicating this number.
+export const HISTORY_LOOKBACK_DAYS = 90;
 
 const REGISTERED_STRATEGIES: Strategy[] = [
   movingAverageCrossoverStrategy,

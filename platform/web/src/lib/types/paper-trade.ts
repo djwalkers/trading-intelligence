@@ -3,6 +3,7 @@ import type { MarketDataMode, MarketDataSource } from "./market-data";
 import type { AgreementLevel } from "./strategy-engine";
 import type { PortfolioExposureSnapshot } from "./portfolio-risk";
 import type { PositionAction } from "./position-manager";
+import type { DataProvenance } from "./data-provenance";
 
 export type PaperTradeSide = "BUY" | "SELL";
 export type PaperTradeStatus = "Open" | "Closed";
@@ -89,4 +90,9 @@ export interface PaperTrade {
   existingPositionValue?: number;
   positionValueAfterTrade?: number;
   positionDecisionReason?: string;
+  // Sprint 290 — required, not optional: every PaperTrade must carry a real DataProvenance value,
+  // inherited exactly from the originating BotDecision/signal/opportunity's provenance, never
+  // inferred from timestamps or ids. See src/lib/bot/data-source-result.ts and
+  // src/lib/utils/paper-trade.ts.
+  dataProvenance: DataProvenance;
 }

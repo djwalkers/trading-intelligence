@@ -34,6 +34,7 @@ function buildDecision(overrides: Partial<BotDecision> = {}): BotDecision {
     trace: [],
     tradeCreated: false,
     executionTimeMs: 12.3,
+    dataProvenance: "sample_data",
     ...overrides,
   };
 }

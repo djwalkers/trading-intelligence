@@ -54,3 +54,44 @@ export interface HistoricalDataStatus {
   // null when the active provider doesn't cache (Mock) or nothing has been fetched yet.
   cacheAgeMinutes: number | null;
 }
+
+// Sprint 290 — a genuinely fresh, per-invocation result returned directly by one specific
+// getHistoricalCandlesWithTelemetry() call, never a field read afterward from a provider's shared,
+// mutable, process-lifetime HistoricalDataStatus. This is what lets provenance be computed from
+// what actually happened during THIS scan's fetch, not from a sticky flag that stays set from an
+// earlier, unrelated call. `source`/`usedFallback` describe this call as a whole; the four symbol
+// lists exist for a future provider that can report genuinely mixed per-symbol outcomes within one
+// call — today's concrete providers (AlphaVantage, Resilient) always report fully-external or
+// fully-fallback for a given call, never split, since a single symbol failure aborts the whole
+// sequential fetch (see AlphaVantageHistoricalMarketDataProvider.getHistoricalCandles).
+export interface HistoricalFetchTelemetry {
+  symbolsRequested: string[];
+  symbolsServedExternally: string[];
+  symbolsServedFromFallback: string[];
+  symbolsFailed: string[];
+  usedFallback: boolean;
+  source: HistoricalDataSource;
+  provider: string;
+}
+
+export interface HistoricalFetchResult {
+  candles: OHLCVCandle[];
+  telemetry: HistoricalFetchTelemetry;
+}
+
+// The live-quote sibling of HistoricalFetchTelemetry/HistoricalFetchResult above — same rationale,
+// returned directly by getQuotesWithTelemetry().
+export interface QuoteFetchTelemetry {
+  symbolsRequested: string[];
+  symbolsServedExternally: string[];
+  symbolsServedFromFallback: string[];
+  symbolsFailed: string[];
+  usedFallback: boolean;
+  source: MarketDataSource;
+  provider: string;
+}
+
+export interface QuoteFetchResult {
+  quotes: MarketQuote[];
+  telemetry: QuoteFetchTelemetry;
+}

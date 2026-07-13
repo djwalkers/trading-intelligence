@@ -21,6 +21,9 @@ export async function persistServerDecision(
     reason: decision.reason,
     decision,
     created_paper_trade_id: createdPaperTradeId,
+    // Sprint 290 — required on BotDecision itself, so there is no code path that reaches this
+    // insert without a real value already computed by runBotScan from this scan's own telemetry.
+    data_provenance: decision.dataProvenance,
   });
   if (error) throw new Error(error.message);
 }

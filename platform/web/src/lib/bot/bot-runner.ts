@@ -1,7 +1,9 @@
 import type {
+  DataProvenance,
   Instrument,
   MarketDataStatus,
   MarketQuote,
+  OHLCVCandle,
   PaperTrade,
   PaperTradeSide,
   PortfolioExposureSnapshot,
@@ -9,12 +11,19 @@ import type {
   StrategyScore,
 } from "@/lib/types";
 import { getInstrumentBySymbol } from "@/lib/mock/instruments";
-import { getStrategyEngine } from "@/lib/strategy-engine";
+import { getStrategyEngine, HISTORY_LOOKBACK_DAYS } from "@/lib/strategy-engine";
 import { getMarketDataProvider } from "@/lib/market-data/get-market-data-provider";
+import { getHistoricalMarketDataProvider } from "@/lib/market-data/get-historical-market-data-provider";
 import type { HistoricalMarketDataProvider } from "@/lib/market-data/historical-market-data-provider";
 import { isTradeableRecommendation, sideForRecommendation } from "@/lib/utils/paper-trade";
 import { buildExposureSnapshot, evaluatePortfolioRisk } from "./portfolio-risk";
 import { buildPositionContext, evaluatePosition } from "./position-manager";
+import {
+  combineDataSourceResults,
+  historicalTelemetryToDataSourceResult,
+  quoteTelemetryToDataSourceResult,
+  type DataSourceResult,
+} from "./data-source-result";
 import type {
   BotCandidateEvaluation,
   BotDecision,
@@ -40,6 +49,11 @@ interface CandidateRiskResult {
   quantity: number;
   status: MarketDataStatus;
   quote: MarketQuote | undefined;
+  // Sprint 290 — this candidate's quote-fetch touchpoint, derived from the same freshly-returned
+  // telemetry object getQuotesWithTelemetry() returns for this specific call. Independent of
+  // `status` above (untouched, still drives entryPriceSource/entryPriceProvider exactly as before)
+  // — this is purely an additional signal feeding the scan's overall dataProvenance.
+  dataSourceResult: DataSourceResult;
 }
 
 // Runs the four hardcoded *individual* risk checks for one candidate. Every check always runs and
@@ -77,11 +91,17 @@ async function evaluateCandidateRisk(
 
   // Fetched regardless of the checks above, via the same MarketDataProvider every other trade
   // entry uses (Build 1.2.0) — the trace always shows the real price considered, even when the
-  // candidate is rejected.
-  const quotes = await getMarketDataProvider().getQuotes([candidate.instrumentSymbol]);
+  // candidate is rejected. getQuotesWithTelemetry (Sprint 290) is called instead of getQuotes so
+  // this candidate's data-source touchpoint is known directly from this specific call, never from
+  // getStatus()'s shared, mutable, process-lifetime value — `status` below is left fully intact
+  // for entryPriceSource/entryPriceProvider stamping, exactly as before.
+  const { quotes, telemetry } = await getMarketDataProvider().getQuotesWithTelemetry([
+    candidate.instrumentSymbol,
+  ]);
   const status = getMarketDataProvider().getStatus();
   const quote = quotes[0];
   const price = quote?.price ?? instrument.price;
+  const dataSourceResult = quoteTelemetryToDataSourceResult(telemetry);
 
   // Floor, not round — a hard cap risk check needs a size that never exceeds the limit, unlike
   // the ~£250 *target* sizing used elsewhere (quantityForEntryPrice), which rounds to the
@@ -98,7 +118,7 @@ async function evaluateCandidateRisk(
         : `Price ${price.toFixed(2)} alone exceeds the £${MAX_NOTIONAL_GBP} cap — no valid position size.`,
   });
 
-  return { riskChecks, price, quantity, status, quote };
+  return { riskChecks, price, quantity, status, quote, dataSourceResult };
 }
 
 function buildBotTrade(params: {
@@ -118,6 +138,7 @@ function buildBotTrade(params: {
   existingPositionValue: number;
   positionValueAfterTrade: number;
   positionDecisionReason: string;
+  dataProvenance: DataProvenance;
 }): PaperTrade {
   const {
     candidate,
@@ -136,6 +157,7 @@ function buildBotTrade(params: {
     existingPositionValue,
     positionValueAfterTrade,
     positionDecisionReason,
+    dataProvenance,
   } = params;
 
   return {
@@ -172,6 +194,7 @@ function buildBotTrade(params: {
     existingPositionValue,
     positionValueAfterTrade,
     positionDecisionReason,
+    dataProvenance,
   };
 }
 
@@ -188,7 +211,7 @@ export async function runBotScan(
   trades: PaperTrade[],
   scanId: string,
   triggerType: ScanTriggerType,
-  // Optional — defaults to the client-safe singleton inside evaluateAllWithHistory() when
+  // Optional — defaults to the client-safe singleton (getHistoricalMarketDataProvider()) when
   // omitted. The VPS worker passes its own server-only, Alpha-Vantage-capable provider (Maintenance
   // 1.11.2); the browser never passes one, so nothing here changes for existing callers.
   historicalMarketDataProvider?: HistoricalMarketDataProvider,
@@ -222,7 +245,35 @@ export async function runBotScan(
   // The three strategies, the ranking, and every risk rule below are completely unchanged — only
   // the confidence/agreement values feeding into them may now differ, since they're computed from
   // real history rather than a single day's snapshot.
-  const scores = await getStrategyEngine().evaluateAllWithHistory(instruments, historicalMarketDataProvider);
+  //
+  // Sprint 290 — this fetches candles via getHistoricalCandlesWithTelemetry directly (rather than
+  // calling getStrategyEngine().evaluateAllWithHistory(), which internally calls plain
+  // getHistoricalCandles) and then evaluates each instrument through the same already-public
+  // evaluateInstrumentWithHistory() that method uses internally per instrument — producing
+  // byte-identical StrategyScore[] output, just with this scan's own fresh telemetry captured
+  // alongside it. evaluateAllWithHistory() itself is untouched and still exists for any other
+  // caller; this is the only thing that no longer calls it.
+  const symbols = instruments.map((instrument) => instrument.symbol);
+  const { candles, telemetry: historicalTelemetry } = await (
+    historicalMarketDataProvider ?? getHistoricalMarketDataProvider()
+  ).getHistoricalCandlesWithTelemetry(symbols, HISTORY_LOOKBACK_DAYS);
+
+  const candlesBySymbol = new Map<string, OHLCVCandle[]>();
+  for (const candle of candles) {
+    const existing = candlesBySymbol.get(candle.symbol);
+    if (existing) existing.push(candle);
+    else candlesBySymbol.set(candle.symbol, [candle]);
+  }
+
+  const scores = instruments.map((instrument) =>
+    getStrategyEngine().evaluateInstrumentWithHistory(instrument, candlesBySymbol.get(instrument.symbol) ?? []),
+  );
+
+  // Sprint 290 — every data touchpoint this scan actually made, collected as the scan proceeds:
+  // the historical fetch above always contributes one entry; each risk-evaluated candidate below
+  // (evaluateCandidateRisk) contributes one more. Reduced once, via combineDataSourceResults, at
+  // every point this function returns a BotDecision — never inferred from timestamps or scan ids.
+  const dataSourceResults: DataSourceResult[] = [historicalTelemetryToDataSourceResult(historicalTelemetry)];
 
   // A "valid opportunity" has a clear directional call the app already considers tradeable —
   // this excludes Hold and Avoid before risk checks ever run, the same bar a human applies via
@@ -259,6 +310,7 @@ export async function runBotScan(
         trace,
         tradeCreated: false,
         executionTimeMs: performance.now() - startedAt,
+        dataProvenance: combineDataSourceResults(dataSourceResults),
       },
       trade: null,
     };
@@ -314,7 +366,11 @@ export async function runBotScan(
       continue;
     }
 
-    const { riskChecks, price, quantity, status, quote } = await evaluateCandidateRisk(candidate, instrument);
+    const { riskChecks, price, quantity, status, quote, dataSourceResult } = await evaluateCandidateRisk(
+      candidate,
+      instrument,
+    );
+    dataSourceResults.push(dataSourceResult);
     const failedIndividualChecks = riskChecks.filter((check) => !check.passed);
     const individualPassed = failedIndividualChecks.length === 0;
 
@@ -484,6 +540,10 @@ export async function runBotScan(
       existingPositionValue: positionDecision.existingPositionValue,
       positionValueAfterTrade: positionDecision.positionValueAfterTrade,
       positionDecisionReason: positionDecision.reason,
+      // Every data touchpoint up to and including this winning candidate's own quote fetch — no
+      // further touchpoint is ever added after this (the loop breaks immediately below), so this
+      // is the scan's true final provenance, not a partial snapshot.
+      dataProvenance: combineDataSourceResults(dataSourceResults),
     });
     candidateEvaluations.push({
       rank,
@@ -516,6 +576,10 @@ export async function runBotScan(
   }
 
   const executionTimeMs = performance.now() - startedAt;
+  // Every data touchpoint this scan made — the historical fetch always, plus one entry per
+  // risk-evaluated candidate — reduced once here. Identical to whatever value buildBotTrade
+  // received above when a trade opened, since nothing pushes to dataSourceResults after the loop.
+  const dataProvenance = combineDataSourceResults(dataSourceResults);
 
   if (openedTrade && selected) {
     const rejectedCount = candidateEvaluations.length - 1;
@@ -544,6 +608,7 @@ export async function runBotScan(
         tradeCreated: true,
         createdTradeId: openedTrade.id,
         executionTimeMs,
+        dataProvenance,
       },
       trade: openedTrade,
     };
@@ -570,6 +635,7 @@ export async function runBotScan(
       trace,
       tradeCreated: false,
       executionTimeMs,
+      dataProvenance,
     },
     trade: null,
   };

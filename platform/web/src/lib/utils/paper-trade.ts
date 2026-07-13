@@ -106,6 +106,11 @@ export function buildPaperTradeFromSignal(signal: Signal, entryPriceInfo: EntryP
     entryPriceSource: entryPriceInfo.source,
     entryPriceProvider: entryPriceInfo.provider,
     entryPriceTimestamp: entryPriceInfo.timestamp,
+    // Sprint 290 — provenance must describe the data used to generate the originating
+    // recommendation, not just whether the entry quote happened to connect. Signal generation
+    // (src/lib/mock/signals.ts) carries no provenance concept to inherit today, so this is
+    // classified conservatively rather than inferred from entryPriceInfo.mode.
+    dataProvenance: "sample_data",
   };
 }
 
@@ -160,5 +165,9 @@ export function buildPaperTradeFromOpportunity(
     strategyAgreement: strategyScore?.agreement,
     overallConfidence: strategyScore?.overallConfidence,
     evidenceSummary: strategyScore?.agreementExplanation,
+    // Sprint 290 — same rationale as buildPaperTradeFromSignal: Market Intelligence opportunity
+    // generation carries no provenance concept to inherit today, so this is classified
+    // conservatively rather than inferred from entryPriceInfo.mode.
+    dataProvenance: "sample_data",
   };
 }

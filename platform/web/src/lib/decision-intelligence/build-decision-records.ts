@@ -53,6 +53,8 @@ export function buildDecisionRecords(decision: BotDecision): DecisionRecord[] {
       outcome: "Pending",
 
       createdTradeId: candidate.outcome === "Trade Opened" ? decision.createdTradeId : undefined,
+
+      dataProvenance: decision.dataProvenance,
     };
   });
 }
