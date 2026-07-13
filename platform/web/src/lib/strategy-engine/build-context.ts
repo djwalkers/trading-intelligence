@@ -122,8 +122,25 @@ export function buildStrategyContextFromHistory(
         ? "Bearish"
         : "Neutral";
 
+  // Acceptance Remediation (Finding 2) — movingAverageCrossoverStrategy compares instrument.price
+  // against shortMovingAverage/longMovingAverage, both computed from these same candles. The
+  // caller-supplied instrument's own .price is a separate snapshot (the worker's is a static mock
+  // value; see src/worker/process-schedule.ts) that can silently drift from the candle series a
+  // symbol's real indicators were just computed from — comparing the two was mixing two different
+  // sources for what should be one internally consistent read of "current price." The latest
+  // candle's close is the same series every other field on this context was derived from, so
+  // substituting it here (only .price; nothing else on Instrument feeds any strategy in this
+  // history path) makes that comparison internally consistent. This exactly reproduces
+  // instrument.price for MockHistoricalMarketDataProvider (its final candle is deliberately scaled
+  // to land on instrument.price — see its own comment), so browser behaviour is unchanged; it only
+  // changes the value where the worker's real Alpha Vantage candles and its static mock instrument
+  // price had been able to diverge.
+  const latestClose = closes[closes.length - 1];
+  const liveConsistentInstrument: Instrument =
+    latestClose === undefined ? instrument : { ...instrument, price: round2(latestClose) };
+
   return {
-    instrument,
+    instrument: liveConsistentInstrument,
     shortMovingAverage: round2(shortMovingAverage),
     longMovingAverage: round2(longMovingAverage),
     rsi: round2(clamp(rsi, 0, 100)),

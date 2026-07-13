@@ -20,7 +20,11 @@ interface PaperTradesContextValue {
   // consumer show a genuine loading state instead of misreading "not hydrated yet" as "zero
   // trades" — see PortfolioOverviewKpis for the one place this currently matters most.
   isHydrated: boolean;
-  addTrade: (trade: PaperTrade) => void;
+  // Build 1.13.0 (Acceptance Remediation) — returns a promise a caller can await, so
+  // executeBotScan()'s persistTrade step genuinely waits for this write to reach Supabase before
+  // moving on to persistDecision/persistDecisionRecords, closing the race a fire-and-forget write
+  // used to leave open. Existing callers that don't await it are unaffected.
+  addTrade: (trade: PaperTrade) => Promise<void>;
   closeTrade: (closedTrade: PaperTrade) => void;
   hasTradeForSignal: (signalId: string) => boolean;
   hasTradeForOpportunity: (opportunityId: string) => boolean;
@@ -118,7 +122,7 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
     };
   }, [authKey]);
 
-  function addTrade(trade: PaperTrade) {
+  async function addTrade(trade: PaperTrade): Promise<void> {
     setLoaded((previous) => ({ key: previous.key, trades: [trade, ...previous.trades] }));
     notify("success", `Trade opened: ${trade.side} ${trade.instrumentSymbol}.`);
     // AuthRequiredError (no session) already gets its own handling — AuthGate redirects to
@@ -126,21 +130,25 @@ export function PaperTradesProvider({ children }: { children: ReactNode }) {
     // is different: the persistence fallback banner covers ongoing degraded status, but a single
     // failed write specifically risks silently losing this one trade on reload, worth its own
     // one-time warning.
-    getPaperTradeStore()
-      .addTrade(trade)
-      .catch((error) => {
-        if (error instanceof AuthRequiredError) return;
-        logger.error("Failed to persist new trade", {
-          component: "paper-trades",
-          errorCode: "PERSISTENCE_ERROR",
-          reason: error instanceof Error ? error.message : "Unknown error",
-        });
-        pushToastOnce(
-          "warning",
-          "Your changes may not be saved right now. They're still visible in this session.",
-          writeFailureWarnedRef,
-        );
+    //
+    // Build 1.13.0 (Acceptance Remediation) — awaited (previously fire-and-forget) so a caller
+    // like executeBotScan()'s persistTrade step genuinely waits for this write to settle before
+    // moving on; still never throws past this function, matching the original behaviour.
+    try {
+      await getPaperTradeStore().addTrade(trade);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) return;
+      logger.error("Failed to persist new trade", {
+        component: "paper-trades",
+        errorCode: "PERSISTENCE_ERROR",
+        reason: error instanceof Error ? error.message : "Unknown error",
       });
+      pushToastOnce(
+        "warning",
+        "Your changes may not be saved right now. They're still visible in this session.",
+        writeFailureWarnedRef,
+      );
+    }
   }
 
   function closeTrade(closedTrade: PaperTrade) {

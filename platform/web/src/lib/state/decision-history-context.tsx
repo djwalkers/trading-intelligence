@@ -13,7 +13,11 @@ interface DecisionHistoryContextValue {
   // distinguish "still loading" from "genuinely no records yet" instead of showing the empty-state
   // prompt prematurely.
   isHydrated: boolean;
-  addRecords: (records: DecisionRecord[]) => void;
+  // Build 1.13.0 (Acceptance Remediation) — returns a promise a caller can await, so
+  // executeBotScan()'s persistDecisionRecords step genuinely waits for this write to reach
+  // Supabase before the scan is considered complete. Existing callers that don't await it are
+  // unaffected.
+  addRecords: (records: DecisionRecord[]) => Promise<void>;
 }
 
 const DecisionHistoryContext = createContext<DecisionHistoryContextValue | null>(null);
@@ -93,22 +97,26 @@ export function DecisionHistoryProvider({ children }: { children: ReactNode }) {
       });
   }, [trades, loaded.records, isHydrated]);
 
-  function addRecords(records: DecisionRecord[]) {
+  async function addRecords(records: DecisionRecord[]): Promise<void> {
     if (records.length === 0) return;
     setLoaded((previous) => ({ key: previous.key, records: [...records, ...previous.records] }));
     // AuthRequiredError or a genuine Supabase failure already gets surfaced via the resilient
     // store's status elsewhere — this just makes sure a failure (including the local-storage
     // fallback itself now failing, Build 1.13.0) is never silently swallowed without at least a
     // logged diagnostic event.
-    getDecisionHistoryStore()
-      .addRecords(records)
-      .catch((error) => {
-        logger.error("Failed to persist decision records", {
-          component: "decision-history",
-          errorCode: "PERSISTENCE_ERROR",
-          reason: error instanceof Error ? error.message : "Unknown error",
-        });
+    //
+    // Build 1.13.0 (Acceptance Remediation) — awaited (previously fire-and-forget) so a caller
+    // like executeBotScan()'s persistDecisionRecords step genuinely waits for this write to
+    // settle before the scan is considered complete; still never throws past this function.
+    try {
+      await getDecisionHistoryStore().addRecords(records);
+    } catch (error) {
+      logger.error("Failed to persist decision records", {
+        component: "decision-history",
+        errorCode: "PERSISTENCE_ERROR",
+        reason: error instanceof Error ? error.message : "Unknown error",
       });
+    }
   }
 
   return (

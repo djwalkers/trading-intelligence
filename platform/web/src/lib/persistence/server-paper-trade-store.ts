@@ -47,11 +47,14 @@ export async function loadTradesForUser(client: SupabaseClient, userId: string):
   );
 }
 
+// Returns the database-generated paper_trades.id (a uuid) — distinct from trade.id, the
+// client-generated string PaperTrade identifier — so callers that need to reference this row
+// elsewhere (e.g. bot_decisions.created_paper_trade_id, a uuid foreign key) have the right value.
 export async function addTradeForUser(
   client: SupabaseClient,
   userId: string,
   trade: PaperTrade,
-): Promise<void> {
+): Promise<string> {
   const { data: inserted, error } = await client
     .from("paper_trades")
     .insert({ ...toDbTrade(trade), user_id: userId })
@@ -92,4 +95,6 @@ export async function addTradeForUser(
 
   const { error: eventsError } = await client.from("trade_events").insert(events);
   if (eventsError) throw new Error(eventsError.message);
+
+  return paperTradeId;
 }

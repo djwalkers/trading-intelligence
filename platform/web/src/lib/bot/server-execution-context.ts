@@ -27,8 +27,10 @@ export function createServerExecutionContext(
   return {
     loadTrades: () => loadTradesForUser(client, userId),
     async persistTrade(trade: PaperTrade) {
-      await addTradeForUser(client, userId, trade);
-      createdTradeId = trade.id;
+      // bot_decisions.created_paper_trade_id is a uuid foreign key to paper_trades.id — the
+      // database-generated id addTradeForUser returns, not trade.id (the client-generated string
+      // PaperTrade identifier, e.g. "trade-bot-NVDA-...", which fails a uuid column outright).
+      createdTradeId = await addTradeForUser(client, userId, trade);
     },
     persistDecision: (decision: BotDecision) =>
       persistServerDecision(client, userId, decision, createdTradeId),
