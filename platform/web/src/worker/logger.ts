@@ -20,6 +20,8 @@ export type WorkerLogEvent =
   | "outcomes_reconciled"
   | "reconcile_failed"
   | "historical_data_status"
+  | "market_universe_summary"
+  | "market_universe_summary_failed"
   | "worker_finished";
 
 export function log(event: WorkerLogEvent, details?: Record<string, unknown>): void {

@@ -4,6 +4,8 @@ import { instruments } from "@/lib/mock";
 import { executeBotScan } from "@/lib/bot";
 import { createServerExecutionContext } from "@/lib/bot/server-execution-context";
 import { getServerHistoricalMarketDataProvider } from "@/lib/market-data/get-server-historical-market-data-provider";
+import { getServerConfig } from "@/lib/config/server-config";
+import { getMarketUniverseSummary } from "@/lib/market-universe/get-market-universe-summary";
 import {
   claimScheduleLock,
   releaseScheduleLock,
@@ -41,6 +43,26 @@ export async function processSchedule(
     const context = createServerExecutionContext(client, schedule.user_id);
     const scanId = reserveWorkerScanId();
     const historicalMarketDataProvider = getServerHistoricalMarketDataProvider();
+
+    // Phase 2A — Market Universe. The worker's actual traded instrument list stays the accepted
+    // static 5-symbol list, unconditionally — the existing Strategy Engine/historical-data pipeline
+    // was never built to safely evaluate thousands of instruments per scan, and Phase 2A is scoped
+    // to building and verifying the universe only, not consuming it. MARKET_UNIVERSE_WORKER_ENABLED
+    // (default off) only controls an optional, best-effort observability log below; it can never
+    // change `instruments`. See docs/product/PHASE-2A-MARKET-UNIVERSE.md.
+    if (getServerConfig().isMarketUniverseWorkerObservabilityEnabled) {
+      try {
+        const summary = await getMarketUniverseSummary(client);
+        log("market_universe_summary", {
+          eligibleCount: summary.eligibleCount,
+          eligibleWithCompleteMarketDataCount: summary.eligibleWithCompleteMarketDataCount,
+        });
+      } catch (summaryError) {
+        log("market_universe_summary_failed", {
+          error: summaryError instanceof Error ? summaryError.message : "Unknown error",
+        });
+      }
+    }
 
     const result = await executeBotScan({
       instruments,

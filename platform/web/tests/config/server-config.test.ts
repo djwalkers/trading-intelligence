@@ -7,6 +7,9 @@ const EMPTY = {
   SUPABASE_SERVICE_ROLE_KEY: undefined,
   NEXT_PUBLIC_SUPABASE_URL: undefined,
   WORKER_POLL_INTERVAL_MS: undefined,
+  NEXT_PUBLIC_MARKET_DATA_PROVIDER: undefined,
+  NEXT_PUBLIC_MARKET_DATA_API_KEY: undefined,
+  MARKET_UNIVERSE_WORKER_ENABLED: undefined,
 };
 
 describe("buildServerConfig", () => {
@@ -14,7 +17,32 @@ describe("buildServerConfig", () => {
     const config = buildServerConfig(EMPTY);
     expect(config.isAlphaVantageConfigured).toBe(false);
     expect(config.isServiceRoleConfigured).toBe(false);
+    expect(config.isFinnhubConfigured).toBe(false);
     expect(config.workerPollIntervalMs).toBe(30_000);
+    expect(config.isMarketUniverseWorkerObservabilityEnabled).toBe(false);
+  });
+
+  it("enables Market Universe worker observability only when explicitly set", () => {
+    expect(
+      buildServerConfig({ ...EMPTY, MARKET_UNIVERSE_WORKER_ENABLED: "true" })
+        .isMarketUniverseWorkerObservabilityEnabled,
+    ).toBe(true);
+    expect(buildServerConfig(EMPTY).isMarketUniverseWorkerObservabilityEnabled).toBe(false);
+  });
+
+  it("is valid when the Finnhub provider name is paired with an API key", () => {
+    const config = buildServerConfig({
+      ...EMPTY,
+      NEXT_PUBLIC_MARKET_DATA_PROVIDER: "finnhub",
+      NEXT_PUBLIC_MARKET_DATA_API_KEY: "test-finnhub-key",
+    });
+    expect(config.isFinnhubConfigured).toBe(true);
+  });
+
+  it("throws when the Finnhub provider name is set without an API key", () => {
+    expect(() =>
+      buildServerConfig({ ...EMPTY, NEXT_PUBLIC_MARKET_DATA_PROVIDER: "finnhub" }),
+    ).toThrow(ConfigError);
   });
 
   it("is valid when the service role key is paired with a Supabase URL", () => {
