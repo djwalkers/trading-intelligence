@@ -1,11 +1,12 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { instruments } from "@/lib/mock";
 import { executeBotScan } from "@/lib/bot";
 import { createServerExecutionContext } from "@/lib/bot/server-execution-context";
 import { getServerHistoricalMarketDataProvider } from "@/lib/market-data/get-server-historical-market-data-provider";
 import { getServerConfig } from "@/lib/config/server-config";
 import { getMarketUniverseSummary } from "@/lib/market-universe/get-market-universe-summary";
+import { resolveMarketScreeningShortlist } from "@/lib/market-screening/resolve-market-screening-shortlist";
+import { log as logMarketScreening } from "@/lib/market-screening/logger";
 import {
   claimScheduleLock,
   releaseScheduleLock,
@@ -64,8 +65,28 @@ export async function processSchedule(
       }
     }
 
+    // Sprint 295 — market-screening integration seam (Sprint 294 §1). With
+    // marketScreeningRolloutStage fixed to "off" (the default; no liquidity provider is approved
+    // yet — Sprint 293), this always resolves to the exact same static instrument list
+    // `instruments` used to be, via the same default resolve-market-screening-shortlist.ts itself
+    // falls back to — the worker's traded instrument list is unconditionally unchanged by this
+    // sprint, exactly as Phase 2A's Market Universe integration was before it.
+    const marketScreeningRolloutStage = getServerConfig().marketScreeningRolloutStage;
+    const shortlistResult = await resolveMarketScreeningShortlist(marketScreeningRolloutStage);
+    if (shortlistResult.source === "fallback-static-list") {
+      logMarketScreening(
+        marketScreeningRolloutStage === "off"
+          ? "market_screening_disabled"
+          : "market_screening_provider_unavailable",
+        {
+          reason: shortlistResult.reason,
+          instrumentCount: shortlistResult.instruments.length,
+        },
+      );
+    }
+
     const result = await executeBotScan({
-      instruments,
+      instruments: shortlistResult.instruments,
       scanId,
       triggerType: "Scheduled",
       context,

@@ -10,6 +10,8 @@ const EMPTY = {
   NEXT_PUBLIC_MARKET_DATA_PROVIDER: undefined,
   NEXT_PUBLIC_MARKET_DATA_API_KEY: undefined,
   MARKET_UNIVERSE_WORKER_ENABLED: undefined,
+  MARKET_SCREENING_ROLLOUT_STAGE: undefined,
+  RESEARCH_RUNS_DIRECTORY: undefined,
 };
 
 describe("buildServerConfig", () => {
@@ -20,6 +22,7 @@ describe("buildServerConfig", () => {
     expect(config.isFinnhubConfigured).toBe(false);
     expect(config.workerPollIntervalMs).toBe(30_000);
     expect(config.isMarketUniverseWorkerObservabilityEnabled).toBe(false);
+    expect(config.marketScreeningRolloutStage).toBe("off");
   });
 
   it("enables Market Universe worker observability only when explicitly set", () => {
@@ -67,6 +70,22 @@ describe("buildServerConfig", () => {
 
   it("throws for a malformed poll interval instead of silently producing NaN", () => {
     expect(() => buildServerConfig({ ...EMPTY, WORKER_POLL_INTERVAL_MS: "not-a-number" })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("defaults the market screening rollout stage to off when unset", () => {
+    expect(buildServerConfig(EMPTY).marketScreeningRolloutStage).toBe("off");
+  });
+
+  it("accepts every documented market screening rollout stage", () => {
+    for (const stage of ["off", "shadow", "staged", "full"]) {
+      expect(buildServerConfig({ ...EMPTY, MARKET_SCREENING_ROLLOUT_STAGE: stage }).marketScreeningRolloutStage).toBe(stage);
+    }
+  });
+
+  it("throws for an unrecognised market screening rollout stage instead of silently defaulting", () => {
+    expect(() => buildServerConfig({ ...EMPTY, MARKET_SCREENING_ROLLOUT_STAGE: "full-throttle" })).toThrow(
       ConfigError,
     );
   });

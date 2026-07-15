@@ -1,5 +1,7 @@
 import "server-only";
-import { parseBoolean, parseInteger, requirePairing, ConfigError } from "./env";
+import * as path from "node:path";
+import { parseBoolean, parseEnum, parseInteger, requirePairing, ConfigError } from "./env";
+import { MARKET_SCREENING_ROLLOUT_STAGES, type MarketScreeningRolloutStage } from "@/lib/market-screening/types";
 
 export interface ServerConfig {
   alphaVantageApiKey: string | undefined;
@@ -20,6 +22,17 @@ export interface ServerConfig {
   // true, the worker additionally logs a Market Universe observability summary once per scan
   // cycle; it never changes what gets traded. See docs/product/PHASE-2A-MARKET-UNIVERSE.md.
   isMarketUniverseWorkerObservabilityEnabled: boolean;
+  // Sprint 295 — default "off". No liquidity provider is approved yet (Sprint 293), and no stage
+  // other than "off" has any implemented behaviour (Sprint 294's Shadow/Staged/Full are designed,
+  // not built) — see src/lib/market-screening/resolve-market-screening-shortlist.ts, which always
+  // falls back to the static instrument list regardless of this value until those stages exist.
+  marketScreeningRolloutStage: MarketScreeningRolloutStage;
+  // Phase 2 — Research Import. Where the standalone `npm run import-research-run` CLI looks for
+  // `<researchRunsDirectory>/<run-id>/`. Optional — defaults to a `research-runs` folder at the
+  // repo root, mirroring AlphaVantageHistoricalMarketDataProvider's `path.join(process.cwd(), ...)`
+  // convention for a filesystem path this app owns but doesn't require. Only read by the importer
+  // CLI, never by the Next.js app itself.
+  researchRunsDirectory: string;
 }
 
 interface RawServerEnv {
@@ -30,6 +43,8 @@ interface RawServerEnv {
   NEXT_PUBLIC_MARKET_DATA_PROVIDER: string | undefined;
   NEXT_PUBLIC_MARKET_DATA_API_KEY: string | undefined;
   MARKET_UNIVERSE_WORKER_ENABLED: string | undefined;
+  MARKET_SCREENING_ROLLOUT_STAGE: string | undefined;
+  RESEARCH_RUNS_DIRECTORY: string | undefined;
 }
 
 const DEFAULT_WORKER_POLL_INTERVAL_MS = 30_000;
@@ -46,6 +61,8 @@ export function buildServerConfig(
     NEXT_PUBLIC_MARKET_DATA_PROVIDER: process.env.NEXT_PUBLIC_MARKET_DATA_PROVIDER,
     NEXT_PUBLIC_MARKET_DATA_API_KEY: process.env.NEXT_PUBLIC_MARKET_DATA_API_KEY,
     MARKET_UNIVERSE_WORKER_ENABLED: process.env.MARKET_UNIVERSE_WORKER_ENABLED,
+    MARKET_SCREENING_ROLLOUT_STAGE: process.env.MARKET_SCREENING_ROLLOUT_STAGE,
+    RESEARCH_RUNS_DIRECTORY: process.env.RESEARCH_RUNS_DIRECTORY,
   },
 ): ServerConfig {
   const alphaVantageApiKey = env.ALPHA_VANTAGE_API_KEY || undefined;
@@ -57,6 +74,13 @@ export function buildServerConfig(
     env.MARKET_UNIVERSE_WORKER_ENABLED,
     false,
   );
+  const marketScreeningRolloutStage = parseEnum(
+    env.MARKET_SCREENING_ROLLOUT_STAGE,
+    MARKET_SCREENING_ROLLOUT_STAGES,
+    "off",
+  );
+  const researchRunsDirectory =
+    env.RESEARCH_RUNS_DIRECTORY || path.join(process.cwd(), "research-runs");
 
   // A service-role key with no Supabase URL configured can never connect to anything — always a
   // mistake, not a valid partial state (mirrors client-config.ts's Supabase URL/anon-key pairing).
@@ -84,6 +108,8 @@ export function buildServerConfig(
     finnhubApiKey,
     isFinnhubConfigured: Boolean(finnhubProviderName && finnhubApiKey),
     isMarketUniverseWorkerObservabilityEnabled,
+    marketScreeningRolloutStage,
+    researchRunsDirectory,
   };
 }
 

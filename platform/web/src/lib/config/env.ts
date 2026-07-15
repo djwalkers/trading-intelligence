@@ -36,6 +36,18 @@ export function parseInteger(
   return parsed;
 }
 
+// Same fail-loudly convention as parseBoolean/parseInteger — an unrecognised value is always a
+// misconfiguration worth stopping on, never something to silently coerce to the fallback.
+export function parseEnum<T extends string>(
+  raw: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  if (raw === undefined || raw === "") return fallback;
+  if ((allowed as readonly string[]).includes(raw)) return raw as T;
+  throw new ConfigError(`Expected one of ${allowed.join(", ")}, received "${raw}".`);
+}
+
 export function parseUrl(raw: string | undefined): string | undefined {
   if (raw === undefined || raw === "") return undefined;
   try {

@@ -30,7 +30,12 @@ export function Sidebar() {
 
       <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 px-3">
         {navItems.map((item) => {
-          const isActive = pathname === item.href;
+          // Phase 2 — Research is the first section with sub-pages (/research/[runId],
+          // /research/strategies); an exact match alone would leave the sidebar item unhighlighted
+          // on those pages. startsWith(item.href + "/") generalises correctly for any future
+          // nested section too, and changes nothing for every existing flat route, none of which
+          // have children to match against.
+          const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
 
           return (

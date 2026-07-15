@@ -26,6 +26,9 @@ yarn-error.log*
 # Build 1.13.0 — PM2 log output (see ecosystem.config.js)
 /.pm2-logs/
 
+# Phase 2 — default RESEARCH_RUNS_DIRECTORY; Hermes Lab's output, not Trading Intelligence source
+/research-runs/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -110,6 +110,19 @@ export function DecisionIntelligenceIcon(props: IconProps) {
   );
 }
 
+// Flask/beaker shape — imported Hermes Lab research output (hypotheses, results, evidence),
+// deliberately distinct from every other icon here since nothing else in this app represents
+// external research specifically.
+export function ResearchIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M9.5 3.5h5" />
+      <path d="M10.3 3.5v5.3l-4.4 7.4a2 2 0 0 0 1.7 3h8.8a2 2 0 0 0 1.7-3l-4.4-7.4V3.5" />
+      <path d="M7.7 14.2h8.6" />
+    </svg>
+  );
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
