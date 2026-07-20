@@ -10,15 +10,21 @@
     "test": "vitest run",
     "worker": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/worker/run-worker.ts",
     "refresh-universe": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/market-universe/refresh-universe.ts",
-    "import-research-run": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/research-import/import-research-run.ts"
+    "import-research-run": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/research-import/import-research-run.ts",
+    "execution:demo": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/execution-demo.ts",
+    "broker:testnet-smoke": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/broker-testnet-smoke.ts",
+    "broker:trading212-smoke": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/broker-trading212-smoke.ts",
+    "broker:etoro-smoke": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/broker-etoro-smoke.ts"
   },
   "dependencies": {
+    "@nktkas/hyperliquid": "^0.33.2",
     "@supabase/supabase-js": "^2.110.1",
     "next": "16.2.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "viem": "^2.55.2"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

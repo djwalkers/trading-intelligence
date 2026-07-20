@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "99.0.0",
+  "strategyId": "STRAT-0006",
+  "version": 1,
+  "status": "active",
+  "sourceHypothesisId": "h99",
+  "supportingResearchRuns": ["20260101_000000_test"],
+  "promotionStatus": {
+    "decision": "ELIGIBLE",
+    "evaluatedAt": "2026-01-01T00:00:00.000Z",
+    "reasoning": "Test fixture.",
+    "evaluatedAgainstGovernanceVersion": "1.0"
+  },
+  "supportedMarkets": ["TEST-USD"],
+  "timeframe": "1m",
+  "entryDefinition": { "rule": "Test.", "parameters": { "ruleType": "CROSSES_ABOVE_MA", "period": 5 } },
+  "exitDefinition": {
+    "rule": "Test.",
+    "parameters": { "rules": [{ "ruleType": "TAKE_PROFIT", "percent": 2 }] }
+  },
+  "riskDefinition": { "maxPositionSize": 500, "maxDrawdownHalt": null },
+  "confidence": { "level": "moderate", "reasoning": "Test fixture." },
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "lastReviewedAt": "2026-01-01T00:00:00.000Z"
+}

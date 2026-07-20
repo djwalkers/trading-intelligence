@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1.0.0",
+  "strategyId": "STRAT-0001",
+  "version": 1,
+  "status": "active",
+  "sourceHypothesisId": "h99",
+  "supportingResearchRuns": ["20260101_000000_test"],
+  "promotionStatus": {
+    "decision": "ELIGIBLE",
+    "evaluatedAt": "2026-01-01T00:00:00.000Z",
+    "reasoning": "Test fixture — not a real Hermes Lab decision.",
+    "evaluatedAgainstGovernanceVersion": "1.0"
+  },
+  "supportedMarkets": ["TEST-USD"],
+  "timeframe": "1m",
+  "entryDefinition": {
+    "rule": "Enter long when close crosses above the 5-period moving average.",
+    "parameters": { "ruleType": "CROSSES_ABOVE_MA", "period": 5 }
+  },
+  "exitDefinition": {
+    "rule": "Exit on take-profit, stop-loss, or a cross back below the moving average.",
+    "parameters": {
+      "rules": [
+        { "ruleType": "TAKE_PROFIT", "percent": 2 },
+        { "ruleType": "STOP_LOSS", "percent": 1 },
+        { "ruleType": "CROSSES_BELOW_MA", "period": 5 }
+      ]
+    }
+  },
+  "riskDefinition": { "maxPositionSize": 500, "maxDrawdownHalt": null },
+  "confidence": { "level": "moderate", "reasoning": "Test fixture." },
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "lastReviewedAt": "2026-01-01T00:00:00.000Z"
+}

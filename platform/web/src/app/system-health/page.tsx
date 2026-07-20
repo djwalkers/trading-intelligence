@@ -10,6 +10,7 @@ import { StrategyEngineStatusPanel } from "@/components/system-health/StrategyEn
 import { AIEngineActivityPanel } from "@/components/system-health/AIEngineActivityPanel";
 import { VPSWorkerStatusPanel } from "@/components/system-health/VPSWorkerStatusPanel";
 import { TradingModeStatusPanel } from "@/components/system-health/TradingModeStatusPanel";
+import { HermesRegistryStatusPanel } from "@/components/system-health/HermesRegistryStatusPanel";
 import { AIDecisionHistoryStatusPanel } from "@/components/system-health/AIDecisionHistoryStatusPanel";
 import { instruments } from "@/lib/mock";
 import { getStrategyEngine } from "@/lib/strategy-engine";
@@ -78,6 +79,13 @@ export default function SystemHealthPage() {
 
       <SectionPanel title="Trading Mode" description="What kind of orders this platform can place today">
         <TradingModeStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Hermes Strategy Registry"
+        description="The isolated execution pipeline that will trade whatever Hermes Lab's research programme certifies as eligible — see docs/execution-mvp-phase-1.md"
+      >
+        <HermesRegistryStatusPanel />
       </SectionPanel>
 
       <SectionPanel

@@ -1,0 +1,13 @@
+[
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:00:00.000Z", "open": 100.00, "high": 100.05, "low": 99.95, "close": 100.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:01:00.000Z", "open": 100.00, "high": 100.05, "low": 99.95, "close": 100.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:02:00.000Z", "open": 100.00, "high": 100.05, "low": 99.95, "close": 100.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:03:00.000Z", "open": 100.00, "high": 100.05, "low": 99.95, "close": 100.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:04:00.000Z", "open": 100.00, "high": 100.05, "low": 99.95, "close": 100.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:05:00.000Z", "open": 100.00, "high": 103.05, "low": 99.95, "close": 103.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:06:00.000Z", "open": 103.00, "high": 103.55, "low": 102.95, "close": 103.50, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:07:00.000Z", "open": 103.50, "high": 104.05, "low": 103.45, "close": 104.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:08:00.000Z", "open": 104.00, "high": 105.55, "low": 103.95, "close": 105.50, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:09:00.000Z", "open": 105.50, "high": 105.55, "low": 104.95, "close": 105.00, "volume": 1000 },
+  { "symbol": "DEMO-USD", "timestamp": "2026-01-01T00:10:00.000Z", "open": 105.00, "high": 105.05, "low": 103.95, "close": 104.00, "volume": 1000 }
+]
