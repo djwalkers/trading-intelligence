@@ -7,8 +7,10 @@ import { EtoroDemoBroker } from "@/lib/hermes-execution/etoro/etoro-demo-broker"
 import { MarketIntelligenceBuilder } from "@/lib/hermes-execution/market-intelligence-builder";
 import type { CandleBias } from "@/lib/hermes-execution/mock-candle-generator";
 import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
-import type { MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
-import { runMarketDecisionCycle } from "@/lib/hermes-execution/market-decision-runner";
+import type { MarketDataProvider, MarketDataSnapshot } from "@/lib/hermes-execution/market-data/market-data-provider";
+import { runMarketDecisionCycleWithLifecycle } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-runner";
+import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
+import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import type { InternalStrategy } from "@/lib/hermes-execution/types";
@@ -62,7 +64,7 @@ function printMarketContext(
   console.log(`  Position open: ${context.positionOpen}`);
 }
 
-function printDecision(result: Awaited<ReturnType<typeof runMarketDecisionCycle>>): void {
+function printDecision(result: Awaited<ReturnType<typeof runMarketDecisionCycleWithLifecycle>>): void {
   console.log("");
   console.log(`Decision: ${result.decision.action}`);
   console.log(`Confidence: ${result.decision.confidence.toFixed(2)}`);
@@ -80,6 +82,18 @@ function printDecision(result: Awaited<ReturnType<typeof runMarketDecisionCycle>
   if (result.blockedReasons) {
     console.log("Blocked by PortfolioRiskEngine:");
     for (const reason of result.blockedReasons) console.log(`  - ${reason}`);
+  }
+  // Milestone 6 — Trade Lifecycle & Performance Tracking.
+  if (result.lifecycleRecord) {
+    const record = result.lifecycleRecord;
+    console.log(`Lifecycle record: ${record.id} -> ${record.status}`);
+    if (record.status === "CLOSED") {
+      console.log(
+        `  realisedPnl=${record.realisedPnl?.toFixed(4)} (${record.realisedPnlPercent?.toFixed(2)}%), ` +
+          `holdingDurationMs=${record.holdingDurationMs}, MFE=${record.maximumFavourableExcursion?.toFixed(4)}, ` +
+          `MAE=${record.maximumAdverseExcursion?.toFixed(4)}`,
+      );
+    }
   }
 }
 
@@ -104,17 +118,22 @@ function resolveMarketDataProvider(
 /** Builds a full MarketDecisionContext for one evaluation: pulls one self-consistent
  * MarketDataSnapshot from `marketDataProvider` (mock or live, per configuration — this function has
  * no idea which) and hands it to MarketIntelligenceBuilder. MarketDecisionEngine never does any of
- * this itself. */
+ * this itself. Returns the raw snapshot alongside the built context — Milestone 6's lifecycle
+ * tracking needs the original snapshot verbatim (TradeLifecycleRecord.marketDataSnapshot), which
+ * isn't recoverable from the built MarketDecisionContext alone. */
 async function buildContext(
   marketDataProvider: MarketDataProvider,
   broker: EtoroDemoBroker,
   instrument: string,
   strategy: InternalStrategy,
-): Promise<Awaited<ReturnType<(typeof MarketIntelligenceBuilder)["build"]>>> {
+): Promise<{
+  snapshot: MarketDataSnapshot;
+  context: Awaited<ReturnType<(typeof MarketIntelligenceBuilder)["build"]>>;
+}> {
   const snapshot = await marketDataProvider.getMarketData(instrument);
   const positionOpen = broker.getOpenPositions().some((p) => p.instrument === instrument);
 
-  return MarketIntelligenceBuilder.build({
+  const context = MarketIntelligenceBuilder.build({
     instrument,
     bid: snapshot.bid,
     ask: snapshot.ask,
@@ -124,6 +143,7 @@ async function buildContext(
     strategySourceType: strategy.sourceType,
     candles: snapshot.candles,
   });
+  return { snapshot, context };
 }
 
 export async function main(): Promise<void> {
@@ -209,14 +229,19 @@ export async function main(): Promise<void> {
   console.log(`Resolved instrument: ${resolved.displayName} (${resolved.symbol}), instrumentId=${resolved.instrumentId}`);
   console.log(`Market data provider: ${config.marketDataProvider}`);
 
+  // Milestone 6 — Trade Lifecycle & Performance Tracking. In-memory only for this CLI demo, per
+  // this milestone's own "no filesystem/database persistence yet" constraint — a real deployment
+  // would inject a persistent TradeLifecycleStore here without changing anything else.
+  const lifecycleService = new TradeLifecycleService({ store: new InMemoryTradeLifecycleStore(), auditTrail, executionRunId });
+
   // Cycle 1: under "mock", a bullish market context — the scenario this milestone's example
   // ruleset (EMA20>EMA50, healthy RSI, Bullish trend, no position) is designed to satisfy. Under
   // "live", `bias` is passed but ignored (LiveMarketDataProvider only ever reports real bid/ask) —
   // whether this cycle produces a BUY depends on the real market at the moment this runs.
   const firstProvider = resolveMarketDataProvider(config, broker, "bullish");
-  const firstContext = await buildContext(firstProvider, broker, instrument, strategy);
+  const { snapshot: firstSnapshot, context: firstContext } = await buildContext(firstProvider, broker, instrument, strategy);
   printMarketContext(resolved, firstContext);
-  const firstResult = await runMarketDecisionCycle({
+  const firstResult = await runMarketDecisionCycleWithLifecycle({
     broker,
     auditTrail,
     executionRunId,
@@ -230,6 +255,8 @@ export async function main(): Promise<void> {
       dailyTradeCount: broker.getCompletedTrades().length,
       brokerAvailable: true,
     },
+    lifecycleService,
+    marketDataSnapshot: firstSnapshot,
   });
   printDecision(firstResult);
 
@@ -247,9 +274,9 @@ export async function main(): Promise<void> {
         : "--- Re-checking the live market for a second decision cycle (bias not controllable under live data) ---",
     );
     const secondProvider = resolveMarketDataProvider(config, broker, "bearish");
-    const secondContext = await buildContext(secondProvider, broker, instrument, strategy);
+    const { snapshot: secondSnapshot, context: secondContext } = await buildContext(secondProvider, broker, instrument, strategy);
     printMarketContext(resolved, secondContext);
-    const secondResult = await runMarketDecisionCycle({
+    const secondResult = await runMarketDecisionCycleWithLifecycle({
       broker,
       auditTrail,
       executionRunId,
@@ -260,6 +287,8 @@ export async function main(): Promise<void> {
         dailyTradeCount: broker.getCompletedTrades().length,
         brokerAvailable: true,
       },
+      lifecycleService,
+      marketDataSnapshot: secondSnapshot,
     });
     printDecision(secondResult);
   }

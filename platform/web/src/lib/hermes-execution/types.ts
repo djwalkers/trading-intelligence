@@ -207,7 +207,23 @@ export type AuditEventType =
   // for SELL/HOLD — SELL is always permitted, HOLD never reaches the risk engine.
   | "RISK_CHECK_STARTED"
   | "RISK_CHECK_PASSED"
-  | "RISK_CHECK_FAILED";
+  | "RISK_CHECK_FAILED"
+  // Milestone 6 — Trade Lifecycle & Performance Tracking. One event per TradeLifecycleService
+  // transition/mutation (trade-lifecycle/trade-lifecycle-service.ts) — a parallel, complementary
+  // record to MARKET_DECISION_RECEIVED/RISK_CHECK_*/EXECUTION_*/POSITION_* above, never a
+  // replacement for them; this pipeline's own audit events still fire exactly as before.
+  // TRADE_EXCURSION_UPDATED is the one event here that isn't a status transition — it's emitted
+  // only when a live trade's MFE/MAE actually changes, not on every price observation.
+  | "TRADE_LIFECYCLE_CREATED"
+  | "TRADE_RISK_REJECTED"
+  | "TRADE_APPROVED"
+  | "TRADE_EXECUTION_SUBMITTED"
+  | "TRADE_OPENED"
+  | "TRADE_CLOSE_REQUESTED"
+  | "TRADE_CLOSED"
+  | "TRADE_EXECUTION_FAILED"
+  | "TRADE_CLOSE_FAILED"
+  | "TRADE_EXCURSION_UPDATED";
 
 export interface AuditEvent {
   timestamp: string;
