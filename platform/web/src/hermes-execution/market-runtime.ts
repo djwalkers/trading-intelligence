@@ -1,53 +1,27 @@
 import * as path from "node:path";
 import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
-import { FileSystemRegistryClient } from "@/lib/hermes-execution/registry-client";
-import { loadEnabledStrategies } from "@/lib/hermes-execution/strategy-loader";
-import { BrokerFactory } from "@/lib/hermes-execution/broker-factory";
-import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
-import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
-import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-clock";
-import { MarketHoursPolicyFactory } from "@/lib/hermes-execution/runtime/market-hours-policy-factory";
 import { TradingRuntime } from "@/lib/hermes-execution/runtime/trading-runtime";
+import { buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
+import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 
-// Milestone 7 — 24/7 Scheduler & Runtime Control. The continuous counterpart to market-decide.ts's
-// one-shot cycle (untouched by this milestone — both remain independently runnable): loads the same
-// kind of dependencies, then hands them to TradingRuntime instead of calling
-// runMarketDecisionCycleWithLifecycle directly. Nothing about decision/risk/execution/lifecycle
-// logic is reimplemented here — this file only ever assembles dependencies and calls existing,
-// unmodified constructors/factories.
-//
-// Deliberately scoped to BROKER_PROVIDER=local for this milestone (a fixed, explicit override
-// below, not read from config.brokerProvider) — every other broker (Hyperliquid/Trading212/eToro)
-// needs its own extra setup dance before it's usable (at minimum eToro's resolveInstrument() call),
-// which this prototype's continuous runtime doesn't orchestrate yet. LocalPaperBroker needs no such
-// step, so it's the only broker this command can run against today. Extending this to the other
-// brokers is a natural, separate follow-up — not this milestone's concern (see the mission report's
-// Limitations section).
+// Milestone 8 — Deployment-Ready Runtime Configuration. Replaces Mission 7's hard-coded
+// `const INSTRUMENT = "BTC"` / `const AMOUNT = 10` and inline dependency assembly with the shared
+// runtime-config/ layer: validated configuration -> buildRuntimeDependencies() -> TradingRuntime.
+// Nothing about decision/risk/execution/lifecycle/broker/market-data logic is reimplemented here —
+// this file only ever loads config, calls the factory, and wires the result into TradingRuntime.
 const AUDIT_LOG_PATH = path.join(process.cwd(), ".data", "hermes-execution", "market-runtime-audit-log.json");
 
-// Kept local rather than env-configurable, same reasoning as market-decide.ts's own
-// PORTFOLIO_RISK_CONFIG: this milestone doesn't call for env-configurable instrument/position-
-// sizing/portfolio-risk values, only for the scheduler/runtime machinery around them to exist and
-// be exercised end to end.
-const INSTRUMENT = "BTC";
-const AMOUNT = 10;
+// Portfolio-risk thresholds remain CLI-local, unchanged since Milestone 4 — this milestone does not
+// call for env-configurable portfolio risk limits, only for the previously hard-coded trading
+// inputs (symbol/quantity/strategy/broker/mode) to become configuration, which they now are.
 const PORTFOLIO_RISK_CONFIG: PortfolioRiskConfig = {
   portfolioMaxOpenPositions: 5,
   maxDailyTrades: 10,
   maxPortfolioExposure: 10_000,
 };
-
-function printStartupSummary(intervalMs: number, immediateFirstRun: boolean, marketHoursPolicy: string): void {
-  console.log("");
-  console.log(`Instrument: ${INSTRUMENT}  Amount: ${AMOUNT}`);
-  console.log(`Interval: ${intervalMs}ms  Immediate first run: ${immediateFirstRun}`);
-  console.log(`Market hours policy: ${marketHoursPolicy}`);
-  console.log("");
-  console.log("Runtime started. Press Ctrl+C (SIGINT) to stop gracefully.");
-}
 
 function printFinalStatus(runtime: TradingRuntime): void {
   const status = runtime.getStatus();
@@ -71,79 +45,56 @@ export async function main(): Promise<void> {
     return;
   }
 
-  if (!config.registryPath) {
-    console.error(
-      "HERMES_STRATEGY_REGISTRY_PATH is not set — cannot load an approved strategy. Set it to an " +
-        "absolute path, e.g. HERMES_STRATEGY_REGISTRY_PATH=/path/to/hermes-lab/strategy-registry",
-    );
-    process.exitCode = 1;
-    return;
-  }
-
   const executionRunId = `market-runtime-${Date.now()}`;
   console.log(`Execution run id: ${executionRunId}`);
 
   const auditTrail = await JsonFileAuditTrail.createFresh(AUDIT_LOG_PATH);
 
-  const registryClient = new FileSystemRegistryClient(config.registryPath);
-  const loadResult = await loadEnabledStrategies({
-    registryClient,
-    demoExecutionModeEnabled: config.demoExecutionModeEnabled,
+  // Startup validation happens entirely inside this call, before anything scheduler-related is
+  // ever touched: strategy loading, mode/broker/market-data compatibility, broker construction,
+  // and (for eToro) symbol resolution. Every problem found is collected and reported together,
+  // rather than crashing on the first one.
+  const built = await buildRuntimeDependencies({
+    config,
+    auditTrail,
     executionRunId,
+    resetBrokerState: false, // a continuous runtime persists its paper account/positions across restarts
+    portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
   });
-  for (const event of loadResult.events) await auditTrail.record(event);
 
-  console.log(`${loadResult.hermesApprovedCount} Hermes-approved strategies loaded`);
-  console.log(`Demo strategy loaded: ${loadResult.demoModeActive}`);
-
-  const strategy =
-    loadResult.strategies.find((s) => s.sourceType === "HERMES_APPROVED") ??
-    loadResult.strategies.find((s) => s.sourceType === "DEMO_ONLY");
-
-  if (!strategy) {
-    console.error(
-      "No approved strategy available to evaluate. Set DEMO_EXECUTION_MODE=true to use the DEMO_ONLY " +
-        "strategy, or add a real strategy to the Hermes Strategy Registry.",
-    );
+  if (!built.ok) {
+    console.error("Startup validation failed — the runtime was not started:");
+    for (const problem of built.problems) console.error(`  - [${problem.field}] ${problem.message}`);
     process.exitCode = 1;
     return;
   }
-  console.log(`Using strategy: ${strategy.strategyId} v${strategy.version} (${strategy.sourceType})`);
+  const deps = built.dependencies;
+  console.log(`Using strategy: ${deps.strategy.strategyId} v${deps.strategy.version} (${deps.strategy.sourceType})`);
 
-  // resetState: false — unlike market-decide.ts's byte-for-byte-reproducible demo replay, a
-  // continuous runtime is meant to persist its paper account/positions across restarts.
-  const broker = await BrokerFactory.create(config, auditTrail, executionRunId, { provider: "local", resetState: false });
-
-  // No `live` rateSource is ever supplied here — LocalPaperBroker has no getRate() capability, so
-  // HERMES_MARKET_DATA_PROVIDER=live fails closed with MarketDataProviderFactory's own clear error
-  // ("requires options.live.rateSource") rather than this file inventing a fake one.
-  const marketDataProvider = MarketDataProviderFactory.create(config.marketDataProvider, {});
-
-  const marketHoursPolicy = MarketHoursPolicyFactory.create(config.scheduler.marketHoursPolicy, config.scheduler);
-
-  const lifecycleService = new TradeLifecycleService({
-    store: new InMemoryTradeLifecycleStore(),
-    auditTrail,
-    executionRunId,
-  });
+  const summary = buildRedactedStartupSummary(config, deps.strategy);
+  console.log("");
+  console.log("Startup summary (redacted — no credentials included)");
+  console.log("------------------------------------------------------");
+  console.log(JSON.stringify(summary, null, 2));
 
   const runtime = new TradingRuntime({
-    broker,
-    marketDataProvider,
-    strategy,
-    instrument: INSTRUMENT,
-    amount: AMOUNT,
-    portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
-    lifecycleService,
+    broker: deps.broker,
+    marketDataProvider: deps.marketDataProvider,
+    strategy: deps.strategy,
+    instrument: deps.symbol,
+    amount: deps.quantity,
+    portfolioRiskConfig: deps.portfolioRiskConfig,
+    lifecycleService: deps.lifecycleService,
     auditTrail,
-    marketHoursPolicy,
+    marketHoursPolicy: deps.marketHoursPolicy,
     clock: new SystemSchedulerClock(),
     intervalMs: config.scheduler.intervalMs,
     immediateFirstRun: config.scheduler.immediateFirstRun,
   });
 
   await runtime.start();
-  printStartupSummary(config.scheduler.intervalMs, config.scheduler.immediateFirstRun, config.scheduler.marketHoursPolicy);
+  console.log("");
+  console.log("Runtime started. Press Ctrl+C (SIGINT) to stop gracefully.");
 
   // Signal handling deliberately lives here, outside TradingRuntime itself, so the runtime stays
   // testable with zero knowledge of process signals. `shuttingDown` de-duplicates: SIGINT and

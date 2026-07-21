@@ -43,6 +43,16 @@ export type MarketDataProviderType = (typeof SUPPORTED_MARKET_DATA_PROVIDERS)[nu
 export const SUPPORTED_MARKET_HOURS_POLICIES = ["always-open", "weekday-session"] as const;
 export type MarketHoursPolicyType = (typeof SUPPORTED_MARKET_HOURS_POLICIES)[number];
 
+// Milestone 8 — Deployment-Ready Runtime Configuration. Matches BrokerProvider/EtoroEnv's own
+// "there is no live value structurally" pattern exactly — "live" is not a member of this type at
+// all, not merely rejected at runtime. A live mode remains conceptually unsupported in this
+// milestone: no broker in BROKER_CAPABILITIES (runtime-config/broker-capabilities.ts) declares
+// support for it, and there is no code path — env value, default, or fallback — that could ever
+// produce one. "testnet" and "demo" are named to match this codebase's own existing terminology
+// (HYPERLIQUID_TESTNET_*, ETORO_ENV=demo, TRADING212_DEMO_*) rather than inventing new vocabulary.
+export const SUPPORTED_RUNTIME_MODES = ["paper", "demo", "testnet"] as const;
+export type RuntimeMode = (typeof SUPPORTED_RUNTIME_MODES)[number];
+
 const PRIVATE_KEY_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
@@ -119,6 +129,32 @@ export interface TradingSchedulerConfig {
   sessionEnd: string;
 }
 
+// Milestone 8 — Deployment-Ready Runtime Configuration. The remaining previously hard-coded
+// runtime trading inputs (Mission 7's market-runtime.ts had `const INSTRUMENT = "BTC"` and
+// `const AMOUNT = 10` directly in source) — now validated configuration instead. Order *side* is
+// deliberately NOT a field here: it is never independently configured. MarketDecisionEngine's own
+// decision output entirely determines it (BUY opens a long position, SELL closes it) — there is no
+// short-entry support anywhere in this pipeline to configure a side for (see
+// MarketDecisionAction/SignalAction's own "ENTER_SHORT reserved, never produced" precedent). Adding
+// a settable "order side" env var would configure something that doesn't exist yet; this is the
+// "strategy-controlled side convention" half of the mission's own "order side or strategy-
+// controlled side convention" phrasing.
+export interface RuntimeTradingConfig {
+  /** Normalized (trimmed, uppercased) — see buildHermesExecutionConfig's own validation. */
+  symbol: string;
+  quantity: number;
+  /** Optional safety ceiling. Undefined means "no ceiling configured" — a distinct state from a
+   * ceiling of 0 (which would be rejected as invalid), matching this file's established
+   * "undefined means not configured" convention throughout. */
+  maxQuantity: number | undefined;
+  /** Undefined means "not configured" — the runtime falls back to today's existing behaviour
+   * (first HERMES_APPROVED strategy, else the DEMO_ONLY strategy) exactly as before this
+   * milestone. Set explicitly, an unknown or disabled strategy ID fails startup validation (see
+   * runtime-config/strategy-selection.ts) rather than silently falling back. */
+  strategyId: string | undefined;
+  mode: RuntimeMode;
+}
+
 export interface HermesExecutionConfig {
   /** Absolute filesystem path to the Hermes Lab strategy-registry/ directory. Undefined means
    * "not configured" — a distinct, clearly-reported state from "configured but empty." */
@@ -141,6 +177,7 @@ export interface HermesExecutionConfig {
    * (market-data/) for the Milestone 2-4 pipeline. Only "mock" and "live" are valid. */
   marketDataProvider: MarketDataProviderType;
   scheduler: TradingSchedulerConfig;
+  runtimeTrading: RuntimeTradingConfig;
   hyperliquid: HyperliquidTestnetConfig;
   trading212: Trading212DemoConfig;
   etoro: EtoroDemoConfig;
@@ -161,6 +198,11 @@ interface RawHermesExecutionEnv {
   HERMES_MARKET_HOURS_TIMEZONE: string | undefined;
   HERMES_MARKET_HOURS_SESSION_START: string | undefined;
   HERMES_MARKET_HOURS_SESSION_END: string | undefined;
+  HERMES_TRADING_SYMBOL: string | undefined;
+  HERMES_TRADE_QUANTITY: string | undefined;
+  HERMES_MAX_TRADE_QUANTITY: string | undefined;
+  HERMES_STRATEGY_ID: string | undefined;
+  HERMES_RUNTIME_MODE: string | undefined;
   HYPERLIQUID_TESTNET_PRIVATE_KEY: string | undefined;
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: string | undefined;
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: string | undefined;
@@ -210,6 +252,17 @@ const DEFAULT_SESSION_START = "09:30";
 const DEFAULT_SESSION_END = "16:00";
 const HHMM_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
+// Milestone 8 — Deployment-Ready Runtime Configuration. Same BTC/10-unit defaults Mission 7's
+// market-runtime.ts previously hard-coded — preserved exactly, now as configuration.
+const DEFAULT_TRADING_SYMBOL = "BTC";
+const DEFAULT_TRADE_QUANTITY = 10;
+// Existing convention this file's other instrument identifiers already follow implicitly
+// (market-session.ts's own CRYPTO_SYMBOLS.has(instrument.toUpperCase())) — uppercase tickers, no
+// embedded whitespace. Permissive rather than a strict per-exchange ticker grammar: "avoid
+// implementing a universal symbol-normalization system unless required by existing adapters," and
+// none of the four existing adapters require more than this.
+const SYMBOL_PATTERN = /^[A-Z0-9._-]+$/;
+
 export function buildHermesExecutionConfig(
   env: RawHermesExecutionEnv = {
     HERMES_STRATEGY_REGISTRY_PATH: process.env.HERMES_STRATEGY_REGISTRY_PATH,
@@ -226,6 +279,11 @@ export function buildHermesExecutionConfig(
     HERMES_MARKET_HOURS_TIMEZONE: process.env.HERMES_MARKET_HOURS_TIMEZONE,
     HERMES_MARKET_HOURS_SESSION_START: process.env.HERMES_MARKET_HOURS_SESSION_START,
     HERMES_MARKET_HOURS_SESSION_END: process.env.HERMES_MARKET_HOURS_SESSION_END,
+    HERMES_TRADING_SYMBOL: process.env.HERMES_TRADING_SYMBOL,
+    HERMES_TRADE_QUANTITY: process.env.HERMES_TRADE_QUANTITY,
+    HERMES_MAX_TRADE_QUANTITY: process.env.HERMES_MAX_TRADE_QUANTITY,
+    HERMES_STRATEGY_ID: process.env.HERMES_STRATEGY_ID,
+    HERMES_RUNTIME_MODE: process.env.HERMES_RUNTIME_MODE,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: process.env.HYPERLIQUID_TESTNET_PRIVATE_KEY,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: process.env.HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: process.env.HYPERLIQUID_TESTNET_EXECUTION_ENABLED,
@@ -311,6 +369,53 @@ export function buildHermesExecutionConfig(
       `HERMES_MARKET_HOURS_SESSION_START ("${sessionStart}") must be strictly before HERMES_MARKET_HOURS_SESSION_END ("${sessionEnd}").`,
     );
   }
+
+  // Milestone 8 — Deployment-Ready Runtime Configuration.
+  const runtimeMode = parseEnum(env.HERMES_RUNTIME_MODE, SUPPORTED_RUNTIME_MODES, "paper");
+
+  const tradingSymbolRaw = (env.HERMES_TRADING_SYMBOL || DEFAULT_TRADING_SYMBOL).trim();
+  if (tradingSymbolRaw.length === 0) {
+    throw new ConfigError("HERMES_TRADING_SYMBOL must not be empty (or whitespace-only) if set.");
+  }
+  const tradingSymbol = tradingSymbolRaw.toUpperCase();
+  if (!SYMBOL_PATTERN.test(tradingSymbol)) {
+    throw new ConfigError(
+      `HERMES_TRADING_SYMBOL "${env.HERMES_TRADING_SYMBOL}" contains unsupported characters — expected letters, digits, ".", "_", or "-" only.`,
+    );
+  }
+
+  // No parseInteger-equivalent for fractional values, same reasoning as trading212TestOrderQuantity
+  // below — a trade quantity is legitimately fractional for some brokers (e.g. CFD notional amounts).
+  let tradeQuantity = DEFAULT_TRADE_QUANTITY;
+  if (env.HERMES_TRADE_QUANTITY !== undefined && env.HERMES_TRADE_QUANTITY !== "") {
+    const parsed = Number(env.HERMES_TRADE_QUANTITY);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new ConfigError(`HERMES_TRADE_QUANTITY must be a positive finite number, received "${env.HERMES_TRADE_QUANTITY}".`);
+    }
+    tradeQuantity = parsed;
+  }
+
+  let maxTradeQuantity: number | undefined;
+  if (env.HERMES_MAX_TRADE_QUANTITY !== undefined && env.HERMES_MAX_TRADE_QUANTITY !== "") {
+    const parsed = Number(env.HERMES_MAX_TRADE_QUANTITY);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new ConfigError(
+        `HERMES_MAX_TRADE_QUANTITY must be a positive finite number, received "${env.HERMES_MAX_TRADE_QUANTITY}".`,
+      );
+    }
+    maxTradeQuantity = parsed;
+  }
+  if (maxTradeQuantity !== undefined && tradeQuantity > maxTradeQuantity) {
+    throw new ConfigError(
+      `HERMES_TRADE_QUANTITY (${tradeQuantity}) exceeds HERMES_MAX_TRADE_QUANTITY (${maxTradeQuantity}).`,
+    );
+  }
+
+  // Presence/format only — whether this ID actually names a known, enabled strategy can only be
+  // checked once the registry has been read (see runtime-config/strategy-selection.ts); no single
+  // required format applies (a Hermes-approved id looks like "STRAT-0001", the demo strategy's id
+  // is "DEMO-0001" — this file does not police that shape).
+  const strategyId = env.HERMES_STRATEGY_ID?.trim() || undefined;
 
   const privateKey = env.HYPERLIQUID_TESTNET_PRIVATE_KEY || undefined;
   if (privateKey && !PRIVATE_KEY_PATTERN.test(privateKey)) {
@@ -435,6 +540,13 @@ export function buildHermesExecutionConfig(
       sessionTimezone,
       sessionStart,
       sessionEnd,
+    },
+    runtimeTrading: {
+      symbol: tradingSymbol,
+      quantity: tradeQuantity,
+      maxQuantity: maxTradeQuantity,
+      strategyId,
+      mode: runtimeMode,
     },
     hyperliquid: {
       privateKey,

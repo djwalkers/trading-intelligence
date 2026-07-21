@@ -15,6 +15,7 @@ import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecy
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import type { EtoroResolvedInstrument } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
+import { selectStrategy } from "@/lib/hermes-execution/runtime-config/strategy-selection";
 
 // Milestones 2/3 — Market Decision Integration + Rich Market Context. Proves, end to end, against
 // the already-validated eToro demo broker:
@@ -167,22 +168,17 @@ export async function main(): Promise<void> {
   console.log(`${loadResult.hermesApprovedCount} Hermes-approved strategies loaded`);
   console.log(`Demo strategy loaded: ${loadResult.demoModeActive}`);
 
-  // Prefer a real Hermes-approved strategy when one exists; the registry currently holds none
-  // (see docs/execution-mvp-phase-1.md / demo-strategy.ts), so this falls back to the DEMO_ONLY
-  // strategy — visibly labeled as such throughout, never presented as a real Hermes-approved
-  // strategy.
-  const strategy =
-    loadResult.strategies.find((s) => s.sourceType === "HERMES_APPROVED") ??
-    loadResult.strategies.find((s) => s.sourceType === "DEMO_ONLY");
-
-  if (!strategy) {
-    console.error(
-      "No approved strategy available to evaluate. Set DEMO_EXECUTION_MODE=true to use the DEMO_ONLY " +
-        "strategy, or add a real strategy to the Hermes Strategy Registry.",
-    );
+  // Milestone 8 — shares strategy-selection with the continuous runtime: HERMES_STRATEGY_ID
+  // unset preserves this command's original behaviour exactly (prefer HERMES_APPROVED, fall back
+  // to DEMO_ONLY); set explicitly, an unknown or disabled id fails clearly instead of silently
+  // falling back.
+  const selection = selectStrategy(loadResult.strategies, config.runtimeTrading.strategyId);
+  if (!selection.found) {
+    console.error(selection.reason);
     process.exitCode = 1;
     return;
   }
+  const strategy = selection.strategy;
   console.log(`Using strategy: ${strategy.strategyId} v${strategy.version} (${strategy.sourceType})`);
 
   // BrokerFactory.create's "etoro-demo" entry constructs EtoroDemoBroker and calls connect() before
