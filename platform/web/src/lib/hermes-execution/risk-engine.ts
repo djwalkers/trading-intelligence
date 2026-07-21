@@ -2,7 +2,11 @@ import type { Account, InternalStrategy, OrderRequest, PaperPosition, RiskCheck,
 
 export interface RiskEngineConfig {
   demoExecutionModeEnabled: boolean;
-  maxOpenPositions: number;
+  /** Named `strategyMaxOpenPositions`, not `maxOpenPositions` — distinct from
+   * PortfolioRiskConfig.portfolioMaxOpenPositions (portfolio-risk-engine.ts), a separately
+   * configured, account-wide ceiling used by the newer Milestone 4 pipeline. Same domain concept,
+   * two different scopes/sources of truth. */
+  strategyMaxOpenPositions: number;
 }
 
 /**
@@ -74,13 +78,13 @@ export function evaluateRisk(
       : `Order value ${orderValue.toFixed(2)} exceeds the strategy's max position value ${strategy.riskRules.maxPositionValue}.`,
   });
 
-  const withinMaxOpenPositions = openPositions.length < config.maxOpenPositions;
+  const withinMaxOpenPositions = openPositions.length < config.strategyMaxOpenPositions;
   checks.push({
     name: "max-open-positions",
     passed: withinMaxOpenPositions,
     detail: withinMaxOpenPositions
-      ? `${openPositions.length} open position(s) is below the configured maximum of ${config.maxOpenPositions}.`
-      : `${openPositions.length} open position(s) already at the configured maximum of ${config.maxOpenPositions}.`,
+      ? `${openPositions.length} open position(s) is below the configured maximum of ${config.strategyMaxOpenPositions}.`
+      : `${openPositions.length} open position(s) already at the configured maximum of ${config.strategyMaxOpenPositions}.`,
   });
 
   const takeProfitValid = order.takeProfitPercent === undefined || (order.takeProfitPercent > 0 && order.takeProfitPercent < 100);

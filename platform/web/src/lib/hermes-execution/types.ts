@@ -190,7 +190,24 @@ export type AuditEventType =
   // succeeds — not duplicated here.
   | "CLOSE_VERIFICATION_STARTED"
   | "CLOSE_VERIFICATION_PENDING"
-  | "CLOSE_VERIFICATION_TIMED_OUT";
+  | "CLOSE_VERIFICATION_TIMED_OUT"
+  // Milestone 2 — Market Decision Integration. Genuinely new concepts only: the decision itself
+  // (action/confidence/reasoning) and whether it led to execution. Everything the resulting
+  // BUY/SELL order or close actually does is still recorded by the existing ORDER_SUBMITTED /
+  // POSITION_OPENED / POSITION_CLOSED / etc. events emitted by the broker methods this pipeline
+  // calls — not duplicated here. Named MARKET_DECISION_RECEIVED, not HERMES_* — "Hermes" is
+  // reserved for the external Nous Hermes Agent; this event records an internal deterministic
+  // engine's own decision, not anything Hermes Agent decided.
+  | "MARKET_DECISION_RECEIVED"
+  | "EXECUTION_TRIGGERED"
+  | "EXECUTION_SKIPPED"
+  // Milestone 4 — Portfolio & Risk Engine. Fired by market-decision-runner.ts around a
+  // PortfolioRiskEngine evaluation, always between MARKET_DECISION_RECEIVED and either
+  // EXECUTION_TRIGGERED (approved) or EXECUTION_SKIPPED (blocked) for a BUY decision. Never fired
+  // for SELL/HOLD — SELL is always permitted, HOLD never reaches the risk engine.
+  | "RISK_CHECK_STARTED"
+  | "RISK_CHECK_PASSED"
+  | "RISK_CHECK_FAILED";
 
 export interface AuditEvent {
   timestamp: string;

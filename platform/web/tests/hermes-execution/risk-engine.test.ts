@@ -5,7 +5,7 @@ import type { Account, OrderRequest, PaperPosition } from "@/lib/hermes-executio
 
 const strategy = getDemoStrategy(true)!;
 const account: Account = { cashBalance: 10_000, startingCashBalance: 10_000 };
-const config: RiskEngineConfig = { demoExecutionModeEnabled: true, maxOpenPositions: 5 };
+const config: RiskEngineConfig = { demoExecutionModeEnabled: true, strategyMaxOpenPositions: 5 };
 
 function makeOrder(overrides: Partial<OrderRequest> = {}): OrderRequest {
   return {

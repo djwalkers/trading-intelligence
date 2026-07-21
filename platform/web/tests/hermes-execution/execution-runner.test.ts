@@ -28,7 +28,7 @@ async function buildRunner(candles: Candle[]) {
     marketData,
     broker,
     auditTrail,
-    riskConfig: { demoExecutionModeEnabled: true, maxOpenPositions: 5 },
+    riskConfig: { demoExecutionModeEnabled: true, strategyMaxOpenPositions: 5 },
     executionRunId: "test-run",
   });
 

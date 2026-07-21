@@ -30,6 +30,7 @@ describe("HermesExecutionConfig — demo mode defaults", () => {
     HERMES_PAPER_STARTING_CASH: undefined,
     HERMES_MAX_OPEN_POSITIONS: undefined,
     BROKER_PROVIDER: undefined,
+    HERMES_MARKET_DATA_PROVIDER: undefined,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: undefined,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: undefined,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: undefined,

@@ -24,6 +24,17 @@ export type BrokerProvider = (typeof SUPPORTED_BROKER_PROVIDERS)[number];
 export const SUPPORTED_ETORO_ENVS = ["demo"] as const;
 export type EtoroEnv = (typeof SUPPORTED_ETORO_ENVS)[number];
 
+// Milestone 5 — Live Market Data Integration. Selects which MarketDataProvider (market-data/)
+// backs the Milestone 2-4 pipeline (market-decide.ts and anything else that builds a
+// MarketDecisionContext). Deliberately prefixed HERMES_, not reusing the existing, unrelated
+// NEXT_PUBLIC_MARKET_DATA_PROVIDER (a client-exposed display label for a totally different market
+// data widget — see src/lib/config/client-config.ts) — same words, unrelated concepts, kept
+// unambiguous by name. Defaults to "mock" so tests and any run without explicit configuration stay
+// deterministic; there is no "mainnet"/"live-unverified" value, matching this pipeline's existing
+// fail-closed convention for BrokerProvider/EtoroEnv above.
+export const SUPPORTED_MARKET_DATA_PROVIDERS = ["mock", "live"] as const;
+export type MarketDataProviderType = (typeof SUPPORTED_MARKET_DATA_PROVIDERS)[number];
+
 const PRIVATE_KEY_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
@@ -84,11 +95,17 @@ export interface HermesExecutionConfig {
   /** Defaults to false — the DEMO_ONLY strategy must never load unless this is explicitly true. */
   demoExecutionModeEnabled: boolean;
   paperStartingCash: number;
-  maxOpenPositions: number;
+  /** Feeds RiskEngineConfig.strategyMaxOpenPositions (risk-engine.ts) — the older, per-strategy
+   * pipeline's cap. Distinct from PortfolioRiskConfig.portfolioMaxOpenPositions
+   * (portfolio-risk-engine.ts), which is configured separately and not sourced from here. */
+  strategyMaxOpenPositions: number;
   /** Defaults to "local". Only "local", "hyperliquid-testnet", "trading212-demo", and
    * "etoro-demo" are valid; anything else (including any attempt at a mainnet/live value) fails
    * closed at config-build time. */
   brokerProvider: BrokerProvider;
+  /** Defaults to "mock". Selects between MockMarketDataProvider and LiveMarketDataProvider
+   * (market-data/) for the Milestone 2-4 pipeline. Only "mock" and "live" are valid. */
+  marketDataProvider: MarketDataProviderType;
   hyperliquid: HyperliquidTestnetConfig;
   trading212: Trading212DemoConfig;
   etoro: EtoroDemoConfig;
@@ -101,6 +118,7 @@ interface RawHermesExecutionEnv {
   HERMES_PAPER_STARTING_CASH: string | undefined;
   HERMES_MAX_OPEN_POSITIONS: string | undefined;
   BROKER_PROVIDER: string | undefined;
+  HERMES_MARKET_DATA_PROVIDER: string | undefined;
   HYPERLIQUID_TESTNET_PRIVATE_KEY: string | undefined;
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: string | undefined;
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: string | undefined;
@@ -119,7 +137,7 @@ interface RawHermesExecutionEnv {
 }
 
 const DEFAULT_PAPER_STARTING_CASH = 10_000;
-const DEFAULT_MAX_OPEN_POSITIONS = 5;
+const DEFAULT_STRATEGY_MAX_OPEN_POSITIONS = 5;
 // Hyperliquid enforces a $10 minimum order notional on perps; $15 gives headroom over that floor
 // while staying the "smallest practical test size" for a smoke test, not a real trading amount.
 const DEFAULT_MAX_TEST_ORDER_VALUE_USD = 15;
@@ -144,6 +162,7 @@ export function buildHermesExecutionConfig(
     HERMES_PAPER_STARTING_CASH: process.env.HERMES_PAPER_STARTING_CASH,
     HERMES_MAX_OPEN_POSITIONS: process.env.HERMES_MAX_OPEN_POSITIONS,
     BROKER_PROVIDER: process.env.BROKER_PROVIDER,
+    HERMES_MARKET_DATA_PROVIDER: process.env.HERMES_MARKET_DATA_PROVIDER,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: process.env.HYPERLIQUID_TESTNET_PRIVATE_KEY,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: process.env.HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: process.env.HYPERLIQUID_TESTNET_EXECUTION_ENABLED,
@@ -177,9 +196,9 @@ export function buildHermesExecutionConfig(
     { min: 1 },
   );
 
-  const maxOpenPositions = parseInteger(
+  const strategyMaxOpenPositions = parseInteger(
     env.HERMES_MAX_OPEN_POSITIONS,
-    DEFAULT_MAX_OPEN_POSITIONS,
+    DEFAULT_STRATEGY_MAX_OPEN_POSITIONS,
     { min: 1 },
   );
 
@@ -187,6 +206,11 @@ export function buildHermesExecutionConfig(
   // is no fallback branch anywhere downstream that would silently treat an unrecognised value as
   // "local".
   const brokerProvider = parseEnum(env.BROKER_PROVIDER, SUPPORTED_BROKER_PROVIDERS, "local");
+
+  // Unsupported values (including any typo) fail closed here, same convention as brokerProvider
+  // above — there is no fallback branch anywhere downstream that treats an unrecognised value as
+  // "mock".
+  const marketDataProvider = parseEnum(env.HERMES_MARKET_DATA_PROVIDER, SUPPORTED_MARKET_DATA_PROVIDERS, "mock");
 
   const privateKey = env.HYPERLIQUID_TESTNET_PRIVATE_KEY || undefined;
   if (privateKey && !PRIVATE_KEY_PATTERN.test(privateKey)) {
@@ -300,8 +324,9 @@ export function buildHermesExecutionConfig(
     executionMode,
     demoExecutionModeEnabled,
     paperStartingCash,
-    maxOpenPositions,
+    strategyMaxOpenPositions,
     brokerProvider,
+    marketDataProvider,
     hyperliquid: {
       privateKey,
       accountAddress,

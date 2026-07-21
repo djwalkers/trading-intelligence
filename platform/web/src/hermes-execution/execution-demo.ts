@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     auditTrail,
     riskConfig: {
       demoExecutionModeEnabled: config.demoExecutionModeEnabled,
-      maxOpenPositions: config.maxOpenPositions,
+      strategyMaxOpenPositions: config.strategyMaxOpenPositions,
     },
     executionRunId,
   });
