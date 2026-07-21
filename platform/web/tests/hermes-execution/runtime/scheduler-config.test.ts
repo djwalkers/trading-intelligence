@@ -21,6 +21,10 @@ const EMPTY = {
   HERMES_MAX_TRADE_QUANTITY: undefined,
   HERMES_STRATEGY_ID: undefined,
   HERMES_RUNTIME_MODE: undefined,
+  HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: undefined,
+  HERMES_TELEGRAM_ENABLED: undefined,
+  HERMES_TELEGRAM_BOT_TOKEN: undefined,
+  HERMES_TELEGRAM_ALLOWED_CHAT_ID: undefined,
   HYPERLIQUID_TESTNET_PRIVATE_KEY: undefined,
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: undefined,
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: undefined,
@@ -36,6 +40,7 @@ const EMPTY = {
   ETORO_USER_KEY: undefined,
   ETORO_DEMO_TEST_INSTRUMENT: undefined,
   ETORO_DEMO_TEST_AMOUNT: undefined,
+  ETORO_HTTP_TIMEOUT_MS: undefined,
 };
 
 describe("buildHermesExecutionConfig — scheduler defaults", () => {
@@ -49,6 +54,7 @@ describe("buildHermesExecutionConfig — scheduler defaults", () => {
       sessionTimezone: "America/New_York",
       sessionStart: "09:30",
       sessionEnd: "16:00",
+      shutdownTimeoutMs: 30_000,
     });
   });
 });

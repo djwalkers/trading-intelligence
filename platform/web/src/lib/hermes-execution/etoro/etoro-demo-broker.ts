@@ -183,7 +183,7 @@ export class EtoroDemoBroker implements PaperBroker {
     if (!config.apiKey || !config.userKey) {
       throw new Error("EtoroDemoBroker requires both ETORO_API_KEY and ETORO_USER_KEY to be set.");
     }
-    this.client = new EtoroClient(config.apiKey, config.userKey);
+    this.client = new EtoroClient(config.apiKey, config.userKey, config.httpTimeoutMs);
   }
 
   /** Verifies credentials via a lightweight demo-portfolio read (no separate "whoami" endpoint is

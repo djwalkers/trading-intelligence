@@ -5,6 +5,10 @@ import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-c
 import { TradingRuntime } from "@/lib/hermes-execution/runtime/trading-runtime";
 import { buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
 import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
+import { TelegramAlertingAuditTrail, type AlertSender } from "@/lib/hermes-execution/telegram/telegram-alerting-audit-trail";
+import { TelegramBot } from "@/lib/hermes-execution/telegram/telegram-bot";
+import { HttpTelegramTransport } from "@/lib/hermes-execution/telegram/telegram-transport";
+import type { AuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. Replaces Mission 7's hard-coded
@@ -48,7 +52,27 @@ export async function main(): Promise<void> {
   const executionRunId = `market-runtime-${Date.now()}`;
   console.log(`Execution run id: ${executionRunId}`);
 
-  const auditTrail = await JsonFileAuditTrail.createFresh(AUDIT_LOG_PATH);
+  const baseAuditTrail = await JsonFileAuditTrail.createFresh(AUDIT_LOG_PATH);
+
+  // Prototype V1 — minimum Telegram integration. When enabled, every alert-worthy audit event (see
+  // telegram-alerting-audit-trail.ts's own formatAlert) is also sent to the one configured chat id,
+  // through the exact same AuditTrail instance the runtime/lifecycle pipeline already writes to —
+  // no separate notification path, no duplicated trading/decision logic. The alert sender only ever
+  // needs the Telegram transport + chat id (never TradingRuntime itself), so it has no ordering
+  // dependency on the runtime constructed below; the interactive TelegramBot (commands) is
+  // constructed later, once the runtime and lifecycle store it reports on actually exist.
+  let auditTrail: AuditTrail = baseAuditTrail;
+  let telegramTransport: HttpTelegramTransport | undefined;
+  if (config.telegram.enabled) {
+    // config.ts fails closed at config-build time whenever telegram.enabled is true — botToken and
+    // allowedChatId are therefore always present here.
+    const botToken = config.telegram.botToken as string;
+    const allowedChatId = config.telegram.allowedChatId as string;
+    telegramTransport = new HttpTelegramTransport(botToken);
+    const alertSender: AlertSender = { sendAlert: (text) => telegramTransport!.sendMessage(allowedChatId, text) };
+    auditTrail = new TelegramAlertingAuditTrail(baseAuditTrail, alertSender);
+    console.log("Telegram alerts enabled.");
+  }
 
   // Startup validation happens entirely inside this call, before anything scheduler-related is
   // ever touched: strategy loading, mode/broker/market-data compatibility, broker construction,
@@ -90,7 +114,22 @@ export async function main(): Promise<void> {
     clock: new SystemSchedulerClock(),
     intervalMs: config.scheduler.intervalMs,
     immediateFirstRun: config.scheduler.immediateFirstRun,
+    shutdownTimeoutMs: config.scheduler.shutdownTimeoutMs,
   });
+
+  let telegramBot: TelegramBot | undefined;
+  if (telegramTransport) {
+    // Reuses config.telegram.allowedChatId/botToken validated above — `!` here is safe for the same
+    // config-build-time reason as the alertSender construction above.
+    telegramBot = new TelegramBot({
+      transport: telegramTransport,
+      allowedChatId: config.telegram.allowedChatId as string,
+      runtime,
+      lifecycleStore: deps.lifecycleStore,
+    });
+    telegramBot.start();
+    console.log("Telegram bot started — listening for /status /positions /trades /pnl /pause /resume /run /help.");
+  }
 
   await runtime.start();
   console.log("");
@@ -109,6 +148,7 @@ export async function main(): Promise<void> {
     console.log(`\nReceived ${signal} — stopping gracefully (waiting for any active cycle to finish)...`);
     runtime
       .stop()
+      .then(() => telegramBot?.stop())
       .then(() => {
         printFinalStatus(runtime);
         process.exit(0);

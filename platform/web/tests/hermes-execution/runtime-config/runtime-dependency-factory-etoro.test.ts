@@ -39,6 +39,10 @@ const EMPTY = {
   HERMES_MAX_TRADE_QUANTITY: undefined,
   HERMES_STRATEGY_ID: undefined,
   HERMES_RUNTIME_MODE: undefined,
+  HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: undefined,
+  HERMES_TELEGRAM_ENABLED: undefined,
+  HERMES_TELEGRAM_BOT_TOKEN: undefined,
+  HERMES_TELEGRAM_ALLOWED_CHAT_ID: undefined,
   HYPERLIQUID_TESTNET_PRIVATE_KEY: undefined,
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: undefined,
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: undefined,
@@ -54,6 +58,7 @@ const EMPTY = {
   ETORO_USER_KEY: "test-user-key",
   ETORO_DEMO_TEST_INSTRUMENT: undefined,
   ETORO_DEMO_TEST_AMOUNT: "50",
+  ETORO_HTTP_TIMEOUT_MS: undefined,
 };
 
 const PORTFOLIO_RISK_CONFIG = { portfolioMaxOpenPositions: 5, maxDailyTrades: 10, maxPortfolioExposure: 10_000 };

@@ -5,6 +5,7 @@ import { MarketDataProviderFactory } from "../market-data/market-data-provider-f
 import { MarketHoursPolicyFactory } from "../runtime/market-hours-policy-factory";
 import { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
+import type { TradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
 import type { AuditTrail } from "../audit-trail";
 import type { BrokerProvider, HermesExecutionConfig, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
@@ -40,6 +41,11 @@ export interface RuntimeDependencies {
   marketDataProvider: MarketDataProvider;
   marketHoursPolicy: MarketHoursPolicy;
   lifecycleService: TradeLifecycleService;
+  /** Prototype V1 — the same store instance lifecycleService was constructed with, exposed
+   * directly for read-only reporting (e.g. the Telegram bot's /positions, /trades, /pnl commands)
+   * that need to list/query records — a concern TradeLifecycleService itself doesn't expose a
+   * pass-through for, and shouldn't need to grow one just for this. */
+  lifecycleStore: TradeLifecycleStore;
   symbol: string;
   quantity: number;
   portfolioRiskConfig: PortfolioRiskConfig;
@@ -152,8 +158,9 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
 
   const marketHoursPolicy = MarketHoursPolicyFactory.create(config.scheduler.marketHoursPolicy, config.scheduler);
 
+  const lifecycleStore = new InMemoryTradeLifecycleStore();
   const lifecycleService = new TradeLifecycleService({
-    store: new InMemoryTradeLifecycleStore(),
+    store: lifecycleStore,
     auditTrail: options.auditTrail,
     executionRunId: options.executionRunId,
   });
@@ -166,6 +173,7 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
       marketDataProvider,
       marketHoursPolicy,
       lifecycleService,
+      lifecycleStore,
       symbol: config.runtimeTrading.symbol,
       quantity: config.runtimeTrading.quantity,
       portfolioRiskConfig: options.portfolioRiskConfig,

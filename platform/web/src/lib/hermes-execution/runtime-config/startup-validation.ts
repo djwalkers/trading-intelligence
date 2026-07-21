@@ -1,6 +1,11 @@
 import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
 import type { InternalStrategy } from "../types";
-import { checkMarketDataCompatibility, checkModeCompatibility, type CompatibilityProblem } from "./compatibility";
+import {
+  checkMarketDataCompatibility,
+  checkModeCompatibility,
+  checkPrototypeV1BrokerSupport,
+  type CompatibilityProblem,
+} from "./compatibility";
 import { selectStrategy } from "./strategy-selection";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. "Collect multiple independent
@@ -37,6 +42,9 @@ export interface StartupValidationInput {
  * is folded into the same problem-reporting shape there rather than duplicated here. */
 export function validateStartup(input: StartupValidationInput): StartupValidationResult {
   const problems: StartupValidationProblem[] = [];
+
+  const prototypeV1Problem = checkPrototypeV1BrokerSupport(input.brokerProvider);
+  if (prototypeV1Problem) problems.push(prototypeV1Problem);
 
   const modeProblem = checkModeCompatibility(input.brokerProvider, input.runtimeMode);
   if (modeProblem) problems.push(modeProblem);

@@ -23,6 +23,10 @@ const EMPTY = {
   HERMES_MAX_TRADE_QUANTITY: undefined,
   HERMES_STRATEGY_ID: undefined,
   HERMES_RUNTIME_MODE: undefined,
+  HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: undefined,
+  HERMES_TELEGRAM_ENABLED: undefined,
+  HERMES_TELEGRAM_BOT_TOKEN: undefined,
+  HERMES_TELEGRAM_ALLOWED_CHAT_ID: undefined,
   HYPERLIQUID_TESTNET_PRIVATE_KEY: undefined,
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: undefined,
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: undefined,
@@ -38,6 +42,7 @@ const EMPTY = {
   ETORO_USER_KEY: undefined,
   ETORO_DEMO_TEST_INSTRUMENT: undefined,
   ETORO_DEMO_TEST_AMOUNT: undefined,
+  ETORO_HTTP_TIMEOUT_MS: undefined,
 };
 
 const SECRET_PRIVATE_KEY = `0x${"1".repeat(64)}`;
@@ -75,6 +80,7 @@ describe("buildRedactedStartupSummary — shape", () => {
       immediateFirstRun: true,
       marketHoursPolicy: "always-open",
       marketHoursTimezone: "America/New_York",
+      telegramConfigured: false,
     });
   });
 
@@ -101,6 +107,17 @@ describe("buildRedactedStartupSummary — shape", () => {
     const summary = buildRedactedStartupSummary(config, STRATEGY);
     expect(summary.brokerCredentialsConfigured).toBe(true);
   });
+
+  it("reports telegramConfigured: true once Telegram is enabled with a token and chat id", () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_TELEGRAM_ENABLED: "true",
+      HERMES_TELEGRAM_BOT_TOKEN: "super-secret-telegram-bot-token",
+      HERMES_TELEGRAM_ALLOWED_CHAT_ID: "555",
+    });
+    const summary = buildRedactedStartupSummary(config, STRATEGY);
+    expect(summary.telegramConfigured).toBe(true);
+  });
 });
 
 describe("buildRedactedStartupSummary — no secrets", () => {
@@ -114,6 +131,9 @@ describe("buildRedactedStartupSummary — no secrets", () => {
       ETORO_USER_KEY: "super-secret-etoro-user-key",
       TRADING212_API_KEY: "super-secret-t212-key",
       TRADING212_API_SECRET: "super-secret-t212-secret",
+      HERMES_TELEGRAM_ENABLED: "true",
+      HERMES_TELEGRAM_BOT_TOKEN: "super-secret-telegram-bot-token",
+      HERMES_TELEGRAM_ALLOWED_CHAT_ID: "555",
     });
     const summary = buildRedactedStartupSummary(config, STRATEGY);
     const serialised = JSON.stringify(summary);
@@ -124,6 +144,7 @@ describe("buildRedactedStartupSummary — no secrets", () => {
     expect(serialised).not.toContain("super-secret-etoro-user-key");
     expect(serialised).not.toContain("super-secret-t212-key");
     expect(serialised).not.toContain("super-secret-t212-secret");
+    expect(serialised).not.toContain("super-secret-telegram-bot-token");
   });
 
   it("has no key on the summary object named like a credential field", () => {

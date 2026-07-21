@@ -226,15 +226,37 @@ function extractSafeMessage(body: unknown, status: number): string {
   return `eToro API request failed with status ${status}.`;
 }
 
+/** Prototype V1 — Reliability Fix. Thrown when a single HTTP request exceeds its bounded timeout
+ * (confirmed via live testing: an unbounded request can otherwise hang a trading cycle, and
+ * transitively TradingRuntime.stop(), indefinitely — see runtime/trading-runtime.ts's own
+ * shutdownTimeoutMs for the second, independent bound). Deliberately carries only `operation` and
+ * `timeoutMs` — never the URL, headers, or body, so it can never echo a credential even
+ * incidentally, matching EtoroApiError's own "safeMessage only" discipline above. */
+export class EtoroTimeoutError extends Error {
+  constructor(
+    public readonly operation: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`eToro ${operation} timed out after ${timeoutMs}ms.`);
+    this.name = "EtoroTimeoutError";
+  }
+}
+
 // --- Client -------------------------------------------------------------------------------------
 
 /** Thin, single-purpose fetch wrapper — GET/POST/DELETE against eToro's Public API only. Every
  * request gets its own `x-request-id` (a fresh UUID) for traceability; never reused, never logged
  * as part of a header dump — only surfaced as a plain field on EtoroApiError. */
+/** A single real API round-trip normally completes in well under a second — 10s is generous
+ * headroom, not an expected duration. Only used when the caller doesn't supply its own (see
+ * EtoroDemoConfig.httpTimeoutMs, which config.ts always populates for real use). */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 export class EtoroClient {
   constructor(
     private readonly apiKey: string,
     private readonly userKey: string,
+    private readonly timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
   ) {}
 
   private async request<T>(
@@ -249,17 +271,35 @@ export class EtoroClient {
       for (const [key, value] of Object.entries(options.query)) url.searchParams.set(key, value);
     }
 
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Accept: "application/json",
-        "x-api-key": this.apiKey,
-        "x-user-key": this.userKey,
-        "x-request-id": requestId,
-        ...(options?.body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
-    });
+    // Bounded via AbortController — previously unbounded, which live testing confirmed could hang
+    // a whole trading cycle (and, transitively, graceful shutdown) indefinitely on a single stalled
+    // request. `timer` is always cleared, on every exit path, so a fast/normal response never keeps
+    // a stray timer alive.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          Accept: "application/json",
+          "x-api-key": this.apiKey,
+          "x-user-key": this.userKey,
+          "x-request-id": requestId,
+          ...(options?.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new EtoroTimeoutError(operation, this.timeoutMs);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       let parsedBody: unknown;

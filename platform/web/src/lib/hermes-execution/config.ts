@@ -101,6 +101,13 @@ export interface EtoroDemoConfig {
    * from (see docs/etoro-demo-adapter-phase-1.md) — required explicitly, never defaulted or
    * guessed, unlike Trading212's testOrderQuantity which does have a documented-safe default. */
   testAmount: number | undefined;
+  /** Prototype V1 — Reliability Fix. Bounded timeout (ms) applied to every individual HTTP request
+   * EtoroClient makes. Confirmed via live testing that an unbounded request can otherwise hang a
+   * trading cycle — and, transitively, TradingRuntime.stop() — indefinitely (see
+   * runtime/trading-runtime.ts's own shutdownTimeoutMs for the second, independent bound). Defaults
+   * to 10000 (10s) — comfortably more than a single real eToro API round-trip normally takes, while
+   * still bounded rather than infinite. */
+  httpTimeoutMs: number;
 }
 
 // Milestone 7 — 24/7 Scheduler & Runtime Control. Raw config only — turning this into a live
@@ -127,6 +134,13 @@ export interface TradingSchedulerConfig {
   /** 24-hour "HH:MM", local to sessionTimezone. */
   sessionStart: string;
   sessionEnd: string;
+  /** Prototype V1 — Reliability Fix. Upper bound (ms) TradingRuntime.stop() will ever wait for an
+   * in-flight cycle before proceeding to STOPPED anyway — confirmed via live testing (a real eToro
+   * connection, overlapping ticks) that graceful shutdown could otherwise hang indefinitely.
+   * Defaults to 30000 (30s) — comfortably longer than EtoroDemoBroker's own internal
+   * reconciliation/close-verification polling window (25s), so a legitimate in-flight eToro
+   * open/close is never abandoned prematurely under normal conditions. */
+  shutdownTimeoutMs: number;
 }
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. The remaining previously hard-coded
@@ -155,6 +169,22 @@ export interface RuntimeTradingConfig {
   mode: RuntimeMode;
 }
 
+// Prototype V1 — minimum direct Telegram integration (no MCP server, no conversational AI — see
+// telegram/telegram-bot.ts). Fails closed exactly like every other optional-but-paired feature in
+// this file (Hyperliquid/Trading212/eToro credentials): enabled without both the token and the
+// allowed chat id is a config-build-time error, never a silently-disabled bot.
+export interface TelegramConfig {
+  enabled: boolean;
+  /** Never logged, printed, or included in any redacted summary — see
+   * runtime-config/startup-summary.ts, which reports only `telegramConfigured: boolean`. */
+  botToken: string | undefined;
+  /** The one chat/user id the bot will ever respond to or accept commands from — every other
+   * sender's message is silently ignored (see telegram/telegram-bot.ts's own authorization check).
+   * Stored as a string (not parsed as a number) since Telegram chat ids for group chats are
+   * negative and exact string comparison is simpler and just as correct as numeric comparison. */
+  allowedChatId: string | undefined;
+}
+
 export interface HermesExecutionConfig {
   /** Absolute filesystem path to the Hermes Lab strategy-registry/ directory. Undefined means
    * "not configured" — a distinct, clearly-reported state from "configured but empty." */
@@ -178,6 +208,7 @@ export interface HermesExecutionConfig {
   marketDataProvider: MarketDataProviderType;
   scheduler: TradingSchedulerConfig;
   runtimeTrading: RuntimeTradingConfig;
+  telegram: TelegramConfig;
   hyperliquid: HyperliquidTestnetConfig;
   trading212: Trading212DemoConfig;
   etoro: EtoroDemoConfig;
@@ -203,6 +234,10 @@ interface RawHermesExecutionEnv {
   HERMES_MAX_TRADE_QUANTITY: string | undefined;
   HERMES_STRATEGY_ID: string | undefined;
   HERMES_RUNTIME_MODE: string | undefined;
+  HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: string | undefined;
+  HERMES_TELEGRAM_ENABLED: string | undefined;
+  HERMES_TELEGRAM_BOT_TOKEN: string | undefined;
+  HERMES_TELEGRAM_ALLOWED_CHAT_ID: string | undefined;
   HYPERLIQUID_TESTNET_PRIVATE_KEY: string | undefined;
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: string | undefined;
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: string | undefined;
@@ -218,6 +253,7 @@ interface RawHermesExecutionEnv {
   ETORO_USER_KEY: string | undefined;
   ETORO_DEMO_TEST_INSTRUMENT: string | undefined;
   ETORO_DEMO_TEST_AMOUNT: string | undefined;
+  ETORO_HTTP_TIMEOUT_MS: string | undefined;
 }
 
 const DEFAULT_PAPER_STARTING_CASH = 10_000;
@@ -263,6 +299,11 @@ const DEFAULT_TRADE_QUANTITY = 10;
 // none of the four existing adapters require more than this.
 const SYMBOL_PATTERN = /^[A-Z0-9._-]+$/;
 
+// Prototype V1 — Reliability Fix.
+const DEFAULT_ETORO_HTTP_TIMEOUT_MS = 10_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+const MIN_HTTP_TIMEOUT_MS = 1_000; // a floor, not a recommendation — see the field's own doc comment
+
 export function buildHermesExecutionConfig(
   env: RawHermesExecutionEnv = {
     HERMES_STRATEGY_REGISTRY_PATH: process.env.HERMES_STRATEGY_REGISTRY_PATH,
@@ -284,6 +325,10 @@ export function buildHermesExecutionConfig(
     HERMES_MAX_TRADE_QUANTITY: process.env.HERMES_MAX_TRADE_QUANTITY,
     HERMES_STRATEGY_ID: process.env.HERMES_STRATEGY_ID,
     HERMES_RUNTIME_MODE: process.env.HERMES_RUNTIME_MODE,
+    HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: process.env.HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS,
+    HERMES_TELEGRAM_ENABLED: process.env.HERMES_TELEGRAM_ENABLED,
+    HERMES_TELEGRAM_BOT_TOKEN: process.env.HERMES_TELEGRAM_BOT_TOKEN,
+    HERMES_TELEGRAM_ALLOWED_CHAT_ID: process.env.HERMES_TELEGRAM_ALLOWED_CHAT_ID,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: process.env.HYPERLIQUID_TESTNET_PRIVATE_KEY,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: process.env.HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: process.env.HYPERLIQUID_TESTNET_EXECUTION_ENABLED,
@@ -299,6 +344,7 @@ export function buildHermesExecutionConfig(
     ETORO_USER_KEY: process.env.ETORO_USER_KEY,
     ETORO_DEMO_TEST_INSTRUMENT: process.env.ETORO_DEMO_TEST_INSTRUMENT,
     ETORO_DEMO_TEST_AMOUNT: process.env.ETORO_DEMO_TEST_AMOUNT,
+    ETORO_HTTP_TIMEOUT_MS: process.env.ETORO_HTTP_TIMEOUT_MS,
   },
 ): HermesExecutionConfig {
   const registryPath = env.HERMES_STRATEGY_REGISTRY_PATH
@@ -372,6 +418,13 @@ export function buildHermesExecutionConfig(
 
   // Milestone 8 — Deployment-Ready Runtime Configuration.
   const runtimeMode = parseEnum(env.HERMES_RUNTIME_MODE, SUPPORTED_RUNTIME_MODES, "paper");
+
+  // Prototype V1 — Reliability Fix.
+  const shutdownTimeoutMs = parseInteger(
+    env.HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS,
+    DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    { min: MIN_HTTP_TIMEOUT_MS },
+  );
 
   const tradingSymbolRaw = (env.HERMES_TRADING_SYMBOL || DEFAULT_TRADING_SYMBOL).trim();
   if (tradingSymbolRaw.length === 0) {
@@ -509,6 +562,15 @@ export function buildHermesExecutionConfig(
     etoroTestAmount = parsed;
   }
 
+  // Prototype V1 — Reliability Fix. Always parsed/validated regardless of whether etoro-demo is
+  // the currently selected broker — same defense-in-depth convention as every other format check
+  // in this file.
+  const etoroHttpTimeoutMs = parseInteger(
+    env.ETORO_HTTP_TIMEOUT_MS,
+    DEFAULT_ETORO_HTTP_TIMEOUT_MS,
+    { min: MIN_HTTP_TIMEOUT_MS },
+  );
+
   if (brokerProvider === "etoro-demo") {
     if (etoroEnv !== "demo") {
       throw new ConfigError("BROKER_PROVIDER=etoro-demo requires ETORO_ENV=demo to be set explicitly.");
@@ -521,6 +583,21 @@ export function buildHermesExecutionConfig(
         "BROKER_PROVIDER=etoro-demo requires ETORO_DEMO_TEST_AMOUNT to be set explicitly — eToro's API " +
           "documents no confirmed minimum-order-size signal to derive a safe default from.",
       );
+    }
+  }
+
+  // Prototype V1 — minimum direct Telegram integration. Fails closed exactly like
+  // BROKER_PROVIDER=etoro-demo/trading212-demo/hyperliquid-testnet above: enabled without both
+  // required values is a config-build-time error, never a silently no-op bot.
+  const telegramEnabled = parseBoolean(env.HERMES_TELEGRAM_ENABLED, false);
+  const telegramBotToken = env.HERMES_TELEGRAM_BOT_TOKEN || undefined;
+  const telegramAllowedChatId = env.HERMES_TELEGRAM_ALLOWED_CHAT_ID || undefined;
+  if (telegramEnabled) {
+    if (!telegramBotToken) {
+      throw new ConfigError("HERMES_TELEGRAM_ENABLED=true requires HERMES_TELEGRAM_BOT_TOKEN to be set.");
+    }
+    if (!telegramAllowedChatId) {
+      throw new ConfigError("HERMES_TELEGRAM_ENABLED=true requires HERMES_TELEGRAM_ALLOWED_CHAT_ID to be set.");
     }
   }
 
@@ -540,6 +617,7 @@ export function buildHermesExecutionConfig(
       sessionTimezone,
       sessionStart,
       sessionEnd,
+      shutdownTimeoutMs,
     },
     runtimeTrading: {
       symbol: tradingSymbol,
@@ -547,6 +625,11 @@ export function buildHermesExecutionConfig(
       maxQuantity: maxTradeQuantity,
       strategyId,
       mode: runtimeMode,
+    },
+    telegram: {
+      enabled: telegramEnabled,
+      botToken: telegramBotToken,
+      allowedChatId: telegramAllowedChatId,
     },
     hyperliquid: {
       privateKey,
@@ -568,6 +651,7 @@ export function buildHermesExecutionConfig(
       userKey: etoroUserKey,
       testInstrument: etoroTestInstrument,
       testAmount: etoroTestAmount,
+      httpTimeoutMs: etoroHttpTimeoutMs,
     },
   };
 }

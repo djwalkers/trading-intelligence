@@ -43,3 +43,27 @@ export function checkMarketDataCompatibility(
       `Broker(s) that support live rates: ${brokersWithLiveRateSupport().join(", ") || "(none)"}.`,
   };
 }
+
+/**
+ * Prototype V1 — a deliberate, temporary, milestone-scoped exclusion, not a permanent capability
+ * declaration (that's why this lives here as its own explicit check rather than in
+ * broker-capabilities.ts's supportedRuntimeModes, which correctly still lists "demo" as a mode
+ * trading212-demo is structurally compatible with — the adapter's mode-pairing isn't broken, its
+ * real-world reliability right now is).
+ *
+ * Confirmed via live testing (see the Prototype V1 mission report): the adapter connects
+ * successfully and can open a position, but order-fill polling failed with an HTTP 404 partway
+ * through, leaving a real demo position unmanaged (closed manually afterward, outside this
+ * pipeline). Until that's investigated and fixed, Trading212 is excluded from this prototype
+ * regardless of requested mode — remove this single check once repaired, no other change needed.
+ */
+export function checkPrototypeV1BrokerSupport(brokerProvider: BrokerProvider): CompatibilityProblem | undefined {
+  if (brokerProvider !== "trading212-demo") return undefined;
+  return {
+    field: "brokerProvider",
+    message:
+      'Trading212 is not supported for Prototype V1 — live testing confirmed the adapter\'s order-fill ' +
+      "polling can fail (HTTP 404) after a real position is opened, leaving it unmanaged. Select a " +
+      'different BROKER_PROVIDER ("local", "hyperliquid-testnet", or "etoro-demo") until this is fixed.',
+  };
+}

@@ -20,6 +20,7 @@ const TEST_CONFIG: EtoroDemoConfig = {
   userKey: TEST_USER_KEY,
   testInstrument: "BTC",
   testAmount: 50,
+  httpTimeoutMs: 10_000,
 };
 
 function jsonResponse(status: number, body: unknown): Response {

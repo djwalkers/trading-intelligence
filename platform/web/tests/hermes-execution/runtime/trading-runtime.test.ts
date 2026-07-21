@@ -126,6 +126,7 @@ function makeRuntime(
     marketHoursPolicy?: MarketHoursPolicy;
     intervalMs?: number;
     immediateFirstRun?: boolean;
+    shutdownTimeoutMs?: number;
   } = {},
 ): RuntimeHarness {
   const broker = makeMockBroker(overrides.openPositions ?? []);
@@ -153,6 +154,7 @@ function makeRuntime(
     clock,
     intervalMs: overrides.intervalMs ?? 10_000,
     immediateFirstRun: overrides.immediateFirstRun ?? true,
+    shutdownTimeoutMs: overrides.shutdownTimeoutMs,
   });
 
   return { runtime, broker, clock, lifecycleService, auditTrail };
@@ -449,6 +451,86 @@ describe("TradingRuntime — graceful shutdown while a cycle is active", () => {
     expect(runtime.getStatus().state).toBe("STOPPED");
     expect(broker.placeMarketOrder).toHaveBeenCalledOnce(); // the in-flight cycle ran to completion
     expect(runtime.getStatus().successfulRunCount).toBe(1);
+  });
+});
+
+describe("TradingRuntime — bounded shutdown timeout (Prototype V1 reliability fix)", () => {
+  it("a cycle that finishes well within the timeout stops normally, recording timedOut: false", async () => {
+    const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    const gate = makeGate();
+    const { runtime, clock, auditTrail } = makeRuntime({
+      marketDataProvider: new GatedMarketDataProvider(inner, gate.promise),
+      shutdownTimeoutMs: 30_000,
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+    expect(runtime.getStatus().isCycleRunning).toBe(true);
+
+    const stopPromise = runtime.stop();
+    gate.resolve();
+    await stopPromise;
+
+    expect(runtime.getStatus().state).toBe("STOPPED");
+    const events = await auditTrail.getEvents();
+    const stopped = events.find((e) => e.eventType === "TRADING_RUNTIME_STOPPED");
+    expect(stopped?.details).toEqual({ timedOut: false });
+  });
+
+  it("an in-flight cycle that never finishes forces STOPPED once shutdownTimeoutMs elapses, recording timedOut: true", async () => {
+    const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    const gate = makeGate(); // deliberately never resolved in this test
+    const { runtime, clock, auditTrail } = makeRuntime({
+      marketDataProvider: new GatedMarketDataProvider(inner, gate.promise),
+      shutdownTimeoutMs: 30_000,
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+    expect(runtime.getStatus().isCycleRunning).toBe(true);
+
+    const stopPromise = runtime.stop();
+    await flushMicrotasks();
+    expect(runtime.getStatus().state).toBe("STOPPING"); // still waiting, cycle never resolved
+
+    await clock.advance(30_000); // fires the shutdown-timeout timer, not the (already-cancelled) scheduler
+    await stopPromise; // now resolves — forced, not abandoned forever
+
+    expect(runtime.getStatus().state).toBe("STOPPED");
+    const events = await auditTrail.getEvents();
+    const stopped = events.find((e) => e.eventType === "TRADING_RUNTIME_STOPPED");
+    expect(stopped?.details).toEqual({ timedOut: true });
+
+    // The abandoned cycle is still "running" as far as isCycleRunning is concerned — stop() forced
+    // STOPPED without cancelling it, exactly as documented.
+    expect(runtime.getStatus().isCycleRunning).toBe(true);
+
+    // Resolving the gate afterwards must not crash anything — the cycle quietly finishes its own
+    // bookkeeping (finally block) even though the runtime has already moved on.
+    gate.resolve();
+    await flushMicrotasks();
+    expect(runtime.getStatus().isCycleRunning).toBe(false);
+    expect(runtime.getStatus().successfulRunCount).toBe(1);
+  });
+
+  it("uses the default 30s bound when shutdownTimeoutMs is not supplied", async () => {
+    const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    const gate = makeGate();
+    const { runtime, clock } = makeRuntime({
+      marketDataProvider: new GatedMarketDataProvider(inner, gate.promise),
+      // shutdownTimeoutMs omitted entirely
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    const stopPromise = runtime.stop();
+    await clock.advance(29_999);
+    expect(runtime.getStatus().state).toBe("STOPPING"); // not yet forced
+
+    await clock.advance(1);
+    await stopPromise;
+    expect(runtime.getStatus().state).toBe("STOPPED"); // forced at the 30s default
   });
 });
 

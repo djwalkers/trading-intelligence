@@ -11,6 +11,7 @@ const BASE_CONFIG: TradingSchedulerConfig = {
   sessionTimezone: "America/New_York",
   sessionStart: "09:30",
   sessionEnd: "16:00",
+  shutdownTimeoutMs: 30_000,
 };
 
 describe("MarketHoursPolicyFactory.create", () => {

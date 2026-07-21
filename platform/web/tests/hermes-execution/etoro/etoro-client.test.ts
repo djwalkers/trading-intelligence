@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EtoroApiError, EtoroClient, ETORO_BASE_URL } from "@/lib/hermes-execution/etoro/etoro-client";
+import { EtoroApiError, EtoroClient, EtoroTimeoutError, ETORO_BASE_URL } from "@/lib/hermes-execution/etoro/etoro-client";
 
 const API_KEY = "test-api-key-value";
 const USER_KEY = "test-user-key-value";
@@ -203,5 +203,105 @@ describe("EtoroClient", () => {
       expect(message).not.toContain(API_KEY);
       expect(message).not.toContain(USER_KEY);
     }
+  });
+});
+
+// Prototype V1 — Reliability Fix. Confirmed via live testing (see the mission report) that an
+// unbounded eToro request can hang a trading cycle — and, transitively, TradingRuntime.stop() —
+// indefinitely. Every test here uses fake timers so "time passes without a response" never involves
+// a real wait.
+describe("EtoroClient — bounded request timeout", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Simulates a real fetch() honouring an AbortSignal: the returned promise only ever settles
+   * (by rejecting, exactly like a real aborted fetch) when the signal passed to it fires — it never
+   * resolves on its own, modelling a request that never gets a response. */
+  function hangingFetch(): ReturnType<typeof vi.fn> {
+    return vi.fn((_url: URL, init: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          const error = new Error("The operation was aborted.");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+    });
+  }
+
+  it("a request completing well within the timeout succeeds normally", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { instrumentDisplayDatas: [] }));
+    const client = new EtoroClient(API_KEY, USER_KEY, 5_000);
+    await expect(client.searchInstruments("BTC")).resolves.toEqual({ instrumentDisplayDatas: [] });
+  });
+
+  it("throws a typed EtoroTimeoutError once the configured timeout elapses with no response", async () => {
+    fetchMock.mockImplementation(hangingFetch());
+    const client = new EtoroClient(API_KEY, USER_KEY, 5_000);
+
+    const pending = client.searchInstruments("BTC");
+    const assertion = expect(pending).rejects.toBeInstanceOf(EtoroTimeoutError);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+  });
+
+  it("the timeout error names the operation and configured timeout, never the URL, headers, or body", async () => {
+    fetchMock.mockImplementation(hangingFetch());
+    const client = new EtoroClient(API_KEY, USER_KEY, 5_000);
+
+    const pending = client.searchInstruments("BTC");
+    const check = (async () => {
+      try {
+        await pending;
+        throw new Error("expected searchInstruments to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(EtoroTimeoutError);
+        const timeoutError = error as EtoroTimeoutError;
+        expect(timeoutError.operation).toBe("searchInstruments");
+        expect(timeoutError.timeoutMs).toBe(5_000);
+        expect(timeoutError.message).toBe("eToro searchInstruments timed out after 5000ms.");
+        expect(timeoutError.message).not.toContain(API_KEY);
+        expect(timeoutError.message).not.toContain(USER_KEY);
+        expect(timeoutError.message).not.toContain(ETORO_BASE_URL);
+      }
+    })();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await check;
+  });
+
+  it("defaults to a 10s timeout when the caller supplies none", async () => {
+    fetchMock.mockImplementation(hangingFetch());
+    const client = new EtoroClient(API_KEY, USER_KEY); // no timeoutMs argument
+
+    const pending = client.searchInstruments("BTC");
+    const assertion = expect(pending).rejects.toMatchObject({ timeoutMs: 10_000 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+  });
+
+  it("does not time out prematurely — a response arriving just before the bound still succeeds", async () => {
+    let resolveFetch!: (response: Response) => void;
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const client = new EtoroClient(API_KEY, USER_KEY, 5_000);
+
+    const pending = client.searchInstruments("BTC");
+    await vi.advanceTimersByTimeAsync(4_000); // well before the 5s bound
+    resolveFetch(jsonResponse(200, { instrumentDisplayDatas: [] }));
+    await expect(pending).resolves.toEqual({ instrumentDisplayDatas: [] });
   });
 });

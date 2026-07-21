@@ -40,7 +40,15 @@ export interface TradingRuntimeDeps {
   clock: SchedulerClock;
   intervalMs: number;
   immediateFirstRun: boolean;
+  /** Prototype V1 — Reliability Fix. Upper bound (ms) stop() will ever wait for an in-flight cycle
+   * before proceeding to STOPPED regardless — confirmed via live testing that an unbounded wait
+   * here can hang indefinitely if a single broker HTTP call stalls (see EtoroClient's own,
+   * independent httpTimeoutMs bound — the two work together: this is a backstop for anything else
+   * that might be slow, not a replacement for bounding the HTTP call itself). Defaults to 30000. */
+  shutdownTimeoutMs?: number;
 }
+
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -111,23 +119,52 @@ export class TradingRuntime {
   }
 
   /** Stops scheduling new cycles immediately, then waits for any currently-active cycle to finish
-   * before resolving — a graceful shutdown never abandons an in-flight cycle. Safe to call from
-   * RUNNING or PAUSED; invalid (throws) from STOPPED or STOPPING (including a second concurrent
-   * stop() call — see the CLI's own signal-handler de-duplication for why that should never happen
-   * via SIGINT/SIGTERM in practice). */
+   * before resolving — a graceful shutdown never abandons an in-flight cycle *as long as it
+   * finishes within shutdownTimeoutMs* (default 30s; see TradingRuntimeDeps' own doc comment).
+   * Confirmed via live testing that an unbounded wait here can hang forever if a single broker HTTP
+   * call stalls — past that bound, this proceeds to STOPPED anyway rather than hanging the process,
+   * recording `details.timedOut: true` on the TRADING_RUNTIME_STOPPED audit event so an abandoned
+   * cycle is visible, never silent. Safe to call from RUNNING or PAUSED; invalid (throws) from
+   * STOPPED or STOPPING (including a second concurrent stop() call — see the CLI's own signal-
+   * handler de-duplication for why that should never happen via SIGINT/SIGTERM in practice). */
   async stop(): Promise<void> {
     assertValidRuntimeTransition(this.state, "STOPPING");
     this.state = "STOPPING";
     this.scheduler?.stop();
     this.scheduler = null;
 
-    if (this.activeCyclePromise) {
-      await this.activeCyclePromise;
-    }
+    const timedOut = await this.awaitActiveCycleWithTimeout(this.deps.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
 
     this.state = "STOPPED";
     this.stoppedAt = this.deps.clock.now().toISOString();
-    await this.recordAudit("TRADING_RUNTIME_STOPPED", {});
+    await this.recordAudit("TRADING_RUNTIME_STOPPED", { timedOut });
+  }
+
+  /** Races the currently-active cycle (if any) against a bound, using the same SchedulerClock
+   * already used for ticks — so tests can simulate "time passes without the cycle resolving"
+   * deterministically via a fake clock, with no real waiting. Returns true only if the bound was
+   * reached before the cycle finished; the cycle itself is never cancelled or aborted here (it may
+   * still complete later, updating counters/lastResult/lastError as normal — see attemptCycle's own
+   * finally block) — this only bounds how long *stop()* waits for it. */
+  private awaitActiveCycleWithTimeout(timeoutMs: number): Promise<boolean> {
+    const activeCyclePromise = this.activeCyclePromise;
+    if (!activeCyclePromise) return Promise.resolve(false);
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = this.deps.clock.scheduleOnce(() => {
+        if (settled) return;
+        settled = true;
+        resolve(true);
+      }, timeoutMs);
+
+      activeCyclePromise.then(() => {
+        if (settled) return;
+        settled = true;
+        timer.cancel();
+        resolve(false);
+      });
+    });
   }
 
   /**

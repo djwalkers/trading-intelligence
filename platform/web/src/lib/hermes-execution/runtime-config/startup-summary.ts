@@ -27,6 +27,9 @@ export interface RedactedStartupSummary {
   immediateFirstRun: boolean;
   marketHoursPolicy: MarketHoursPolicyType;
   marketHoursTimezone: string;
+  /** Presence-only, same convention as brokerCredentialsConfigured — never the bot token or chat id
+   * themselves (see config.ts's own TelegramConfig doc comment for why neither is ever printed). */
+  telegramConfigured: boolean;
 }
 
 /** Presence-only check against the already-parsed config (never re-reads raw process.env) — "are
@@ -65,5 +68,6 @@ export function buildRedactedStartupSummary(config: HermesExecutionConfig, strat
     immediateFirstRun: config.scheduler.immediateFirstRun,
     marketHoursPolicy: config.scheduler.marketHoursPolicy,
     marketHoursTimezone: config.scheduler.sessionTimezone,
+    telegramConfigured: config.telegram.enabled,
   };
 }

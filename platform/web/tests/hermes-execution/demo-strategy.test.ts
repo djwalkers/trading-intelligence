@@ -43,6 +43,10 @@ describe("HermesExecutionConfig — demo mode defaults", () => {
     HERMES_MAX_TRADE_QUANTITY: undefined,
     HERMES_STRATEGY_ID: undefined,
     HERMES_RUNTIME_MODE: undefined,
+    HERMES_RUNTIME_SHUTDOWN_TIMEOUT_MS: undefined,
+    HERMES_TELEGRAM_ENABLED: undefined,
+    HERMES_TELEGRAM_BOT_TOKEN: undefined,
+    HERMES_TELEGRAM_ALLOWED_CHAT_ID: undefined,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: undefined,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: undefined,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: undefined,
@@ -58,6 +62,7 @@ describe("HermesExecutionConfig — demo mode defaults", () => {
   ETORO_USER_KEY: undefined,
   ETORO_DEMO_TEST_INSTRUMENT: undefined,
   ETORO_DEMO_TEST_AMOUNT: undefined,
+  ETORO_HTTP_TIMEOUT_MS: undefined,
   };
 
   it("defaults DEMO_EXECUTION_MODE to false when unset", () => {

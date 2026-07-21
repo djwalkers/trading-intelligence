@@ -33,10 +33,11 @@ describe("validateStartup — valid default-safe configuration", () => {
 });
 
 describe("validateStartup — supported broker/mode combinations", () => {
+  // trading212-demo is deliberately excluded here — see "Trading212 is rejected for Prototype V1"
+  // below; its mode-pairing is structurally fine, it's excluded for an orthogonal reason.
   it.each([
     ["local", "paper"],
     ["hyperliquid-testnet", "testnet"],
-    ["trading212-demo", "demo"],
     ["etoro-demo", "demo"],
   ] as const)("%s + %s passes mode compatibility", (brokerProvider, runtimeMode) => {
     const result = validateStartup({
@@ -61,6 +62,22 @@ describe("validateStartup — unsupported broker/mode combinations", () => {
     });
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.problems.some((p) => p.field === "runtimeMode")).toBe(true);
+  });
+});
+
+describe("validateStartup — Trading212 is rejected for Prototype V1", () => {
+  it("fails closed for trading212-demo even with its own correctly-supported mode (demo)", () => {
+    const result = validateStartup({
+      runtimeMode: "demo",
+      brokerProvider: "trading212-demo",
+      marketDataProvider: "mock",
+      strategyId: undefined,
+      availableStrategies: [makeStrategy()],
+    });
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.problems.some((p) => p.field === "brokerProvider" && /Prototype V1/.test(p.message))).toBe(true);
+    }
   });
 });
 

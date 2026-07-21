@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { checkMarketDataCompatibility, checkModeCompatibility } from "@/lib/hermes-execution/runtime-config/compatibility";
+import {
+  checkMarketDataCompatibility,
+  checkModeCompatibility,
+  checkPrototypeV1BrokerSupport,
+} from "@/lib/hermes-execution/runtime-config/compatibility";
 import { SUPPORTED_BROKER_PROVIDERS, SUPPORTED_RUNTIME_MODES, type BrokerProvider, type RuntimeMode } from "@/lib/hermes-execution/config";
 import { BROKER_CAPABILITIES } from "@/lib/hermes-execution/runtime-config/broker-capabilities";
 
@@ -52,6 +56,22 @@ describe("checkMarketDataCompatibility", () => {
       expect(problem).toBeDefined();
       expect(problem?.field).toBe("marketDataProvider");
       expect(problem?.message).toMatch(/live rates/);
+    }
+  });
+});
+
+describe("checkPrototypeV1BrokerSupport — Trading212 excluded for Prototype V1", () => {
+  it("rejects trading212-demo, citing the confirmed order-fill-polling failure", () => {
+    const problem = checkPrototypeV1BrokerSupport("trading212-demo");
+    expect(problem).toBeDefined();
+    expect(problem?.field).toBe("brokerProvider");
+    expect(problem?.message).toMatch(/not supported for Prototype V1/);
+    expect(problem?.message).toMatch(/404/);
+  });
+
+  it("does not affect any other broker", () => {
+    for (const provider of ["local", "hyperliquid-testnet", "etoro-demo"] as const) {
+      expect(checkPrototypeV1BrokerSupport(provider)).toBeUndefined();
     }
   });
 });
