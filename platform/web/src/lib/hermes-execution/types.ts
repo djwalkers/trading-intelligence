@@ -223,7 +223,24 @@ export type AuditEventType =
   | "TRADE_CLOSED"
   | "TRADE_EXECUTION_FAILED"
   | "TRADE_CLOSE_FAILED"
-  | "TRADE_EXCURSION_UPDATED";
+  | "TRADE_EXCURSION_UPDATED"
+  // Milestone 7 — 24/7 Scheduler & Runtime Control. TradingRuntime's own lifecycle (start/stop/
+  // pause/resume) and each scheduled cycle's outcome (started/completed/failed/skipped-for-one-of-
+  // three-reasons) — a third, parallel audit layer alongside Milestone 6's TRADE_* events (which
+  // still fire exactly as before, from inside the same runMarketDecisionCycleWithLifecycle call a
+  // TRADING_CYCLE_STARTED/COMPLETED/FAILED pair wraps). No "TRADING_RUNTIME_STOPPING" event —
+  // TRADING_RUNTIME_STOPPED fires once shutdown is actually complete (any in-flight cycle has
+  // finished), not when it merely begins.
+  | "TRADING_RUNTIME_STARTED"
+  | "TRADING_RUNTIME_STOPPED"
+  | "TRADING_RUNTIME_PAUSED"
+  | "TRADING_RUNTIME_RESUMED"
+  | "TRADING_CYCLE_STARTED"
+  | "TRADING_CYCLE_COMPLETED"
+  | "TRADING_CYCLE_FAILED"
+  | "TRADING_CYCLE_SKIPPED_OVERLAP"
+  | "TRADING_CYCLE_SKIPPED_PAUSED"
+  | "TRADING_CYCLE_SKIPPED_MARKET_CLOSED";
 
 export interface AuditEvent {
   timestamp: string;

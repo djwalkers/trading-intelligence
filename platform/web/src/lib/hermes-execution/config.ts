@@ -35,6 +35,14 @@ export type EtoroEnv = (typeof SUPPORTED_ETORO_ENVS)[number];
 export const SUPPORTED_MARKET_DATA_PROVIDERS = ["mock", "live"] as const;
 export type MarketDataProviderType = (typeof SUPPORTED_MARKET_DATA_PROVIDERS)[number];
 
+// Milestone 7 — 24/7 Scheduler & Runtime Control. "always-open" (the default — correct for the
+// BTC-via-eToro instrument this pipeline actually trades today) and "weekday-session" (a simple
+// configurable single-session-per-day policy — see runtime/market-hours-policy.ts for exactly what
+// it does and doesn't handle). No "exchange-calendar" or holiday-aware value exists — explicitly
+// out of this milestone's scope.
+export const SUPPORTED_MARKET_HOURS_POLICIES = ["always-open", "weekday-session"] as const;
+export type MarketHoursPolicyType = (typeof SUPPORTED_MARKET_HOURS_POLICIES)[number];
+
 const PRIVATE_KEY_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
@@ -85,6 +93,32 @@ export interface EtoroDemoConfig {
   testAmount: number | undefined;
 }
 
+// Milestone 7 — 24/7 Scheduler & Runtime Control. Raw config only — turning this into a live
+// MarketHoursPolicy object is runtime/market-hours-policy-factory.ts's job, not config.ts's (same
+// "config holds primitives, a *Factory builds the live object" split as BrokerProvider/
+// MarketDataProviderType above).
+export interface TradingSchedulerConfig {
+  /** Defaults to false — the continuous runtime never starts on its own; opting in requires
+   * explicit configuration, matching this pipeline's existing "nothing runs unless explicitly
+   * enabled" convention (DEMO_EXECUTION_MODE, HYPERLIQUID_TESTNET_EXECUTION_ENABLED, ...). */
+  enabled: boolean;
+  /** Milliseconds between the start of one scheduled cycle attempt and the next. Enforced >=
+   * MIN_SCHEDULER_INTERVAL_MS at config-build time — "a sensible minimum interval to avoid
+   * accidental tight loops." */
+  intervalMs: number;
+  /** Defaults to true — the continuous runtime evaluates once immediately on start() rather than
+   * waiting a full intervalMs for its first cycle. */
+  immediateFirstRun: boolean;
+  marketHoursPolicy: MarketHoursPolicyType;
+  /** Only meaningful when marketHoursPolicy is "weekday-session" — still always parsed/validated
+   * (same defense-in-depth convention as ETORO_ENV's format check above, checked regardless of
+   * whether the value would currently matter). */
+  sessionTimezone: string;
+  /** 24-hour "HH:MM", local to sessionTimezone. */
+  sessionStart: string;
+  sessionEnd: string;
+}
+
 export interface HermesExecutionConfig {
   /** Absolute filesystem path to the Hermes Lab strategy-registry/ directory. Undefined means
    * "not configured" — a distinct, clearly-reported state from "configured but empty." */
@@ -106,6 +140,7 @@ export interface HermesExecutionConfig {
   /** Defaults to "mock". Selects between MockMarketDataProvider and LiveMarketDataProvider
    * (market-data/) for the Milestone 2-4 pipeline. Only "mock" and "live" are valid. */
   marketDataProvider: MarketDataProviderType;
+  scheduler: TradingSchedulerConfig;
   hyperliquid: HyperliquidTestnetConfig;
   trading212: Trading212DemoConfig;
   etoro: EtoroDemoConfig;
@@ -119,6 +154,13 @@ interface RawHermesExecutionEnv {
   HERMES_MAX_OPEN_POSITIONS: string | undefined;
   BROKER_PROVIDER: string | undefined;
   HERMES_MARKET_DATA_PROVIDER: string | undefined;
+  HERMES_SCHEDULER_ENABLED: string | undefined;
+  HERMES_SCHEDULER_INTERVAL_MS: string | undefined;
+  HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: string | undefined;
+  HERMES_MARKET_HOURS_POLICY: string | undefined;
+  HERMES_MARKET_HOURS_TIMEZONE: string | undefined;
+  HERMES_MARKET_HOURS_SESSION_START: string | undefined;
+  HERMES_MARKET_HOURS_SESSION_END: string | undefined;
   HYPERLIQUID_TESTNET_PRIVATE_KEY: string | undefined;
   HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: string | undefined;
   HYPERLIQUID_TESTNET_EXECUTION_ENABLED: string | undefined;
@@ -154,6 +196,20 @@ const DEFAULT_TRADING212_TEST_ORDER_QUANTITY = 1;
 // instrumentId.
 const DEFAULT_ETORO_TEST_INSTRUMENT = "BTC";
 
+// Milestone 7 — 24/7 Scheduler & Runtime Control.
+const DEFAULT_SCHEDULER_INTERVAL_MS = 60_000; // 1 minute
+// A hard floor, not itself configurable — "set a sensible minimum interval to avoid accidental
+// tight loops" (e.g. a stray "60" meant as seconds, misread as milliseconds, would otherwise arm a
+// 60ms loop hammering the market data provider and broker).
+const MIN_SCHEDULER_INTERVAL_MS = 5_000;
+const DEFAULT_SESSION_TIMEZONE = "America/New_York";
+// A standard US equities regular session — a reasonable default for "a simple policy suitable for
+// equities," not a claim about any specific listed instrument this pipeline currently trades (which
+// is BTC, an always-open market — see SUPPORTED_MARKET_HOURS_POLICIES's own comment).
+const DEFAULT_SESSION_START = "09:30";
+const DEFAULT_SESSION_END = "16:00";
+const HHMM_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
 export function buildHermesExecutionConfig(
   env: RawHermesExecutionEnv = {
     HERMES_STRATEGY_REGISTRY_PATH: process.env.HERMES_STRATEGY_REGISTRY_PATH,
@@ -163,6 +219,13 @@ export function buildHermesExecutionConfig(
     HERMES_MAX_OPEN_POSITIONS: process.env.HERMES_MAX_OPEN_POSITIONS,
     BROKER_PROVIDER: process.env.BROKER_PROVIDER,
     HERMES_MARKET_DATA_PROVIDER: process.env.HERMES_MARKET_DATA_PROVIDER,
+    HERMES_SCHEDULER_ENABLED: process.env.HERMES_SCHEDULER_ENABLED,
+    HERMES_SCHEDULER_INTERVAL_MS: process.env.HERMES_SCHEDULER_INTERVAL_MS,
+    HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: process.env.HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN,
+    HERMES_MARKET_HOURS_POLICY: process.env.HERMES_MARKET_HOURS_POLICY,
+    HERMES_MARKET_HOURS_TIMEZONE: process.env.HERMES_MARKET_HOURS_TIMEZONE,
+    HERMES_MARKET_HOURS_SESSION_START: process.env.HERMES_MARKET_HOURS_SESSION_START,
+    HERMES_MARKET_HOURS_SESSION_END: process.env.HERMES_MARKET_HOURS_SESSION_END,
     HYPERLIQUID_TESTNET_PRIVATE_KEY: process.env.HYPERLIQUID_TESTNET_PRIVATE_KEY,
     HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS: process.env.HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS,
     HYPERLIQUID_TESTNET_EXECUTION_ENABLED: process.env.HYPERLIQUID_TESTNET_EXECUTION_ENABLED,
@@ -211,6 +274,43 @@ export function buildHermesExecutionConfig(
   // above — there is no fallback branch anywhere downstream that treats an unrecognised value as
   // "mock".
   const marketDataProvider = parseEnum(env.HERMES_MARKET_DATA_PROVIDER, SUPPORTED_MARKET_DATA_PROVIDERS, "mock");
+
+  // Milestone 7 — 24/7 Scheduler & Runtime Control.
+  const schedulerEnabled = parseBoolean(env.HERMES_SCHEDULER_ENABLED, false);
+  const schedulerIntervalMs = parseInteger(
+    env.HERMES_SCHEDULER_INTERVAL_MS,
+    DEFAULT_SCHEDULER_INTERVAL_MS,
+    { min: MIN_SCHEDULER_INTERVAL_MS },
+  );
+  const schedulerImmediateFirstRun = parseBoolean(env.HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN, true);
+  const marketHoursPolicy = parseEnum(env.HERMES_MARKET_HOURS_POLICY, SUPPORTED_MARKET_HOURS_POLICIES, "always-open");
+
+  const sessionTimezone = env.HERMES_MARKET_HOURS_TIMEZONE || DEFAULT_SESSION_TIMEZONE;
+  // Fails fast on a malformed IANA name at config-build time, regardless of whether
+  // marketHoursPolicy is currently "weekday-session" — same defense-in-depth convention as
+  // ETORO_ENV's format check, which validates whenever a value is present, not only when active.
+  try {
+    const _validateTimezone = new Intl.DateTimeFormat("en-US", { timeZone: sessionTimezone });
+    void _validateTimezone;
+  } catch {
+    throw new ConfigError(`HERMES_MARKET_HOURS_TIMEZONE is not a valid IANA timezone name: "${sessionTimezone}".`);
+  }
+
+  const sessionStart = env.HERMES_MARKET_HOURS_SESSION_START || DEFAULT_SESSION_START;
+  const sessionEnd = env.HERMES_MARKET_HOURS_SESSION_END || DEFAULT_SESSION_END;
+  if (!HHMM_PATTERN.test(sessionStart)) {
+    throw new ConfigError(`HERMES_MARKET_HOURS_SESSION_START must be a 24-hour "HH:MM" time, received "${sessionStart}".`);
+  }
+  if (!HHMM_PATTERN.test(sessionEnd)) {
+    throw new ConfigError(`HERMES_MARKET_HOURS_SESSION_END must be a 24-hour "HH:MM" time, received "${sessionEnd}".`);
+  }
+  if (sessionStart >= sessionEnd) {
+    // "HH:MM" 24-hour strings compare correctly lexicographically — no overnight-spanning session
+    // is supported (matches WeekdaySessionMarketHoursPolicy's own constructor check).
+    throw new ConfigError(
+      `HERMES_MARKET_HOURS_SESSION_START ("${sessionStart}") must be strictly before HERMES_MARKET_HOURS_SESSION_END ("${sessionEnd}").`,
+    );
+  }
 
   const privateKey = env.HYPERLIQUID_TESTNET_PRIVATE_KEY || undefined;
   if (privateKey && !PRIVATE_KEY_PATTERN.test(privateKey)) {
@@ -327,6 +427,15 @@ export function buildHermesExecutionConfig(
     strategyMaxOpenPositions,
     brokerProvider,
     marketDataProvider,
+    scheduler: {
+      enabled: schedulerEnabled,
+      intervalMs: schedulerIntervalMs,
+      immediateFirstRun: schedulerImmediateFirstRun,
+      marketHoursPolicy,
+      sessionTimezone,
+      sessionStart,
+      sessionEnd,
+    },
     hyperliquid: {
       privateKey,
       accountAddress,

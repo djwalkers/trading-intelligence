@@ -5,15 +5,15 @@ import { loadEnabledStrategies } from "@/lib/hermes-execution/strategy-loader";
 import { BrokerFactory } from "@/lib/hermes-execution/broker-factory";
 import { EtoroDemoBroker } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { MarketIntelligenceBuilder } from "@/lib/hermes-execution/market-intelligence-builder";
+import { buildMarketDecisionContext } from "@/lib/hermes-execution/build-market-decision-context";
 import type { CandleBias } from "@/lib/hermes-execution/mock-candle-generator";
 import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
-import type { MarketDataProvider, MarketDataSnapshot } from "@/lib/hermes-execution/market-data/market-data-provider";
+import type { MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
 import { runMarketDecisionCycleWithLifecycle } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-runner";
 import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
-import type { InternalStrategy } from "@/lib/hermes-execution/types";
 import type { EtoroResolvedInstrument } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 
 // Milestones 2/3 — Market Decision Integration + Rich Market Context. Proves, end to end, against
@@ -115,37 +115,6 @@ function resolveMarketDataProvider(
   });
 }
 
-/** Builds a full MarketDecisionContext for one evaluation: pulls one self-consistent
- * MarketDataSnapshot from `marketDataProvider` (mock or live, per configuration — this function has
- * no idea which) and hands it to MarketIntelligenceBuilder. MarketDecisionEngine never does any of
- * this itself. Returns the raw snapshot alongside the built context — Milestone 6's lifecycle
- * tracking needs the original snapshot verbatim (TradeLifecycleRecord.marketDataSnapshot), which
- * isn't recoverable from the built MarketDecisionContext alone. */
-async function buildContext(
-  marketDataProvider: MarketDataProvider,
-  broker: EtoroDemoBroker,
-  instrument: string,
-  strategy: InternalStrategy,
-): Promise<{
-  snapshot: MarketDataSnapshot;
-  context: Awaited<ReturnType<(typeof MarketIntelligenceBuilder)["build"]>>;
-}> {
-  const snapshot = await marketDataProvider.getMarketData(instrument);
-  const positionOpen = broker.getOpenPositions().some((p) => p.instrument === instrument);
-
-  const context = MarketIntelligenceBuilder.build({
-    instrument,
-    bid: snapshot.bid,
-    ask: snapshot.ask,
-    positionOpen,
-    strategyId: strategy.strategyId,
-    strategyVersion: strategy.version,
-    strategySourceType: strategy.sourceType,
-    candles: snapshot.candles,
-  });
-  return { snapshot, context };
-}
-
 export async function main(): Promise<void> {
   console.log("Market Decision Integration — Rich Market Context");
   console.log("==================================================");
@@ -239,7 +208,12 @@ export async function main(): Promise<void> {
   // "live", `bias` is passed but ignored (LiveMarketDataProvider only ever reports real bid/ask) —
   // whether this cycle produces a BUY depends on the real market at the moment this runs.
   const firstProvider = resolveMarketDataProvider(config, broker, "bullish");
-  const { snapshot: firstSnapshot, context: firstContext } = await buildContext(firstProvider, broker, instrument, strategy);
+  const { snapshot: firstSnapshot, context: firstContext } = await buildMarketDecisionContext(
+    firstProvider,
+    broker,
+    instrument,
+    strategy,
+  );
   printMarketContext(resolved, firstContext);
   const firstResult = await runMarketDecisionCycleWithLifecycle({
     broker,
@@ -274,7 +248,12 @@ export async function main(): Promise<void> {
         : "--- Re-checking the live market for a second decision cycle (bias not controllable under live data) ---",
     );
     const secondProvider = resolveMarketDataProvider(config, broker, "bearish");
-    const { snapshot: secondSnapshot, context: secondContext } = await buildContext(secondProvider, broker, instrument, strategy);
+    const { snapshot: secondSnapshot, context: secondContext } = await buildMarketDecisionContext(
+      secondProvider,
+      broker,
+      instrument,
+      strategy,
+    );
     printMarketContext(resolved, secondContext);
     const secondResult = await runMarketDecisionCycleWithLifecycle({
       broker,
