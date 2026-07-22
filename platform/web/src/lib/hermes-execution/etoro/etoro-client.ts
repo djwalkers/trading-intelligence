@@ -32,6 +32,7 @@
  * phase doc for the full endpoint-by-endpoint version reasoning.
  */
 import { randomUUID } from "node:crypto";
+import type { MarketTimeframe } from "../market-data/candle-validation";
 
 export const ETORO_BASE_URL = "https://public-api.etoro.com";
 
@@ -113,6 +114,86 @@ export interface EtoroRate {
  */
 export interface EtoroRatesResponse {
   rates: EtoroRate[];
+}
+
+/**
+ * Phase 2A — Real Historical Candles for Live Market Data. eToro's own interval enum for the
+ * candle-history endpoint below — CONFIRMED as a real, officially documented enum name from
+ * eToro's API reference (api-portal.etoro.com/api-reference/market-data/
+ * get-instrument-candle-history), but that page was reached via an automated fetch-and-summarize
+ * tool, not read as raw OpenAPI JSON, and — like every DTO in this file marked "documentation
+ * only" — has never been checked against a genuine API response (no eToro credentials were
+ * available while building this adapter; see this file's own top-of-file confidence note).
+ */
+export type EtoroCandleInterval =
+  | "OneMinute"
+  | "FiveMinutes"
+  | "TenMinutes"
+  | "FifteenMinutes"
+  | "ThirtyMinutes"
+  | "OneHour"
+  | "FourHours"
+  | "OneDay"
+  | "OneWeek";
+
+/** Translates this pipeline's own generic MarketTimeframe (config.ts's HERMES_MARKET_TIMEFRAME —
+ * "1h", "1d", ...) into eToro's own interval enum — the "broker translates" step for timeframes,
+ * exactly mirroring how EtoroDemoBroker.resolveInstrument translates a human-readable symbol into
+ * eToro's own instrumentId. Kept here, next to EtoroCandleInterval, rather than in
+ * candle-validation.ts (which stays eToro-agnostic) or config.ts (which stays broker-agnostic). */
+const TIMEFRAME_TO_ETORO_INTERVAL: Record<MarketTimeframe, EtoroCandleInterval> = {
+  "1m": "OneMinute",
+  "5m": "FiveMinutes",
+  "10m": "TenMinutes",
+  "15m": "FifteenMinutes",
+  "30m": "ThirtyMinutes",
+  "1h": "OneHour",
+  "4h": "FourHours",
+  "1d": "OneDay",
+  "1w": "OneWeek",
+};
+
+export function mapTimeframeToEtoroInterval(timeframe: MarketTimeframe): EtoroCandleInterval {
+  return TIMEFRAME_TO_ETORO_INTERVAL[timeframe];
+}
+
+/**
+ * GET .../history/candles/{direction}/{interval}/{candlesCount} response entry — UNCONFIRMED
+ * against a live response (see EtoroCandleInterval's own doc comment above). `instrumentID`
+ * (capital ID) is assumed to match this file's other CONFIRMED endpoints' casing convention
+ * (search, rates) — a reasonable but itself-unconfirmed assumption. `fromDate` is kept as `string`
+ * (an ISO-8601-shaped timestamp per the documentation), never parsed further here, matching
+ * EtoroRate.date's own convention.
+ */
+export interface EtoroCandleEntry {
+  instrumentID: number;
+  fromDate: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/** One instrument's candle block within the response's outer `candles` array — the documented
+ * shape nests a lowercase-d `instrumentId` (distinct from EtoroCandleEntry's own capital-ID
+ * `instrumentID` — the exact same inconsistent-casing pattern this file's top-of-file note already
+ * warns about) plus a second, inner `candles` array of the actual OHLCV rows, alongside aggregate
+ * range/volume fields this adapter has no use for and doesn't model. UNCONFIRMED — see
+ * EtoroCandleInterval's own doc comment. */
+export interface EtoroCandleInstrumentBlock {
+  instrumentId: number;
+  candles: EtoroCandleEntry[];
+  rangeOpen?: number;
+  rangeClose?: number;
+  rangeHigh?: number;
+  rangeLow?: number;
+  volume?: number;
+}
+
+export interface EtoroCandleHistoryResponse {
+  interval: EtoroCandleInterval;
+  candles: EtoroCandleInstrumentBlock[];
 }
 
 // --- Trading/portfolio DTOs ------------------------------------------------------------------
@@ -343,6 +424,31 @@ export class EtoroClient {
     return this.request("getRates", "GET", "/api/v1/market-data/instruments/rates", {
       query: { instrumentIds: instrumentIds.join(",") },
     });
+  }
+
+  /**
+   * Phase 2A — Real Historical Candles for Live Market Data.
+   * GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}
+   * — historical OHLCV candles. A real, officially documented eToro endpoint (api-portal.etoro.com),
+   * not an invented one — but UNCONFIRMED against a live response; see EtoroCandleInterval's own
+   * doc comment for exactly what that means here. `candlesCount` is capped at 1000 per eToro's own
+   * documentation; this adapter never requests more than HERMES_MARKET_CANDLE_COUNT asks for
+   * (config.ts's own default is 200, comfortably under that cap). `direction` defaults to "asc" —
+   * this pipeline's own Candle[] convention is chronological, oldest-first (mock-candle-generator.ts
+   * follows the same convention), so requesting ascending avoids a separate reversal step; callers
+   * needing the most recent bars only would pass "desc" instead.
+   */
+  getHistoricalCandles(
+    instrumentId: number,
+    interval: EtoroCandleInterval,
+    candlesCount: number,
+    direction: "asc" | "desc" = "asc",
+  ): Promise<EtoroCandleHistoryResponse> {
+    return this.request(
+      "getHistoricalCandles",
+      "GET",
+      `/api/v1/market-data/instruments/${instrumentId}/history/candles/${direction}/${interval}/${candlesCount}`,
+    );
   }
 
   /** GET /api/v1/trading/info/demo/portfolio — demo positions, pending orders, and account status.

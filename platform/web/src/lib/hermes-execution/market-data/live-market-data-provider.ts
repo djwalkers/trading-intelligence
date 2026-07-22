@@ -1,14 +1,24 @@
 import { logger } from "@/lib/logger/logger";
-import { generateSyntheticCandles } from "../mock-candle-generator";
+import type { Candle } from "../types";
+import { validateHistoricalCandles, type MarketTimeframe } from "./candle-validation";
 import { MarketDataProviderError, type MarketDataProvider, type MarketDataSnapshot } from "./market-data-provider";
 
 // Milestone 5 — Live Market Data Integration. The "second implementation suitable for live data"
-// this milestone calls for. Deliberately depends only on the narrow `RateSource` shape below, never
-// on a concrete broker class — EtoroDemoBroker.getRate already satisfies this shape structurally
-// (TypeScript structural typing needs no explicit "implements"), so this file never imports
-// EtoroDemoBroker or any other broker at all. Any future real quote source (a public market-data
-// API client, a different broker) can be substituted purely by passing a different RateSource,
-// without touching this class.
+// this milestone calls for. Deliberately depends only on the narrow RateSource/CandleHistorySource
+// shapes below, never on a concrete broker class — EtoroDemoBroker.getRate/getHistoricalCandles
+// already satisfy these shapes structurally (TypeScript structural typing needs no explicit
+// "implements"), so this file never imports EtoroDemoBroker or any other broker at all. Any future
+// real quote/candle source (a public market-data API client, a different broker) can be substituted
+// purely by passing a different source, without touching this class.
+//
+// Phase 2A — Real Historical Candles for Live Market Data. Previously (Milestone 5) the OHLCV
+// candle *history* was a synthetic series anchored to the live mid-price — a stated, deliberate
+// limitation (MarketIntelligenceBuilder's EMA/RSI/trend indicators were computed over synthetic
+// data even though bid/ask was real). That limitation is now removed: candles come from the same
+// connected source's own getHistoricalCandles(), validated (candle-validation.ts) before use.
+// `latestPrice` still comes from getRate() alone, per this phase's own instruction — the OHLCV
+// history and "the current executable price" remain two independently-sourced reads from the same
+// underlying connection, never merged or cross-derived.
 
 /** The minimal live-quote capability this provider needs — small enough that a broker's own
  * getRate(), or a standalone public API client, can satisfy it without adapting anything. */
@@ -16,39 +26,53 @@ export interface RateSource {
   getRate(instrument: string): Promise<{ bid: number; ask: number }>;
 }
 
-export interface LiveMarketDataProviderOptions {
-  candleCount?: number;
-  candleIntervalMinutes?: number;
+/** The minimal historical-candle capability this provider needs. `timeframe` is this pipeline's
+ * own generic MarketTimeframe (candle-validation.ts) — a concrete source (EtoroDemoBroker) is
+ * responsible for translating it into its own API's interval vocabulary, exactly as it already
+ * translates a human-readable symbol into its own instrumentId for getRate(). Returned candles
+ * need not be pre-sorted or pre-validated — this provider sorts defensively and always validates
+ * (see getMarketData) regardless of what the source returns. */
+export interface CandleHistorySource {
+  getHistoricalCandles(instrument: string, timeframe: MarketTimeframe, count: number): Promise<Candle[]>;
 }
 
-const DEFAULT_CANDLE_COUNT = 60;
-const DEFAULT_CANDLE_INTERVAL_MINUTES = 60;
+export interface LiveMarketDataProviderOptions {
+  timeframe?: MarketTimeframe;
+  candleCount?: number;
+  maxCandleAgeSeconds?: number;
+}
+
+// Defensive fallbacks only — production wiring (runtime-dependency-factory.ts, market-decide.ts)
+// always supplies these three explicitly from HermesExecutionConfig.marketData, which has its own,
+// independently-documented defaults (config.ts). Mirrors config.ts's own DEFAULT_MARKET_TIMEFRAME/
+// DEFAULT_MARKET_CANDLE_COUNT/derived-max-age-for-1h so a direct construction without options
+// (tests, ad hoc scripts) still behaves sensibly.
+const DEFAULT_TIMEFRAME: MarketTimeframe = "1h";
+const DEFAULT_CANDLE_COUNT = 200;
+const DEFAULT_MAX_CANDLE_AGE_SECONDS = 7_200;
 
 function isValidPrice(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
-/**
- * Live bid/ask/spread/latestPrice/volume are sourced from a real, connected RateSource on every
- * call — nothing here is cached across calls, so each getMarketData() reflects the market at the
- * moment it was called. The OHLCV candle *history* remains a synthetic series anchored to the live
- * mid-price (the same technique market-decide.ts's old buildContext did inline) — no real
- * historical OHLCV feed is wired up yet. This is a real limitation, stated plainly rather than
- * disguised: MarketIntelligenceBuilder's EMA/RSI/trend indicators are computed over that anchored-
- * synthetic history, not genuine historical price action, even though the current bid/ask driving
- * entry/exit decisions is real. A future revision can replace just the candle-generation line below
- * with a real historical-candle fetch without changing this class's public shape at all.
- */
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class LiveMarketDataProvider implements MarketDataProvider {
   constructor(
-    private readonly rateSource: RateSource,
+    private readonly source: RateSource & CandleHistorySource,
     private readonly options: LiveMarketDataProviderOptions = {},
   ) {}
 
   async getMarketData(instrument: string): Promise<MarketDataSnapshot> {
+    const timeframe = this.options.timeframe ?? DEFAULT_TIMEFRAME;
+    const candleCount = this.options.candleCount ?? DEFAULT_CANDLE_COUNT;
+    const maxCandleAgeSeconds = this.options.maxCandleAgeSeconds ?? DEFAULT_MAX_CANDLE_AGE_SECONDS;
+
     let rate: { bid: number; ask: number };
     try {
-      rate = await this.rateSource.getRate(instrument);
+      rate = await this.source.getRate(instrument);
     } catch (error) {
       // No fallback to a mock/synthetic quote happens here or anywhere upstream — a failed live
       // fetch always surfaces as a thrown MarketDataProviderError, never a silently-substituted
@@ -60,12 +84,10 @@ export class LiveMarketDataProvider implements MarketDataProvider {
         provider: "live",
         instrument,
         fallbackOccurred: false,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: toErrorMessage(error),
       });
       throw new MarketDataProviderError(
-        `LiveMarketDataProvider failed to fetch a rate for "${instrument}": ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `LiveMarketDataProvider failed to fetch a rate for "${instrument}": ${toErrorMessage(error)}`,
         "fetch-failed",
         { cause: error },
       );
@@ -83,43 +105,85 @@ export class LiveMarketDataProvider implements MarketDataProvider {
         "malformed-data",
       );
     }
-
-    const now = new Date();
     const midPrice = (rate.bid + rate.ask) / 2;
-    const candles = generateSyntheticCandles({
-      instrument,
-      bias: "sideways",
-      count: this.options.candleCount ?? DEFAULT_CANDLE_COUNT,
-      intervalMinutes: this.options.candleIntervalMinutes ?? DEFAULT_CANDLE_INTERVAL_MINUTES,
-      startPrice: midPrice,
-      endTimestamp: now,
-    });
-    const latest = candles[candles.length - 1];
-    const timestamp = now.toISOString();
 
-    // Milestone 5 follow-up — Live Market Data Observability. The one structured log line that
-    // proves a real eToro quote was fetched and used this cycle, distinct from the synthetic
-    // candle-history caveat documented on this class above. Never logs `rate`/headers/credentials —
-    // only the already-public-facing snapshot fields also returned below.
+    let candles: Candle[];
+    try {
+      candles = await this.source.getHistoricalCandles(instrument, timeframe, candleCount);
+    } catch (error) {
+      logger.error("Live historical candle fetch failed — no fallback attempted", {
+        component: "market-data",
+        provider: "live",
+        instrument,
+        timeframe,
+        fallbackOccurred: false,
+        reason: toErrorMessage(error),
+      });
+      // A MarketDataProviderError from a source's own validation (unlikely today — sources fetch
+      // and translate, candle-validation.ts below is where validation actually happens — but never
+      // assumed impossible) is re-thrown as-is rather than double-wrapped.
+      if (error instanceof MarketDataProviderError) throw error;
+      throw new MarketDataProviderError(
+        `LiveMarketDataProvider failed to fetch historical candles for "${instrument}": ${toErrorMessage(error)}`,
+        "fetch-failed",
+        { cause: error },
+      );
+    }
+
+    try {
+      validateHistoricalCandles(candles, instrument, { timeframe, maxCandleAgeSeconds });
+    } catch (error) {
+      logger.error("Live historical candle validation failed — no fallback attempted", {
+        component: "market-data",
+        provider: "live",
+        instrument,
+        timeframe,
+        candleCount: candles.length,
+        fallbackOccurred: false,
+        reason: toErrorMessage(error),
+      });
+      throw error;
+    }
+
+    // Chronological, oldest-first, regardless of what order the source returned — the same
+    // defensive sort candle-validation.ts's own gap/staleness checks already rely on internally,
+    // applied here too since MarketIntelligenceBuilder (the actual indicator consumer) depends on
+    // this exact ordering.
+    const sorted = [...candles].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const first = sorted[0]!;
+    const last = sorted[sorted.length - 1]!;
+    const now = new Date();
+
+    // Phase 2A — Real Historical Candles for Live Market Data. Every successful fetch logs the
+    // full shape needed to prove, from a VPS log stream alone, that real historical candles (not
+    // synthetic ones) were fetched and used: provider, instrument, timeframe, candleCount, the
+    // real candle range (first/lastTimestamp), the last closed candle's own price
+    // (latestClosedPrice), and the independently-fetched live executable price (brokerMidPrice) —
+    // deliberately two distinct price fields, never merged, so a log reader can see both sourced
+    // from the same connection without conflating "closed candle" with "current tradable price".
+    // Never logs the raw rate object, credentials, or headers.
     logger.info("Live market data quote fetched", {
       component: "market-data",
       provider: "live",
       instrument,
-      quoteTimestamp: timestamp,
-      latestPrice: midPrice,
-      candleCount: candles.length,
+      timeframe,
+      candleCount: sorted.length,
+      firstTimestamp: first.timestamp,
+      lastTimestamp: last.timestamp,
+      latestClosedPrice: last.close,
+      brokerMidPrice: midPrice,
       fallbackOccurred: false,
     });
 
     return {
       instrument,
-      timestamp,
-      candles,
+      timestamp: now.toISOString(),
+      candles: sorted,
       bid: rate.bid,
       ask: rate.ask,
       spread: rate.ask - rate.bid,
       latestPrice: midPrice,
-      volume: latest?.volume ?? 0,
+      volume: last.volume,
     };
   }
 }

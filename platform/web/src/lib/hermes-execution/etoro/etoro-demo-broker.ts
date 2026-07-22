@@ -1,5 +1,6 @@
 import {
   EtoroClient,
+  mapTimeframeToEtoroInterval,
   type EtoroDemoPortfolio,
   type EtoroInstrumentSearchResult,
   type EtoroPosition,
@@ -7,7 +8,8 @@ import {
 import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
 import type { EtoroDemoConfig } from "../config";
-import type { Account, CompletedTrade, OrderRequest, PaperPosition } from "../types";
+import type { MarketTimeframe } from "../market-data/candle-validation";
+import type { Account, Candle, CompletedTrade, OrderRequest, PaperPosition } from "../types";
 
 const ORDER_CURRENCY = "usd"; // Every documented request-body example used "usd" — not per-instrument.
 
@@ -60,6 +62,26 @@ export class EtoroRateUnavailableError extends Error {
         : `eToro returned a rate entry for instrument ${instrumentId} but it had no usable bid/ask.`,
     );
     this.name = "EtoroRateUnavailableError";
+  }
+}
+
+/**
+ * Phase 2A — Real Historical Candles for Live Market Data. Thrown when eToro's candle-history
+ * endpoint returns no usable candle block for the resolved instrument. `reason: "absent"` means no
+ * block in the response's outer `candles` array matched the requested instrument at all.
+ * `reason: "empty"` means a block WAS matched but its own nested `candles` array had no entries.
+ * Mirrors EtoroRateUnavailableError's own "absent vs. present-but-unusable" distinction. */
+export class EtoroCandleHistoryUnavailableError extends Error {
+  constructor(
+    public readonly instrumentId: number,
+    public readonly reason: "absent" | "empty",
+  ) {
+    super(
+      reason === "absent"
+        ? `eToro's candle-history response did not include instrument ${instrumentId} at all.`
+        : `eToro returned a candle-history entry for instrument ${instrumentId} but it contained no candles.`,
+    );
+    this.name = "EtoroCandleHistoryUnavailableError";
   }
 }
 
@@ -279,6 +301,48 @@ export class EtoroDemoBroker implements PaperBroker {
       throw new EtoroRateUnavailableError(resolved.instrumentId, "unpriced");
     }
     return { bid: rate.bid, ask: rate.ask };
+  }
+
+  /**
+   * Phase 2A — Real Historical Candles for Live Market Data. Historical OHLCV candles for a
+   * previously resolved instrument — translates `timeframe` into eToro's own interval enum
+   * (mapTimeframeToEtoroInterval) exactly as this method's sibling, getRate(), already translates
+   * a human-readable symbol into eToro's instrumentId via resolveInstrument()/
+   * requireResolvedInstrument(). Returns plain Candle[] (chronological, oldest-first) — this
+   * method only fetches and translates; it deliberately does not validate the result (no NaN/
+   * staleness/gap checks) — that is LiveMarketDataProvider's job (candle-validation.ts), the same
+   * division of responsibility getRate() already has with LiveMarketDataProvider's own
+   * isValidPrice/inverted-rate checks.
+   *
+   * The endpoint's own response nests candles inside a block keyed by (a differently-cased)
+   * `instrumentId` — since this call is already scoped to one instrument via the URL's own
+   * `{instrumentId}` path segment, an exact id match is preferred, but if the response contains
+   * exactly one block and its id doesn't match (a plausible outcome given this DTO is
+   * documentation-only and unconfirmed live — see etoro-client.ts's own EtoroCandleInterval doc
+   * comment), that single block is used rather than treated as "absent" outright.
+   */
+  async getHistoricalCandles(internalInstrument: string, timeframe: MarketTimeframe, count: number): Promise<Candle[]> {
+    const resolved = this.requireResolvedInstrument(internalInstrument);
+    const interval = mapTimeframeToEtoroInterval(timeframe);
+    const response = await this.client.getHistoricalCandles(resolved.instrumentId, interval, count, "asc");
+
+    const blocks = response.candles ?? [];
+    const block =
+      blocks.find((b) => b.instrumentId === resolved.instrumentId) ?? (blocks.length === 1 ? blocks[0] : undefined);
+    if (!block) throw new EtoroCandleHistoryUnavailableError(resolved.instrumentId, "absent");
+
+    const entries = block.candles ?? [];
+    if (entries.length === 0) throw new EtoroCandleHistoryUnavailableError(resolved.instrumentId, "empty");
+
+    return entries.map((entry) => ({
+      symbol: internalInstrument,
+      timestamp: entry.fromDate,
+      open: entry.open,
+      high: entry.high,
+      low: entry.low,
+      close: entry.close,
+      volume: entry.volume,
+    }));
   }
 
   hasResolvedInstrument(internalInstrument: string): boolean {

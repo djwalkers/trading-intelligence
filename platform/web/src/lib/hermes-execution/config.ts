@@ -1,6 +1,12 @@
 import "server-only";
 import * as path from "node:path";
 import { parseBoolean, parseEnum, parseInteger, ConfigError } from "@/lib/config/env";
+import {
+  MIN_REQUIRED_CANDLES,
+  SUPPORTED_MARKET_TIMEFRAMES,
+  TIMEFRAME_DURATIONS_MS,
+  type MarketTimeframe,
+} from "./market-data/candle-validation";
 
 // Kept as its own small config module (mirrors server-config.ts's shape/caching pattern, reuses
 // its parsing primitives) rather than folded into ServerConfig — this whole feature is meant to
@@ -34,6 +40,31 @@ export type EtoroEnv = (typeof SUPPORTED_ETORO_ENVS)[number];
 // fail-closed convention for BrokerProvider/EtoroEnv above.
 export const SUPPORTED_MARKET_DATA_PROVIDERS = ["mock", "live"] as const;
 export type MarketDataProviderType = (typeof SUPPORTED_MARKET_DATA_PROVIDERS)[number];
+
+// Phase 2A — Real Historical Candles for Live Market Data. Raw config only for the historical-
+// candle side of the live pipeline (LiveMarketDataProvider/EtoroDemoBroker.getHistoricalCandles) —
+// distinct from `marketDataProvider` above (which only selects mock vs. live). Named `marketData`,
+// not `marketDataProvider2` or similar, since `config.marketData.timeframe` reads naturally
+// alongside `config.marketDataProvider`. Meaningless (but still always parsed/validated — same
+// defense-in-depth convention as ETORO_ENV/HERMES_MARKET_HOURS_* above) when marketDataProvider is
+// "mock", which continues to use generateSyntheticCandles unconditionally.
+export interface LiveMarketDataConfig {
+  /** Which granularity LiveMarketDataProvider requests from its historical-candle source. See
+   * candle-validation.ts's own SUPPORTED_MARKET_TIMEFRAMES doc comment for why this list matches
+   * eToro's supported intervals specifically. Defaults to "1h". */
+  timeframe: MarketTimeframe;
+  /** How many candles to request per fetch. Enforced >= MIN_REQUIRED_CANDLES (candle-validation.ts)
+   * here too — the same floor LiveMarketDataProvider's own validation enforces at fetch time — so
+   * a misconfiguration fails at startup, not on the runtime's first live trading cycle. Defaults
+   * to 200. */
+  candleCount: number;
+  /** Upper bound (seconds) on how old the latest historical candle may be before
+   * LiveMarketDataProvider rejects the fetch as stale. No single fixed default is sensible across
+   * every supported timeframe (a 1-minute feed going stale after 2 hours is a real problem; a
+   * 1-week feed is not) — unset, this is derived from `timeframe` (2x its own duration, floored at
+   * 300s); set explicitly, that value is used as-is regardless of timeframe. */
+  maxCandleAgeSeconds: number;
+}
 
 // Milestone 7 — 24/7 Scheduler & Runtime Control. "always-open" (the default — correct for the
 // BTC-via-eToro instrument this pipeline actually trades today) and "weekday-session" (a simple
@@ -206,6 +237,10 @@ export interface HermesExecutionConfig {
   /** Defaults to "mock". Selects between MockMarketDataProvider and LiveMarketDataProvider
    * (market-data/) for the Milestone 2-4 pipeline. Only "mock" and "live" are valid. */
   marketDataProvider: MarketDataProviderType;
+  /** Phase 2A — timeframe/candleCount/maxCandleAgeSeconds for the live historical-candle path
+   * only; MockMarketDataProvider ignores this entirely (see LiveMarketDataConfig's own doc
+   * comment). */
+  marketData: LiveMarketDataConfig;
   scheduler: TradingSchedulerConfig;
   runtimeTrading: RuntimeTradingConfig;
   telegram: TelegramConfig;
@@ -222,6 +257,9 @@ interface RawHermesExecutionEnv {
   HERMES_MAX_OPEN_POSITIONS: string | undefined;
   BROKER_PROVIDER: string | undefined;
   HERMES_MARKET_DATA_PROVIDER: string | undefined;
+  HERMES_MARKET_TIMEFRAME: string | undefined;
+  HERMES_MARKET_CANDLE_COUNT: string | undefined;
+  HERMES_MARKET_MAX_CANDLE_AGE_SECONDS: string | undefined;
   HERMES_SCHEDULER_ENABLED: string | undefined;
   HERMES_SCHEDULER_INTERVAL_MS: string | undefined;
   HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: string | undefined;
@@ -304,6 +342,15 @@ const DEFAULT_ETORO_HTTP_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 const MIN_HTTP_TIMEOUT_MS = 1_000; // a floor, not a recommendation — see the field's own doc comment
 
+// Phase 2A — Real Historical Candles for Live Market Data.
+const DEFAULT_MARKET_TIMEFRAME: MarketTimeframe = "1h";
+const DEFAULT_MARKET_CANDLE_COUNT = 200;
+// A floor, not a recommendation — see LiveMarketDataConfig.maxCandleAgeSeconds's own doc comment
+// for why no single default duration is derived from this alone; it only bounds how aggressive an
+// explicit HERMES_MARKET_MAX_CANDLE_AGE_SECONDS may be, on both the derived-default and the
+// explicit-override paths.
+const MIN_MAX_CANDLE_AGE_SECONDS = 300;
+
 export function buildHermesExecutionConfig(
   env: RawHermesExecutionEnv = {
     HERMES_STRATEGY_REGISTRY_PATH: process.env.HERMES_STRATEGY_REGISTRY_PATH,
@@ -313,6 +360,9 @@ export function buildHermesExecutionConfig(
     HERMES_MAX_OPEN_POSITIONS: process.env.HERMES_MAX_OPEN_POSITIONS,
     BROKER_PROVIDER: process.env.BROKER_PROVIDER,
     HERMES_MARKET_DATA_PROVIDER: process.env.HERMES_MARKET_DATA_PROVIDER,
+    HERMES_MARKET_TIMEFRAME: process.env.HERMES_MARKET_TIMEFRAME,
+    HERMES_MARKET_CANDLE_COUNT: process.env.HERMES_MARKET_CANDLE_COUNT,
+    HERMES_MARKET_MAX_CANDLE_AGE_SECONDS: process.env.HERMES_MARKET_MAX_CANDLE_AGE_SECONDS,
     HERMES_SCHEDULER_ENABLED: process.env.HERMES_SCHEDULER_ENABLED,
     HERMES_SCHEDULER_INTERVAL_MS: process.env.HERMES_SCHEDULER_INTERVAL_MS,
     HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: process.env.HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN,
@@ -378,6 +428,29 @@ export function buildHermesExecutionConfig(
   // above — there is no fallback branch anywhere downstream that treats an unrecognised value as
   // "mock".
   const marketDataProvider = parseEnum(env.HERMES_MARKET_DATA_PROVIDER, SUPPORTED_MARKET_DATA_PROVIDERS, "mock");
+
+  // Phase 2A — Real Historical Candles for Live Market Data. Always parsed/validated regardless of
+  // whether marketDataProvider is currently "live" — same defense-in-depth convention as every
+  // other format check in this file (ETORO_ENV, HERMES_MARKET_HOURS_*, ...).
+  const marketTimeframe = parseEnum(env.HERMES_MARKET_TIMEFRAME, SUPPORTED_MARKET_TIMEFRAMES, DEFAULT_MARKET_TIMEFRAME);
+
+  const marketCandleCount = parseInteger(env.HERMES_MARKET_CANDLE_COUNT, DEFAULT_MARKET_CANDLE_COUNT, {
+    min: MIN_REQUIRED_CANDLES,
+  });
+
+  // No single fixed default is sensible across every supported timeframe — see this field's own
+  // doc comment on LiveMarketDataConfig. Unset, derive 2x the selected timeframe's own duration,
+  // floored at MIN_MAX_CANDLE_AGE_SECONDS; set explicitly, that value is used as-is (still floored
+  // — an explicit 10s staleness bound on hourly candles would reject every fetch outright).
+  const derivedMaxCandleAgeSeconds = Math.max(
+    MIN_MAX_CANDLE_AGE_SECONDS,
+    Math.round((TIMEFRAME_DURATIONS_MS[marketTimeframe] * 2) / 1000),
+  );
+  const marketMaxCandleAgeSeconds = parseInteger(
+    env.HERMES_MARKET_MAX_CANDLE_AGE_SECONDS,
+    derivedMaxCandleAgeSeconds,
+    { min: MIN_MAX_CANDLE_AGE_SECONDS },
+  );
 
   // Milestone 7 — 24/7 Scheduler & Runtime Control.
   const schedulerEnabled = parseBoolean(env.HERMES_SCHEDULER_ENABLED, false);
@@ -609,6 +682,11 @@ export function buildHermesExecutionConfig(
     strategyMaxOpenPositions,
     brokerProvider,
     marketDataProvider,
+    marketData: {
+      timeframe: marketTimeframe,
+      candleCount: marketCandleCount,
+      maxCandleAgeSeconds: marketMaxCandleAgeSeconds,
+    },
     scheduler: {
       enabled: schedulerEnabled,
       intervalMs: schedulerIntervalMs,

@@ -6,6 +6,7 @@ import {
   EtoroRateUnavailableError,
   EtoroReconciliationError,
   EtoroCleanupRequiredError,
+  EtoroCandleHistoryUnavailableError,
 } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { EtoroDemoConfig } from "@/lib/hermes-execution/config";
@@ -33,6 +34,7 @@ interface Routes {
   portfolio: () => Response;
   order: () => Response;
   close: () => Response;
+  history: () => Response;
 }
 
 // Shape matches a real, live GET /api/v1/market-data/instruments response for Bitcoin (verified
@@ -59,6 +61,30 @@ function portfolioWith(options: { positions?: unknown[]; orders?: unknown[]; cre
   });
 }
 
+// Phase 2A — Real Historical Candles for Live Market Data. Shape per etoro-client.ts's own
+// EtoroCandleInterval/EtoroCandleHistoryResponse doc comments: UNCONFIRMED against a live response
+// (sourced from eToro's official API reference via an automated fetch-and-summarize tool, not a
+// genuine API call — see that file's own confidence note), unlike every other default route above.
+function defaultCandleHistoryResponse(): Response {
+  return jsonResponse(200, {
+    interval: "OneHour",
+    candles: [
+      {
+        instrumentId: 100000,
+        candles: [
+          { instrumentID: 100000, fromDate: "2026-01-01T00:00:00.0000000Z", open: 100, high: 101, low: 99, close: 100.5, volume: 10 },
+          { instrumentID: 100000, fromDate: "2026-01-01T01:00:00.0000000Z", open: 100.5, high: 102, low: 100, close: 101, volume: 12 },
+        ],
+        rangeOpen: 100,
+        rangeClose: 101,
+        rangeHigh: 102,
+        rangeLow: 99,
+        volume: 22,
+      },
+    ],
+  });
+}
+
 function defaultRoutes(overrides: Partial<Routes> = {}): Routes {
   return {
     search: () => jsonResponse(200, { instrumentDisplayDatas: [BTC_SEARCH_RESULT] }),
@@ -70,6 +96,7 @@ function defaultRoutes(overrides: Partial<Routes> = {}): Routes {
     // { orderId, token }, no positionId — confirmed against a genuine order submission.
     order: () => jsonResponse(200, { orderId: 555, token: "test-token" }),
     close: () => jsonResponse(200, { token: "close-token" }),
+    history: () => defaultCandleHistoryResponse(),
     ...overrides,
   };
 }
@@ -84,6 +111,7 @@ function makeFetchMock(routes: Routes) {
     if (url.pathname.startsWith("/api/v1/trading/execution/demo/market-close-orders/positions/") && method === "POST") {
       return routes.close();
     }
+    if (url.pathname.includes("/history/candles/")) return routes.history();
     throw new Error(`Unhandled mock route: ${method} ${url.pathname}`);
   });
 }
@@ -332,6 +360,121 @@ describe("EtoroDemoBroker — rate retrieval", () => {
     await broker.connect();
     await broker.resolveInstrument("BTC");
     await expect(broker.getRate("BTC")).rejects.toMatchObject({ reason: "unpriced" });
+  });
+});
+
+describe("EtoroDemoBroker — historical candle retrieval", () => {
+  it("translates the generic timeframe into eToro's interval enum and requests the resolved instrumentId", async () => {
+    const historySpy = vi.fn(() => defaultCandleHistoryResponse());
+    const { broker } = makeBroker(defaultRoutes({ history: historySpy }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    expect(historySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("issues the request against the documented ascending candle-history path", async () => {
+    const { broker } = makeBroker();
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    fetchMock.mockClear();
+    await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe("/api/v1/market-data/instruments/100000/history/candles/asc/OneHour/200");
+  });
+
+  it("maps the nested candle entries into this pipeline's own Candle shape, stamped with the internal instrument string", async () => {
+    const { broker } = makeBroker();
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const candles = await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    expect(candles).toEqual([
+      { symbol: "BTC", timestamp: "2026-01-01T00:00:00.0000000Z", open: 100, high: 101, low: 99, close: 100.5, volume: 10 },
+      { symbol: "BTC", timestamp: "2026-01-01T01:00:00.0000000Z", open: 100.5, high: 102, low: 100, close: 101, volume: 12 },
+    ]);
+  });
+
+  it("throws EtoroCandleHistoryUnavailableError('absent') when no block matches the resolved instrument and more than one block is present", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () =>
+          jsonResponse(200, {
+            interval: "OneHour",
+            candles: [
+              { instrumentId: 1, candles: [{ instrumentID: 1, fromDate: "2026-01-01T00:00:00Z", open: 1, high: 1, low: 1, close: 1, volume: 1 }] },
+              { instrumentId: 2, candles: [{ instrumentID: 2, fromDate: "2026-01-01T00:00:00Z", open: 1, high: 1, low: 1, close: 1, volume: 1 }] },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC"); // resolves to instrumentId 100000 — matches neither block above
+    await expect(broker.getHistoricalCandles("BTC", "1h", 200)).rejects.toMatchObject({
+      name: "EtoroCandleHistoryUnavailableError",
+      reason: "absent",
+    });
+  });
+
+  it("falls back to the single block present when its id doesn't match, rather than treating it as absent", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () =>
+          jsonResponse(200, {
+            interval: "OneHour",
+            candles: [
+              {
+                instrumentId: 999, // deliberately not 100000 — the documented casing/shape is unconfirmed
+                candles: [{ instrumentID: 100000, fromDate: "2026-01-01T00:00:00Z", open: 1, high: 2, low: 0.5, close: 1.5, volume: 5 }],
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const candles = await broker.getHistoricalCandles("BTC", "1h", 200);
+    expect(candles).toHaveLength(1);
+  });
+
+  it("throws EtoroCandleHistoryUnavailableError('empty') when the matched block has no candles", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () => jsonResponse(200, { interval: "OneHour", candles: [{ instrumentId: 100000, candles: [] }] }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    await expect(broker.getHistoricalCandles("BTC", "1h", 200)).rejects.toMatchObject({
+      name: "EtoroCandleHistoryUnavailableError",
+      reason: "empty",
+    });
+  });
+
+  it("throws EtoroCandleHistoryUnavailableError('absent') when the response's candles array is entirely empty", async () => {
+    const { broker } = makeBroker(defaultRoutes({ history: () => jsonResponse(200, { interval: "OneHour", candles: [] }) }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    await expect(broker.getHistoricalCandles("BTC", "1h", 200)).rejects.toMatchObject({
+      name: "EtoroCandleHistoryUnavailableError",
+      reason: "absent",
+    });
+  });
+
+  it("refuses to fetch candle history for an instrument that was never resolved", async () => {
+    const { broker } = makeBroker();
+    await broker.connect();
+    await expect(broker.getHistoricalCandles("BTC", "1h", 200)).rejects.toThrow(/never resolved/);
+  });
+
+  it("propagates a transport-level failure (e.g. HTTP 500) without swallowing or substituting anything", async () => {
+    const { broker } = makeBroker(defaultRoutes({ history: () => new Response("", { status: 500 }) }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    await expect(broker.getHistoricalCandles("BTC", "1h", 200)).rejects.toThrow(/getHistoricalCandles failed/i);
   });
 });
 

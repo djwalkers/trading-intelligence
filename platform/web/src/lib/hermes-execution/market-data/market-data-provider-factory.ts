@@ -1,6 +1,11 @@
 import { SUPPORTED_MARKET_DATA_PROVIDERS, type MarketDataProviderType } from "../config";
 import { MockMarketDataProvider, type MockMarketDataProviderOptions } from "./mock-market-data-provider";
-import { LiveMarketDataProvider, type RateSource } from "./live-market-data-provider";
+import {
+  LiveMarketDataProvider,
+  type CandleHistorySource,
+  type LiveMarketDataProviderOptions,
+  type RateSource,
+} from "./live-market-data-provider";
 import type { MarketDataProvider } from "./market-data-provider";
 
 // Milestone 5 — Live Market Data Integration. Mirrors broker-factory.ts's own
@@ -13,9 +18,14 @@ export interface MarketDataProviderFactoryOptions {
    * override convention as BrokerFactoryOptions.provider. */
   type?: MarketDataProviderType;
   mock?: MockMarketDataProviderOptions;
-  /** Required when the resolved type is "live" — the narrow quote source LiveMarketDataProvider
-   * wraps (e.g. a connected broker's own getRate, which satisfies RateSource structurally). */
-  live?: { rateSource: RateSource };
+  /** Required when the resolved type is "live" — the narrow quote+candle source
+   * LiveMarketDataProvider wraps (e.g. a connected broker satisfying both RateSource and
+   * CandleHistorySource structurally, as EtoroDemoBroker's getRate/getHistoricalCandles do).
+   * timeframe/candleCount/maxCandleAgeSeconds are forwarded to LiveMarketDataProviderOptions
+   * as-is — this factory has no opinion of its own on what they should be. */
+  live?: {
+    rateSource: RateSource & CandleHistorySource;
+  } & LiveMarketDataProviderOptions;
 }
 
 /**
@@ -35,10 +45,11 @@ export const MarketDataProviderFactory = {
     if (type === "live") {
       if (!options.live?.rateSource) {
         throw new Error(
-          'MarketDataProviderFactory.create("live") requires options.live.rateSource — a connected quote source.',
+          'MarketDataProviderFactory.create("live") requires options.live.rateSource — a connected quote+candle source.',
         );
       }
-      return new LiveMarketDataProvider(options.live.rateSource);
+      const { rateSource, ...liveOptions } = options.live;
+      return new LiveMarketDataProvider(rateSource, liveOptions);
     }
 
     throw new Error(

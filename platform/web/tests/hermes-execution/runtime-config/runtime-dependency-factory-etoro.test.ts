@@ -27,6 +27,9 @@ const EMPTY = {
   HERMES_MAX_OPEN_POSITIONS: undefined,
   BROKER_PROVIDER: undefined,
   HERMES_MARKET_DATA_PROVIDER: undefined,
+  HERMES_MARKET_TIMEFRAME: undefined,
+  HERMES_MARKET_CANDLE_COUNT: undefined,
+  HERMES_MARKET_MAX_CANDLE_AGE_SECONDS: undefined,
   HERMES_SCHEDULER_ENABLED: undefined,
   HERMES_SCHEDULER_INTERVAL_MS: undefined,
   HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: undefined,
@@ -63,7 +66,13 @@ const EMPTY = {
 
 const PORTFOLIO_RISK_CONFIG = { portfolioMaxOpenPositions: 5, maxDailyTrades: 10, maxPortfolioExposure: 10_000 };
 
-function makeFakeEtoroBroker(overrides: { resolveInstrument?: ReturnType<typeof vi.fn> } = {}) {
+const FAKE_CANDLES = [
+  { symbol: "BTC", timestamp: "2026-01-01T00:00:00.000Z", open: 100, high: 100.5, low: 99.5, close: 100, volume: 10 },
+];
+
+function makeFakeEtoroBroker(
+  overrides: { resolveInstrument?: ReturnType<typeof vi.fn>; getHistoricalCandles?: ReturnType<typeof vi.fn> } = {},
+) {
   return {
     getAccount: () => ({ cashBalance: 1000, startingCashBalance: 1000 }),
     getOpenPositions: () => [],
@@ -72,6 +81,7 @@ function makeFakeEtoroBroker(overrides: { resolveInstrument?: ReturnType<typeof 
     closePosition: vi.fn(),
     resolveInstrument: overrides.resolveInstrument ?? vi.fn().mockResolvedValue({ instrumentId: 1, displayName: "Bitcoin", symbol: "BTC" }),
     getRate: vi.fn().mockResolvedValue({ bid: 100, ask: 100.1 }),
+    getHistoricalCandles: overrides.getHistoricalCandles ?? vi.fn().mockResolvedValue(FAKE_CANDLES),
   };
 }
 
@@ -120,6 +130,38 @@ describe("buildRuntimeDependencies — etoro-demo construction", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.dependencies.marketDataProvider).toBeInstanceOf(LiveMarketDataProvider);
+  });
+
+  it("wires config.marketData's timeframe/candleCount through to the constructed LiveMarketDataProvider", async () => {
+    const getHistoricalCandles = vi.fn().mockResolvedValue(FAKE_CANDLES);
+    const fakeBroker = makeFakeEtoroBroker({ getHistoricalCandles });
+    createMock.mockResolvedValueOnce(fakeBroker);
+
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_STRATEGY_REGISTRY_PATH: VALID_REGISTRY,
+      BROKER_PROVIDER: "etoro-demo",
+      HERMES_RUNTIME_MODE: "demo",
+      HERMES_MARKET_DATA_PROVIDER: "live",
+      HERMES_MARKET_TIMEFRAME: "4h",
+      HERMES_MARKET_CANDLE_COUNT: "60",
+    });
+
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // FAKE_CANDLES is deliberately too short to pass candle-validation.ts's own MIN_REQUIRED_CANDLES
+    // floor — irrelevant here, this test only checks that config.marketData's values reached the
+    // candle source call, not that the resulting snapshot is valid (candle-validation.test.ts and
+    // live-market-data-provider.test.ts already cover validation itself).
+    await result.dependencies.marketDataProvider.getMarketData("BTC").catch(() => {});
+    expect(getHistoricalCandles).toHaveBeenCalledWith("BTC", "4h", 60);
   });
 
   it("fails with field 'symbol' when resolveInstrument rejects", async () => {

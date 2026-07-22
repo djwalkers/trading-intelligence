@@ -16,7 +16,8 @@
     "broker:trading212-smoke": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/broker-trading212-smoke.ts",
     "broker:etoro-smoke": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/broker-etoro-smoke.ts",
     "market:decide": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-decide.ts",
-    "market:runtime": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-runtime.ts"
+    "market:runtime": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-runtime.ts",
+    "market:diagnostics": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-diagnostics.ts"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.33.2",

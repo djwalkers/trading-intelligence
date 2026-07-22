@@ -12,7 +12,7 @@ import type { MarketDataProvider } from "../market-data/market-data-provider";
 import type { MarketHoursPolicy } from "../runtime/market-hours-policy";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
-import type { InternalStrategy } from "../types";
+import type { Candle, InternalStrategy } from "../types";
 import { BROKER_CAPABILITIES } from "./broker-capabilities";
 import { validateStartup, type StartupValidationProblem } from "./startup-validation";
 
@@ -33,6 +33,10 @@ interface SymbolResolvableBroker {
 }
 interface RateSourceBroker {
   getRate(instrument: string): Promise<{ bid: number; ask: number }>;
+  // Phase 2A — Real Historical Candles for Live Market Data. Widened alongside getRate above —
+  // still duck-typed (never a concrete EtoroDemoBroker import), still only EtoroDemoBroker
+  // satisfies this structurally today (see broker-capabilities.ts's own canSupplyLiveRates).
+  getHistoricalCandles(instrument: string, timeframe: string, count: number): Promise<Candle[]>;
 }
 
 export interface RuntimeDependencies {
@@ -150,7 +154,14 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
   let marketDataProvider: MarketDataProvider;
   try {
     marketDataProvider = MarketDataProviderFactory.create(config.marketDataProvider, {
-      live: capabilities.canSupplyLiveRates ? { rateSource: broker as unknown as RateSourceBroker } : undefined,
+      live: capabilities.canSupplyLiveRates
+        ? {
+            rateSource: broker as unknown as RateSourceBroker,
+            timeframe: config.marketData.timeframe,
+            candleCount: config.marketData.candleCount,
+            maxCandleAgeSeconds: config.marketData.maxCandleAgeSeconds,
+          }
+        : undefined,
     });
   } catch (error) {
     return { ok: false, problems: [{ field: "marketDataProvider", message: toErrorMessage(error) }] };

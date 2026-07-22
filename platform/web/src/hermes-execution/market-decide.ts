@@ -110,9 +110,16 @@ function resolveMarketDataProvider(
 ): MarketDataProvider {
   return MarketDataProviderFactory.create(config.marketDataProvider, {
     mock: { bias, count: CANDLE_COUNT, intervalMinutes: CANDLE_INTERVAL_MINUTES },
-    // EtoroDemoBroker.getRate already satisfies RateSource structurally — passed as-is, never
-    // wrapped or subclassed, so LiveMarketDataProvider never depends on the concrete broker type.
-    live: { rateSource: broker },
+    // EtoroDemoBroker.getRate/getHistoricalCandles already satisfy RateSource & CandleHistorySource
+    // structurally — passed as-is, never wrapped or subclassed, so LiveMarketDataProvider never
+    // depends on the concrete broker type. Phase 2A: timeframe/candleCount/maxCandleAgeSeconds are
+    // sourced from config.marketData, same as the continuous runtime (runtime-dependency-factory.ts).
+    live: {
+      rateSource: broker,
+      timeframe: config.marketData.timeframe,
+      candleCount: config.marketData.candleCount,
+      maxCandleAgeSeconds: config.marketData.maxCandleAgeSeconds,
+    },
   });
 }
 

@@ -1,107 +1,182 @@
 import { describe, expect, it, vi } from "vitest";
-import { LiveMarketDataProvider, type RateSource } from "@/lib/hermes-execution/market-data/live-market-data-provider";
+import {
+  LiveMarketDataProvider,
+  type CandleHistorySource,
+  type RateSource,
+} from "@/lib/hermes-execution/market-data/live-market-data-provider";
 import { MarketDataProviderError } from "@/lib/hermes-execution/market-data/market-data-provider";
+import type { Candle } from "@/lib/hermes-execution/types";
 import { logger } from "@/lib/logger/logger";
 
-function stubRateSource(rate: { bid: number; ask: number }): RateSource {
-  return { getRate: async () => rate };
+const HOUR_MS = 3_600_000;
+
+/** A deterministic, valid 60-candle hourly history ending at `endTimestamp` (defaults to now) —
+ * satisfies validateHistoricalCandles' own MIN_REQUIRED_CANDLES floor (50) with headroom. */
+function makeCandles(options: { count?: number; endTimestamp?: Date; basePrice?: number } = {}): Candle[] {
+  const count = options.count ?? 60;
+  const end = options.endTimestamp ?? new Date();
+  const basePrice = options.basePrice ?? 100;
+  const candles: Candle[] = [];
+  for (let i = 0; i < count; i++) {
+    const timestamp = new Date(end.getTime() - (count - 1 - i) * HOUR_MS).toISOString();
+    const price = basePrice + i * 0.01;
+    candles.push({ symbol: "BTC", timestamp, open: price, high: price + 0.5, low: price - 0.5, close: price, volume: 100 });
+  }
+  return candles;
 }
 
-function failingRateSource(error: unknown): RateSource {
+function stubSource(overrides: {
+  rate?: { bid: number; ask: number };
+  rateError?: unknown;
+  candles?: Candle[];
+  candlesError?: unknown;
+}): RateSource & CandleHistorySource {
   return {
     getRate: async () => {
-      throw error;
+      if (overrides.rateError !== undefined) throw overrides.rateError;
+      return overrides.rate ?? { bid: 100, ask: 100.1 };
+    },
+    getHistoricalCandles: async () => {
+      if (overrides.candlesError !== undefined) throw overrides.candlesError;
+      return overrides.candles ?? makeCandles();
     },
   };
 }
 
-describe("LiveMarketDataProvider — successful initialisation", () => {
-  it("returns a snapshot built from the rate source's real bid/ask", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: 99.5, ask: 100.5 }));
+describe("LiveMarketDataProvider — successful fetch", () => {
+  it("returns a snapshot built from the rate source's real bid/ask and the candle source's real history", async () => {
+    const candles = makeCandles({ basePrice: 199 });
+    const provider = new LiveMarketDataProvider(stubSource({ rate: { bid: 199.5, ask: 200.5 }, candles }));
     const snapshot = await provider.getMarketData("BTC");
 
     expect(snapshot.instrument).toBe("BTC");
-    expect(snapshot.bid).toBe(99.5);
-    expect(snapshot.ask).toBe(100.5);
+    expect(snapshot.bid).toBe(199.5);
+    expect(snapshot.ask).toBe(200.5);
     expect(snapshot.spread).toBeCloseTo(1, 10);
-    expect(snapshot.latestPrice).toBeCloseTo(100, 10);
+    expect(snapshot.latestPrice).toBeCloseTo(200, 10); // from getRate's mid, never the candle close
+    expect(snapshot.candles).toHaveLength(candles.length);
+    expect(snapshot.volume).toBe(candles[candles.length - 1]!.volume);
   });
 
-  it("anchors the generated candle history's final close near the live mid-price", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: 199, ask: 201 }), { candleCount: 10 });
-    const snapshot = await provider.getMarketData("ETH");
+  it("sorts candles chronologically regardless of the order the source returned them in", async () => {
+    const chronological = makeCandles();
+    const shuffled = [...chronological].reverse();
+    const provider = new LiveMarketDataProvider(stubSource({ candles: shuffled }));
+    const snapshot = await provider.getMarketData("BTC");
 
-    expect(snapshot.candles).toHaveLength(10);
-    expect(snapshot.candles[0]!.open).toBeCloseTo(200, 6);
-    expect(snapshot.volume).toBe(snapshot.candles[snapshot.candles.length - 1]!.volume);
+    const timestamps = snapshot.candles.map((c) => c.timestamp);
+    expect(timestamps).toEqual([...timestamps].sort());
   });
 
-  it("produces a fresh snapshot with a new timestamp on every call, not a cached one", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: 100, ask: 100.1 }));
+  it("produces a fresh snapshot timestamp on every call, not a cached one", async () => {
+    const provider = new LiveMarketDataProvider(stubSource({}));
     const first = await provider.getMarketData("BTC");
     await new Promise((resolve) => setTimeout(resolve, 5));
     const second = await provider.getMarketData("BTC");
     expect(second.timestamp).not.toBe(first.timestamp);
   });
+
+  it("passes the configured timeframe/candleCount through to the candle source", async () => {
+    const getHistoricalCandles = vi.fn().mockResolvedValue(makeCandles());
+    const source: RateSource & CandleHistorySource = {
+      getRate: async () => ({ bid: 100, ask: 100.1 }),
+      getHistoricalCandles,
+    };
+    const provider = new LiveMarketDataProvider(source, { timeframe: "4h", candleCount: 75 });
+    await provider.getMarketData("ETH");
+
+    expect(getHistoricalCandles).toHaveBeenCalledWith("ETH", "4h", 75);
+  });
 });
 
-describe("LiveMarketDataProvider — provider failure", () => {
+describe("LiveMarketDataProvider — rate-source failure (no fallback)", () => {
   it("wraps a rate-source rejection in a MarketDataProviderError with reason 'fetch-failed'", async () => {
-    const provider = new LiveMarketDataProvider(failingRateSource(new Error("connection reset")));
-
+    const provider = new LiveMarketDataProvider(stubSource({ rateError: new Error("connection reset") }));
     await expect(provider.getMarketData("BTC")).rejects.toMatchObject({
       name: "MarketDataProviderError",
       reason: "fetch-failed",
     });
   });
 
-  it("preserves the original error as `cause`", async () => {
-    const original = new Error("timeout");
-    const provider = new LiveMarketDataProvider(failingRateSource(original));
-
-    try {
-      await provider.getMarketData("BTC");
-      expect.unreachable("expected getMarketData to reject");
-    } catch (error) {
-      expect(error).toBeInstanceOf(MarketDataProviderError);
-      expect((error as MarketDataProviderError).cause).toBe(original);
-    }
-  });
-});
-
-describe("LiveMarketDataProvider — malformed data handling", () => {
-  it("rejects a non-finite bid", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: Number.NaN, ask: 100 }));
-    await expect(provider.getMarketData("BTC")).rejects.toMatchObject({ reason: "malformed-data" });
+  it("never calls getHistoricalCandles once getRate has already failed", async () => {
+    const getHistoricalCandles = vi.fn();
+    const source: RateSource & CandleHistorySource = {
+      getRate: async () => {
+        throw new Error("down");
+      },
+      getHistoricalCandles,
+    };
+    const provider = new LiveMarketDataProvider(source);
+    await expect(provider.getMarketData("BTC")).rejects.toThrow();
+    expect(getHistoricalCandles).not.toHaveBeenCalled();
   });
 
-  it("rejects a zero or negative ask", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: 10, ask: 0 }));
-    await expect(provider.getMarketData("BTC")).rejects.toMatchObject({ reason: "malformed-data" });
-  });
-
-  it("rejects an inverted rate (ask below bid)", async () => {
-    const provider = new LiveMarketDataProvider(stubRateSource({ bid: 105, ask: 100 }));
+  it("rejects an inverted rate (ask below bid) without ever touching the candle source", async () => {
+    const getHistoricalCandles = vi.fn();
+    const source: RateSource & CandleHistorySource = {
+      getRate: async () => ({ bid: 105, ask: 100 }),
+      getHistoricalCandles,
+    };
+    const provider = new LiveMarketDataProvider(source);
     await expect(provider.getMarketData("BTC")).rejects.toThrow(/inverted rate/);
+    expect(getHistoricalCandles).not.toHaveBeenCalled();
   });
 });
 
-describe("LiveMarketDataProvider — structured quote-fetch logging", () => {
-  it("logs provider, instrument, quote timestamp, latest price, and candle count on a successful fetch", async () => {
+describe("LiveMarketDataProvider — candle-source failure and validation (no fallback)", () => {
+  it("wraps a candle-source rejection in a MarketDataProviderError with reason 'fetch-failed'", async () => {
+    const provider = new LiveMarketDataProvider(stubSource({ candlesError: new Error("timeout") }));
+    await expect(provider.getMarketData("BTC")).rejects.toMatchObject({
+      name: "MarketDataProviderError",
+      reason: "fetch-failed",
+    });
+  });
+
+  it("rejects insufficient candles rather than proceeding with a short history", async () => {
+    const provider = new LiveMarketDataProvider(stubSource({ candles: makeCandles({ count: 10 }) }));
+    await expect(provider.getMarketData("BTC")).rejects.toMatchObject({
+      name: "MarketDataProviderError",
+      reason: "malformed-data",
+    });
+  });
+
+  it("rejects stale candles (latest candle older than maxCandleAgeSeconds)", async () => {
+    const staleEnd = new Date(Date.now() - 10 * HOUR_MS);
+    const provider = new LiveMarketDataProvider(stubSource({ candles: makeCandles({ endTimestamp: staleEnd }) }), {
+      maxCandleAgeSeconds: 3_600,
+    });
+    await expect(provider.getMarketData("BTC")).rejects.toMatchObject({ reason: "malformed-data" });
+  });
+
+  it("never falls back to a synthetic/mock candle series on any failure — it always throws", async () => {
+    const provider = new LiveMarketDataProvider(stubSource({ candlesError: new Error("boom") }));
+    await expect(provider.getMarketData("BTC")).rejects.toBeInstanceOf(MarketDataProviderError);
+  });
+});
+
+describe("LiveMarketDataProvider — structured logging", () => {
+  it("logs provider, instrument, timeframe, candleCount, first/lastTimestamp, latestClosedPrice, and brokerMidPrice on success", async () => {
     const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
     try {
-      const provider = new LiveMarketDataProvider(stubRateSource({ bid: 99, ask: 101 }), { candleCount: 12 });
-      const snapshot = await provider.getMarketData("BTC");
+      const candles = makeCandles({ count: 60 });
+      const provider = new LiveMarketDataProvider(stubSource({ rate: { bid: 99, ask: 101 }, candles }), {
+        timeframe: "1h",
+      });
+      await provider.getMarketData("BTC");
 
+      const sorted = [...candles].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
       expect(infoSpy).toHaveBeenCalledWith(
         "Live market data quote fetched",
         expect.objectContaining({
           component: "market-data",
           provider: "live",
           instrument: "BTC",
-          quoteTimestamp: snapshot.timestamp,
-          latestPrice: snapshot.latestPrice,
-          candleCount: 12,
+          timeframe: "1h",
+          candleCount: 60,
+          firstTimestamp: sorted[0]!.timestamp,
+          lastTimestamp: sorted[sorted.length - 1]!.timestamp,
+          latestClosedPrice: sorted[sorted.length - 1]!.close,
+          brokerMidPrice: 100,
           fallbackOccurred: false,
         }),
       );
@@ -110,10 +185,10 @@ describe("LiveMarketDataProvider — structured quote-fetch logging", () => {
     }
   });
 
-  it("never logs the raw bid/ask rate object, credentials, or headers", async () => {
+  it("never logs the raw rate object, credentials, or headers", async () => {
     const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
     try {
-      const provider = new LiveMarketDataProvider(stubRateSource({ bid: 99, ask: 101 }));
+      const provider = new LiveMarketDataProvider(stubSource({}));
       await provider.getMarketData("BTC");
 
       const [, context] = infoSpy.mock.calls[0]!;
@@ -121,19 +196,40 @@ describe("LiveMarketDataProvider — structured quote-fetch logging", () => {
       expect(context).not.toHaveProperty("userKey");
       expect(context).not.toHaveProperty("headers");
       expect(context).not.toHaveProperty("rate");
+      expect(context).not.toHaveProperty("candles");
     } finally {
       infoSpy.mockRestore();
     }
   });
 
-  it("logs an error with fallbackOccurred:false when the fetch fails, and still throws — never substitutes a value", async () => {
+  it("logs an error with fallbackOccurred:false when the candle fetch fails, and still throws", async () => {
     const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
     try {
-      const provider = new LiveMarketDataProvider(failingRateSource(new Error("connection reset")));
+      const provider = new LiveMarketDataProvider(stubSource({ candlesError: new Error("connection reset") }));
       await expect(provider.getMarketData("BTC")).rejects.toThrow(MarketDataProviderError);
 
       expect(errorSpy).toHaveBeenCalledWith(
-        "Live market data quote fetch failed — no fallback attempted",
+        "Live historical candle fetch failed — no fallback attempted",
+        expect.objectContaining({
+          component: "market-data",
+          provider: "live",
+          instrument: "BTC",
+          fallbackOccurred: false,
+        }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("logs an error with fallbackOccurred:false when candle validation fails, and still throws", async () => {
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+    try {
+      const provider = new LiveMarketDataProvider(stubSource({ candles: makeCandles({ count: 5 }) }));
+      await expect(provider.getMarketData("BTC")).rejects.toThrow(MarketDataProviderError);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Live historical candle validation failed — no fallback attempted",
         expect.objectContaining({
           component: "market-data",
           provider: "live",

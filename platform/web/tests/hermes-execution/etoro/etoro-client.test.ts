@@ -87,6 +87,34 @@ describe("EtoroClient", () => {
     expect(url.searchParams.get("instrumentIds")).toBe("100,200");
   });
 
+  it("getHistoricalCandles issues a GET against the documented candle-history path with direction/interval/count in the URL", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { interval: "OneHour", candles: [] }));
+    const client = new EtoroClient(API_KEY, USER_KEY);
+    await client.getHistoricalCandles(100000, "OneHour", 200);
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect((init.method ?? "GET").toUpperCase()).toBe("GET");
+    expect(url.pathname).toBe("/api/v1/market-data/instruments/100000/history/candles/asc/OneHour/200");
+  });
+
+  it("getHistoricalCandles defaults to ascending direction (this pipeline's own chronological Candle[] convention)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { interval: "OneDay", candles: [] }));
+    const client = new EtoroClient(API_KEY, USER_KEY);
+    await client.getHistoricalCandles(1, "OneDay", 100);
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toContain("/asc/");
+  });
+
+  it("getHistoricalCandles honours an explicit 'desc' direction", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { interval: "OneMinute", candles: [] }));
+    const client = new EtoroClient(API_KEY, USER_KEY);
+    await client.getHistoricalCandles(1, "OneMinute", 10, "desc");
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe("/api/v1/market-data/instruments/1/history/candles/desc/OneMinute/10");
+  });
+
   it("getDemoPortfolio issues a GET against the documented demo trading-info path", async () => {
     // Real shape confirmed live: everything nested under clientPortfolio, not returned flat.
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { clientPortfolio: { positions: [], orders: [], credit: 0 } }));

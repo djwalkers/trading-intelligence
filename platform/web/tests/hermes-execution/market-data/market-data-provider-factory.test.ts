@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
 import { MockMarketDataProvider } from "@/lib/hermes-execution/market-data/mock-market-data-provider";
-import { LiveMarketDataProvider, type RateSource } from "@/lib/hermes-execution/market-data/live-market-data-provider";
+import {
+  LiveMarketDataProvider,
+  type CandleHistorySource,
+  type RateSource,
+} from "@/lib/hermes-execution/market-data/live-market-data-provider";
 import { buildHermesExecutionConfig } from "@/lib/hermes-execution/config";
+import type { Candle } from "@/lib/hermes-execution/types";
 
 const EMPTY = {
   HERMES_STRATEGY_REGISTRY_PATH: undefined,
@@ -12,6 +17,9 @@ const EMPTY = {
   HERMES_MAX_OPEN_POSITIONS: undefined,
   BROKER_PROVIDER: undefined,
   HERMES_MARKET_DATA_PROVIDER: undefined,
+  HERMES_MARKET_TIMEFRAME: undefined,
+  HERMES_MARKET_CANDLE_COUNT: undefined,
+  HERMES_MARKET_MAX_CANDLE_AGE_SECONDS: undefined,
   HERMES_SCHEDULER_ENABLED: undefined,
   HERMES_SCHEDULER_INTERVAL_MS: undefined,
   HERMES_SCHEDULER_IMMEDIATE_FIRST_RUN: undefined,
@@ -46,7 +54,14 @@ const EMPTY = {
   ETORO_HTTP_TIMEOUT_MS: undefined,
 };
 
-const stubRateSource: RateSource = { getRate: async () => ({ bid: 1, ask: 1.01 }) };
+const stubCandles: Candle[] = [
+  { symbol: "BTC", timestamp: "2026-01-01T00:00:00.000Z", open: 1, high: 1.01, low: 0.99, close: 1, volume: 10 },
+];
+
+const stubRateSource: RateSource & CandleHistorySource = {
+  getRate: async () => ({ bid: 1, ask: 1.01 }),
+  getHistoricalCandles: async () => stubCandles,
+};
 
 describe("buildHermesExecutionConfig — marketDataProvider", () => {
   it("defaults to 'mock' when HERMES_MARKET_DATA_PROVIDER is unset — preserves deterministic tests", () => {
@@ -93,6 +108,21 @@ describe("MarketDataProviderFactory.create — provider selection", () => {
     expect(() => MarketDataProviderFactory.create("quantum" as never)).toThrow(
       /Unsupported market data provider "quantum".*mock.*live/,
     );
+  });
+
+  it("passes live options (timeframe/candleCount/maxCandleAgeSeconds) straight through to LiveMarketDataProvider", async () => {
+    const getHistoricalCandles = vi.fn().mockResolvedValue(stubCandles);
+    const source: RateSource & CandleHistorySource = { getRate: async () => ({ bid: 1, ask: 1.01 }), getHistoricalCandles };
+
+    const provider = MarketDataProviderFactory.create("live", {
+      live: { rateSource: source, timeframe: "4h", candleCount: 55 },
+    });
+    // stubCandles is deliberately too short to pass candle-validation.ts's own MIN_REQUIRED_CANDLES
+    // floor — irrelevant here, this test only checks that the options reached the candle source
+    // call, not that the resulting snapshot is valid.
+    await (provider as LiveMarketDataProvider).getMarketData("BTC").catch(() => {});
+
+    expect(getHistoricalCandles).toHaveBeenCalledWith("BTC", "4h", 55);
   });
 
   it("passes mock options (bias/seed/count) straight through to MockMarketDataProvider", async () => {
