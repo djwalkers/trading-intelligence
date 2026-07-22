@@ -1,16 +1,37 @@
+import { logger } from "@/lib/logger/logger";
 import { buildMarketDecisionContext } from "../build-market-decision-context";
 import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, InternalStrategy } from "../types";
+import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
 import type { MarketDecisionCycleResult } from "../market-decision-runner";
-import { runMarketDecisionCycleWithLifecycle } from "../trade-lifecycle/trade-lifecycle-runner";
+import { runMarketDecisionCycleWithLifecycle, type TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
 import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
+import type { MarketDataSnapshot } from "../market-data/market-data-provider";
+import type { MarketDecisionContext } from "../market-decision-engine";
+import { buildAnalysisRecord } from "../analysis/build-analysis-record";
+import { categorizeAnalysisPersistenceError, type AnalysisRepository } from "../analysis/analysis-repository";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
 import { assertValidRuntimeTransition, type TradingErrorSummary, type TradingRuntimeState, type TradingRuntimeStatus } from "./types";
+
+// Phase 2B — Decision Intelligence: Historical Analysis Persistence. AnalysisIntegrationDeps is
+// entirely optional and additive: when `deps.analysis` is undefined (the default for every
+// existing caller/test that predates this phase), TradingRuntime's behaviour is byte-for-byte
+// identical to before this phase existed — no new timing, no new gating, nothing that can affect
+// which decision gets made or whether execution happens. persistAnalysis() (below) is the only
+// new code path, called strictly after a cycle's real work has already fully completed (success
+// or failure), and it can never itself fail the cycle — see its own doc comment.
+export interface AnalysisIntegrationDeps {
+  repository: AnalysisRepository;
+  runtimeMode: RuntimeMode;
+  brokerProvider: BrokerProvider;
+  marketProvider: MarketDataProviderType;
+  timeframe: string;
+}
 
 // Milestone 7 — 24/7 Scheduler & Runtime Control. The one place "Scheduler tick -> Runtime
 // controller -> runMarketDecisionCycleWithLifecycle() -> existing pipeline" (this milestone's own
@@ -46,6 +67,9 @@ export interface TradingRuntimeDeps {
    * independent httpTimeoutMs bound — the two work together: this is a backstop for anything else
    * that might be slow, not a replacement for bounding the HTTP call itself). Defaults to 30000. */
   shutdownTimeoutMs?: number;
+  /** Phase 2B — Decision Intelligence: Historical Analysis Persistence. Undefined (the default)
+   * means this feature is entirely off — see AnalysisIntegrationDeps's own doc comment above. */
+  analysis?: AnalysisIntegrationDeps;
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -258,6 +282,7 @@ export class TradingRuntime {
 
   private async runCycleBody(trigger: "scheduled" | "manual"): Promise<TradingCycleOutcome> {
     await this.recordAudit("TRADING_CYCLE_STARTED", { trigger });
+    const cycleStartedAtMs = this.deps.clock.now().getTime();
     try {
       const { snapshot, context } = await buildMarketDecisionContext(
         this.deps.marketDataProvider,
@@ -296,6 +321,20 @@ export class TradingRuntime {
         decision: result.decision.action,
         executed: result.executed,
       });
+
+      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Strictly after the
+      // cycle's real work (decision + execution) has already fully completed — this can never
+      // change `result` or anything returned below, and can never fail this cycle (see
+      // persistAnalysis's own doc comment).
+      await this.persistAnalysis({
+        kind: "success",
+        trigger,
+        snapshot,
+        context,
+        result,
+        runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
+      });
+
       return { kind: "completed", result };
     } catch (error) {
       this.failedRunCount += 1;
@@ -303,7 +342,99 @@ export class TradingRuntime {
       this.lastError = { message, occurredAt: this.deps.clock.now().toISOString() };
       this.lastRunCompletedAt = this.deps.clock.now().toISOString();
       await this.recordAudit("TRADING_CYCLE_FAILED", { message });
+
+      await this.persistAnalysis({
+        kind: "failure",
+        trigger,
+        error,
+        runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
+      });
+
       return { kind: "failed", error };
+    }
+  }
+
+  /**
+   * Phase 2B — Decision Intelligence: Historical Analysis Persistence. The runtime ATTEMPTS
+   * exactly one persistence operation (one saveAnalysis() + one saveEvents() batch) per cycle —
+   * this is best-effort, not a guarantee: builds one AnalysisRunInput (+ timeline events) via the
+   * pure, side-effect-free buildAnalysisRecord (never re-evaluates or second-guesses the
+   * decision), then writes it through AnalysisRepository. Never throws — a Supabase outage, RLS
+   * misconfiguration, or any other persistence failure is logged (see the structured fields below)
+   * and swallowed here, exactly like JsonFileAuditTrail.persist()'s own established "catch
+   * internally, log, never propagate" discipline, so a broken analysis-persistence layer can never
+   * crash, block, or alter a single trading cycle's decision or execution outcome. The direct
+   * consequence, stated plainly: a database outage during this window means that cycle's analysis
+   * record may simply be MISSING from market_analysis_runs — a gap in the history, not a corrupted
+   * or delayed one. There is no durable retry queue in this phase; a failed write is not retried,
+   * queued, or replayed later (see docs/decision-intelligence-architecture-phase-2b.md's own
+   * "Persistence guarantees & limitations" section). A no-op entirely when `deps.analysis` is
+   * undefined (the default).
+   */
+  private async persistAnalysis(
+    outcome:
+      | {
+          kind: "success";
+          trigger: "scheduled" | "manual";
+          snapshot: MarketDataSnapshot;
+          context: MarketDecisionContext;
+          result: TradeLifecycleCycleResult;
+          runtimeDurationMs: number;
+        }
+      | { kind: "failure"; trigger: "scheduled" | "manual"; error: unknown; runtimeDurationMs: number },
+  ): Promise<void> {
+    const analysis = this.deps.analysis;
+    if (!analysis) return;
+
+    try {
+      const { run, events } =
+        outcome.kind === "success"
+          ? buildAnalysisRecord({
+              kind: "success",
+              trigger: outcome.trigger,
+              runtimeMode: analysis.runtimeMode,
+              brokerProvider: analysis.brokerProvider,
+              marketProvider: analysis.marketProvider,
+              timeframe: analysis.timeframe,
+              strategyId: this.deps.strategy.strategyId,
+              strategyVersion: this.deps.strategy.version,
+              instrument: this.deps.instrument,
+              snapshot: outcome.snapshot,
+              context: outcome.context,
+              result: outcome.result,
+              runtimeDurationMs: outcome.runtimeDurationMs,
+            })
+          : buildAnalysisRecord({
+              kind: "failure",
+              trigger: outcome.trigger,
+              runtimeMode: analysis.runtimeMode,
+              brokerProvider: analysis.brokerProvider,
+              marketProvider: analysis.marketProvider,
+              timeframe: analysis.timeframe,
+              strategyId: this.deps.strategy.strategyId,
+              strategyVersion: this.deps.strategy.version,
+              instrument: this.deps.instrument,
+              error: outcome.error,
+              runtimeDurationMs: outcome.runtimeDurationMs,
+            });
+
+      const analysisRunId = await analysis.repository.saveAnalysis(run);
+      await analysis.repository.saveEvents(analysisRunId, events);
+    } catch (error) {
+      // Structured, credential-safe: executionRunId (the cycle id), instrument, strategyId, a
+      // short errorCategory (never the raw Supabase error object/.details/.hint — see
+      // categorizeAnalysisPersistenceError's own doc comment), and persistenceEnabled so a log
+      // reader never has to guess whether this feature was even on. Never includes Supabase keys,
+      // tokens, headers, or a full database response — only `.message` and a short category code.
+      logger.error("Failed to persist market analysis record — the trading cycle's own decision/execution outcome was unaffected", {
+        component: "hermes-analysis-persistence",
+        executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
+        instrument: this.deps.instrument,
+        strategyId: this.deps.strategy.strategyId,
+        errorCategory: categorizeAnalysisPersistenceError(error),
+        persistenceEnabled: true,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

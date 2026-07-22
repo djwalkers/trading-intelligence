@@ -2,7 +2,7 @@ import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
 import { HERMES_RUNTIME_AUDIT_LOG_PATH } from "@/lib/hermes-execution/audit-log-path";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-clock";
-import { TradingRuntime } from "@/lib/hermes-execution/runtime/trading-runtime";
+import { TradingRuntime, type AnalysisIntegrationDeps } from "@/lib/hermes-execution/runtime/trading-runtime";
 import { buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
 import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
 import { TelegramAlertingAuditTrail, type AlertSender } from "@/lib/hermes-execution/telegram/telegram-alerting-audit-trail";
@@ -10,6 +10,33 @@ import { TelegramBot } from "@/lib/hermes-execution/telegram/telegram-bot";
 import { HttpTelegramTransport } from "@/lib/hermes-execution/telegram/telegram-transport";
 import type { AuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
+import { buildAnalysisPersistenceConfig } from "@/lib/hermes-execution/analysis/analysis-persistence-config";
+import { SupabaseAnalysisRepository } from "@/lib/hermes-execution/analysis/analysis-repository";
+import { getServiceRoleClient } from "@/lib/supabase/service-role-client";
+
+// Phase 2B — Decision Intelligence: Historical Analysis Persistence. Constructs
+// AnalysisIntegrationDeps only when HERMES_SUPABASE_USER_ID and the Supabase service role are both
+// configured — undefined (the default) means TradingRuntime behaves exactly as it did before this
+// phase existed (see trading-runtime.ts's own AnalysisIntegrationDeps doc comment). A partial or
+// missing configuration never fails startup; it only means this one, optional, read-only
+// observability layer stays off.
+function buildAnalysisIntegrationDeps(
+  config: ReturnType<typeof getHermesExecutionConfig>,
+): AnalysisIntegrationDeps | undefined {
+  const persistenceConfig = buildAnalysisPersistenceConfig();
+  if (!persistenceConfig.enabled || !persistenceConfig.ownerUserId) return undefined;
+
+  const client = getServiceRoleClient();
+  if (!client) return undefined;
+
+  return {
+    repository: new SupabaseAnalysisRepository(client, persistenceConfig.ownerUserId),
+    runtimeMode: config.runtimeTrading.mode,
+    brokerProvider: config.brokerProvider,
+    marketProvider: config.marketDataProvider,
+    timeframe: config.marketData.timeframe,
+  };
+}
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. Replaces Mission 7's hard-coded
 // `const INSTRUMENT = "BTC"` / `const AMOUNT = 10` and inline dependency assembly with the shared
@@ -99,6 +126,15 @@ export async function main(): Promise<void> {
   console.log("------------------------------------------------------");
   console.log(JSON.stringify(summary, null, 2));
 
+  // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Optional — see
+  // buildAnalysisIntegrationDeps's own doc comment for exactly when this is undefined.
+  const analysis = buildAnalysisIntegrationDeps(config);
+  console.log(
+    analysis
+      ? "Market analysis persistence enabled — every cycle will be recorded to Supabase (market_analysis_runs)."
+      : "Market analysis persistence disabled — set HERMES_SUPABASE_USER_ID and the Supabase service role to enable it.",
+  );
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -113,6 +149,7 @@ export async function main(): Promise<void> {
     intervalMs: config.scheduler.intervalMs,
     immediateFirstRun: config.scheduler.immediateFirstRun,
     shutdownTimeoutMs: config.scheduler.shutdownTimeoutMs,
+    analysis,
   });
 
   let telegramBot: TelegramBot | undefined;

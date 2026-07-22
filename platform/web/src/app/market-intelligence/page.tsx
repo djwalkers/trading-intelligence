@@ -39,6 +39,20 @@ export default function MarketIntelligencePage() {
           TradingView.
         </p>
       </SectionPanel>
+
+      {/* Phase 2B — Decision Intelligence: Historical Analysis Persistence. Distinct from the
+          existing, unrelated /decision-intelligence page (the mock/strategy-engine bot's own "AI
+          Decision History") — this one is Hermes-specific, nested here under Market Intelligence. */}
+      <SectionPanel
+        title="Decision Intelligence"
+        description="Full historical record of every Hermes trading-runtime analysis cycle — read-only."
+        viewAllHref="/market-intelligence/decision-intelligence"
+      >
+        <p className="px-5 py-4 text-xs text-ink-500">
+          Every scheduler cycle, decision, and (if any) execution — timeline, distributions, strategy usage, and CSV
+          export.
+        </p>
+      </SectionPanel>
     </>
   );
 }
