@@ -11,16 +11,27 @@ import { logger } from "@/lib/logger/logger";
 const HOUR_MS = 3_600_000;
 
 /** A deterministic, valid 60-candle hourly history ending at `endTimestamp` (defaults to now) —
- * satisfies validateHistoricalCandles' own MIN_REQUIRED_CANDLES floor (50) with headroom. */
-function makeCandles(options: { count?: number; endTimestamp?: Date; basePrice?: number } = {}): Candle[] {
+ * satisfies validateHistoricalCandles' own MIN_REQUIRED_CANDLES floor (50) with headroom.
+ * `withVolume: false` omits volume entirely (Phase 2A follow-up — Volume Nullability), matching
+ * EtoroDemoBroker.getHistoricalCandles' own null/missing->undefined normalization. */
+function makeCandles(options: { count?: number; endTimestamp?: Date; basePrice?: number; withVolume?: boolean } = {}): Candle[] {
   const count = options.count ?? 60;
   const end = options.endTimestamp ?? new Date();
   const basePrice = options.basePrice ?? 100;
+  const withVolume = options.withVolume ?? true;
   const candles: Candle[] = [];
   for (let i = 0; i < count; i++) {
     const timestamp = new Date(end.getTime() - (count - 1 - i) * HOUR_MS).toISOString();
     const price = basePrice + i * 0.01;
-    candles.push({ symbol: "BTC", timestamp, open: price, high: price + 0.5, low: price - 0.5, close: price, volume: 100 });
+    candles.push({
+      symbol: "BTC",
+      timestamp,
+      open: price,
+      high: price + 0.5,
+      low: price - 0.5,
+      close: price,
+      ...(withVolume ? { volume: 100 } : {}),
+    });
   }
   return candles;
 }
@@ -86,6 +97,32 @@ describe("LiveMarketDataProvider — successful fetch", () => {
     await provider.getMarketData("ETH");
 
     expect(getHistoricalCandles).toHaveBeenCalledWith("ETH", "4h", 75);
+  });
+});
+
+describe("LiveMarketDataProvider — volume nullability end-to-end (Phase 2A follow-up)", () => {
+  it("produces a valid snapshot when every historical candle has undefined volume — indicators still work", async () => {
+    const candles = makeCandles({ withVolume: false });
+    const provider = new LiveMarketDataProvider(stubSource({ candles }));
+    const snapshot = await provider.getMarketData("BTC");
+
+    expect(snapshot.candles).toHaveLength(candles.length);
+    // The snapshot's own top-level volume (the latest candle's) is honestly undefined too — never
+    // fabricated as 0 just because this provider needs to report *some* value.
+    expect(snapshot.volume).toBeUndefined();
+  });
+
+  it("does not reject or alter a history where only some candles report volume", async () => {
+    const candles = makeCandles();
+    const { volume: _volume, ...withoutVolume } = candles[10]!;
+    candles[10] = withoutVolume as Candle;
+    const provider = new LiveMarketDataProvider(stubSource({ candles }));
+    const snapshot = await provider.getMarketData("BTC");
+
+    expect(snapshot.candles).toHaveLength(candles.length);
+    const sorted = [...candles].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const mappedCandle = snapshot.candles.find((c) => c.timestamp === sorted[10]!.timestamp);
+    expect(mappedCandle?.volume).toBeUndefined();
   });
 });
 

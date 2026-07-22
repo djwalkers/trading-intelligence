@@ -21,7 +21,9 @@ export interface DiagnosticsCandle {
   high: number;
   low: number;
   close: number;
-  volume: number;
+  /** Phase 2A follow-up — Volume Nullability. Optional for the same reason Candle.volume is
+   * (lib/hermes-execution/types.ts) — undefined means genuinely unknown, never fabricated. */
+  volume?: number;
 }
 
 export interface DiagnosticsReport {
@@ -122,7 +124,7 @@ export function formatDiagnosticsReport(report: DiagnosticsReport): string {
     `  High: ${report.lastClosedCandle.high}`,
     `  Low: ${report.lastClosedCandle.low}`,
     `  Close: ${report.lastClosedCandle.close}`,
-    `  Volume: ${report.lastClosedCandle.volume}`,
+    `  Volume: ${report.lastClosedCandle.volume !== undefined ? report.lastClosedCandle.volume : "n/a (not reported by eToro for this candle)"}`,
     "",
     `EMA20: ${report.ema20.toFixed(2)}`,
     `EMA50: ${report.ema50.toFixed(2)}`,

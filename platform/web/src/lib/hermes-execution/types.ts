@@ -49,7 +49,15 @@ export interface Candle {
   high: number;
   low: number;
   close: number;
-  volume: number;
+  /** Phase 2A follow-up — Volume Nullability. Optional: CONFIRMED live (via a real
+   * `npm run market:diagnostics` run against eToro) that a real historical-candle response can
+   * return `null` for volume despite eToro's own documented schema declaring it required/numeric
+   * with no nullable flag — a genuine documentation/live-response discrepancy. `undefined` here
+   * means "volume genuinely unknown," never fabricated as 0 (see
+   * EtoroDemoBroker.getHistoricalCandles's own null->undefined normalization). No indicator in
+   * technical-indicators.ts reads this field — EMA/RSI/ATR/trend are all price-only — so an absent
+   * volume never affects a trading decision. */
+  volume?: number;
 }
 
 export type SignalAction = "NO_ACTION" | "ENTER_LONG" | "ENTER_SHORT" | "EXIT_POSITION";

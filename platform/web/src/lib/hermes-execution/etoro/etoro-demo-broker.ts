@@ -341,7 +341,13 @@ export class EtoroDemoBroker implements PaperBroker {
       high: entry.high,
       low: entry.low,
       close: entry.close,
-      volume: entry.volume,
+      // Phase 2A follow-up — Volume Nullability. eToro's documented schema declares this
+      // required/numeric, but a real live response can return null (confirmed via
+      // market:diagnostics) or, now that one of the DTO's own declared-required fields has proven
+      // unreliable, conceivably omit the key entirely — both normalized to undefined (this
+      // pipeline's own "volume unknown" representation), never fabricated as 0. See
+      // EtoroCandleEntry's own doc comment.
+      volume: entry.volume === null || entry.volume === undefined ? undefined : entry.volume,
     }));
   }
 

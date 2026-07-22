@@ -172,7 +172,15 @@ export interface EtoroCandleEntry {
   high: number;
   low: number;
   close: number;
-  volume: number;
+  /** CONFIRMED live (Phase 2A follow-up, via a real market:diagnostics run): this field can be
+   * `null` despite eToro's own documented schema declaring it `required`/`number`/`float` with no
+   * nullable flag anywhere in that schema — a genuine documentation/live-response discrepancy, the
+   * same pattern this file's top-of-file confidence note already warns about for other endpoints.
+   * Also typed optional (not just nullable) since the key's presence itself is no longer trusted
+   * once one of its own declared-required fields has been observed to diverge from documentation.
+   * EtoroDemoBroker.getHistoricalCandles normalizes both cases into Candle.volume === undefined —
+   * this pipeline's own "volume unknown" representation — never a fabricated 0. */
+  volume?: number | null;
 }
 
 /** One instrument's candle block within the response's outer `candles` array — the documented

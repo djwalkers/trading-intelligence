@@ -37,7 +37,9 @@ export interface MarketDataSnapshot {
   /** The provider's own notion of "current price" — typically the latest candle's close or the
    * bid/ask midpoint; each implementation documents which. */
   latestPrice: number;
-  volume: number;
+  /** Phase 2A follow-up — Volume Nullability. Optional for the same reason Candle.volume is
+   * (../types.ts) — undefined means genuinely unknown, never fabricated as 0. */
+  volume?: number;
 }
 
 export interface MarketDataProvider {

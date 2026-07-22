@@ -152,6 +152,69 @@ describe("validateHistoricalCandles — NaN / non-finite values", () => {
       validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
     ).toThrow(/non-finite/);
   });
+
+  it("rejects a NaN volume when volume is present", () => {
+    const candles = makeValidCandles();
+    candles[5] = { ...candles[5]!, volume: Number.NaN };
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).toThrow(/non-finite volume/);
+  });
+});
+
+describe("validateHistoricalCandles — volume nullability (Phase 2A follow-up)", () => {
+  it("accepts a candle with volume entirely missing (undefined) — OHLC/timestamp alone are sufficient", () => {
+    const candles = makeValidCandles();
+    const { volume: _volume, ...withoutVolume } = candles[5]!;
+    candles[5] = withoutVolume as Candle;
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).not.toThrow();
+  });
+
+  it("accepts an entire history where every candle has undefined volume", () => {
+    const candles = makeValidCandles().map((c) => {
+      const { volume: _volume, ...rest } = c;
+      return rest as Candle;
+    });
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).not.toThrow();
+  });
+
+  it("accepts a valid, present, non-negative numeric volume", () => {
+    const candles = makeValidCandles();
+    candles[5] = { ...candles[5]!, volume: 1234.5 };
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).not.toThrow();
+  });
+
+  it("accepts a present volume of exactly zero — a real observation, not treated as absent", () => {
+    const candles = makeValidCandles();
+    candles[5] = { ...candles[5]!, volume: 0 };
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).not.toThrow();
+  });
+
+  it("rejects a present negative volume", () => {
+    const candles = makeValidCandles();
+    candles[5] = { ...candles[5]!, volume: -1 };
+    expect(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    ).toThrow(/negative volume/);
+  });
+
+  it("never fabricates a volume value — a candle validated with undefined volume is returned/read as undefined, not 0", () => {
+    const candles = makeValidCandles();
+    const { volume: _volume, ...withoutVolume } = candles[5]!;
+    candles[5] = withoutVolume as Candle;
+    validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW });
+    // validateHistoricalCandles never mutates or returns a repaired copy — the caller's own array
+    // (and this candle's volume) is untouched.
+    expect(candles[5]!.volume).toBeUndefined();
+  });
 });
 
 describe("validateHistoricalCandles — stale data", () => {

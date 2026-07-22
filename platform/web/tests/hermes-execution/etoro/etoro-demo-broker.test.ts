@@ -398,6 +398,80 @@ describe("EtoroDemoBroker — historical candle retrieval", () => {
     ]);
   });
 
+  it("normalizes a real live null volume into undefined, never fabricating a substitute value", async () => {
+    // Phase 2A follow-up — Volume Nullability. Confirmed live: eToro's own documented schema
+    // declares volume required/numeric, but a real market:diagnostics run received null.
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () =>
+          jsonResponse(200, {
+            interval: "OneHour",
+            candles: [
+              {
+                instrumentId: 100000,
+                candles: [{ instrumentID: 100000, fromDate: "2026-01-01T00:00:00Z", open: 100, high: 101, low: 99, close: 100.5, volume: null }],
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const candles = await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    expect(candles).toHaveLength(1);
+    expect(candles[0]!.volume).toBeUndefined();
+    expect(candles[0]).not.toHaveProperty("volume", 0); // never fabricated as zero
+  });
+
+  it("normalizes an entirely missing volume key into undefined", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () =>
+          jsonResponse(200, {
+            interval: "OneHour",
+            candles: [
+              {
+                instrumentId: 100000,
+                candles: [{ instrumentID: 100000, fromDate: "2026-01-01T00:00:00Z", open: 100, high: 101, low: 99, close: 100.5 }],
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const candles = await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    expect(candles[0]!.volume).toBeUndefined();
+  });
+
+  it("passes a real, present numeric volume through unchanged, including exactly zero", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        history: () =>
+          jsonResponse(200, {
+            interval: "OneHour",
+            candles: [
+              {
+                instrumentId: 100000,
+                candles: [
+                  { instrumentID: 100000, fromDate: "2026-01-01T00:00:00Z", open: 100, high: 101, low: 99, close: 100.5, volume: 42.5 },
+                  { instrumentID: 100000, fromDate: "2026-01-01T01:00:00Z", open: 100.5, high: 101, low: 99, close: 100, volume: 0 },
+                ],
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const candles = await broker.getHistoricalCandles("BTC", "1h", 200);
+
+    expect(candles[0]!.volume).toBe(42.5);
+    expect(candles[1]!.volume).toBe(0); // a real zero observation, distinct from "unknown"
+  });
+
   it("throws EtoroCandleHistoryUnavailableError('absent') when no block matches the resolved instrument and more than one block is present", async () => {
     const { broker } = makeBroker(
       defaultRoutes({

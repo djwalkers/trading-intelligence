@@ -55,10 +55,18 @@ function fail(instrument: string, detail: string): never {
 /**
  * Rejects (throws MarketDataProviderError) rather than silently dropping, trimming, or repairing
  * anything — a caller (LiveMarketDataProvider) that receives no error back may trust the candles
- * completely. Checks, in order: minimum count, per-candle NaN/non-finite values, non-positive
- * prices, malformed OHLC (high < low, or open/close outside [low, high]), duplicate timestamps,
- * missing candles (a gap between consecutive candles wider than the selected timeframe tolerates),
- * and staleness (the latest candle older than maxCandleAgeSeconds).
+ * completely. Checks, in order: minimum count, per-candle NaN/non-finite/non-positive OHLC,
+ * malformed OHLC (high < low, or open/close outside [low, high]), per-candle volume (only when
+ * present — see below), duplicate timestamps, missing candles (a gap between consecutive candles
+ * wider than the selected timeframe tolerates), and staleness (the latest candle older than
+ * maxCandleAgeSeconds).
+ *
+ * Volume is deliberately NOT in the same always-required bucket as OHLC/timestamp (Phase 2A
+ * follow-up — Volume Nullability): CONFIRMED live that eToro's historical-candle endpoint can
+ * return a null volume despite its own documented schema declaring the field required/numeric.
+ * Candle.volume is `undefined` for "genuinely unknown" (see its own doc comment) — this function
+ * validates it only when present (finite, non-negative), and never rejects a candle for volume
+ * being absent, and never substitutes a value for it.
  */
 export function validateHistoricalCandles(candles: Candle[], instrument: string, options: ValidateHistoricalCandlesOptions): void {
   const now = options.now ?? new Date();
@@ -76,12 +84,12 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
     }
     seenTimestamps.add(timestamp);
 
+    // OHLC — always mandatory and finite, unlike volume below.
     for (const [name, value] of [
       ["open", open],
       ["high", high],
       ["low", low],
       ["close", close],
-      ["volume", volume],
     ] as const) {
       if (!Number.isFinite(value)) {
         fail(instrument, `non-finite ${name} (${value}) at ${timestamp}.`);
@@ -95,6 +103,17 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
     }
     if (open > high || open < low || close > high || close < low) {
       fail(instrument, `open/close outside the [low, high] range at ${timestamp} (open=${open}, close=${close}, low=${low}, high=${high}).`);
+    }
+
+    // Volume — optional. Only validated when present; absence is never an error and is never
+    // filled in with a substitute value (see this function's own doc comment above).
+    if (volume !== undefined) {
+      if (!Number.isFinite(volume)) {
+        fail(instrument, `non-finite volume (${volume}) at ${timestamp}.`);
+      }
+      if (volume < 0) {
+        fail(instrument, `negative volume (${volume}) at ${timestamp}.`);
+      }
     }
   }
 
