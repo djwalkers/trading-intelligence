@@ -1,5 +1,5 @@
-import * as path from "node:path";
 import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
+import { HERMES_RUNTIME_AUDIT_LOG_PATH } from "@/lib/hermes-execution/audit-log-path";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-clock";
 import { TradingRuntime } from "@/lib/hermes-execution/runtime/trading-runtime";
@@ -16,8 +16,6 @@ import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-
 // runtime-config/ layer: validated configuration -> buildRuntimeDependencies() -> TradingRuntime.
 // Nothing about decision/risk/execution/lifecycle/broker/market-data logic is reimplemented here —
 // this file only ever loads config, calls the factory, and wires the result into TradingRuntime.
-const AUDIT_LOG_PATH = path.join(process.cwd(), ".data", "hermes-execution", "market-runtime-audit-log.json");
-
 // Portfolio-risk thresholds remain CLI-local, unchanged since Milestone 4 — this milestone does not
 // call for env-configurable portfolio risk limits, only for the previously hard-coded trading
 // inputs (symbol/quantity/strategy/broker/mode) to become configuration, which they now are.
@@ -52,7 +50,7 @@ export async function main(): Promise<void> {
   const executionRunId = `market-runtime-${Date.now()}`;
   console.log(`Execution run id: ${executionRunId}`);
 
-  const baseAuditTrail = await JsonFileAuditTrail.createFresh(AUDIT_LOG_PATH);
+  const baseAuditTrail = await JsonFileAuditTrail.createFresh(HERMES_RUNTIME_AUDIT_LOG_PATH);
 
   // Prototype V1 — minimum Telegram integration. When enabled, every alert-worthy audit event (see
   // telegram-alerting-audit-trail.ts's own formatAlert) is also sent to the one configured chat id,
