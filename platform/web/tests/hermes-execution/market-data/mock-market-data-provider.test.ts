@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MockMarketDataProvider } from "@/lib/hermes-execution/market-data/mock-market-data-provider";
+import { logger } from "@/lib/logger/logger";
 
 const NOW = new Date("2026-01-01T12:00:00Z");
 
@@ -81,5 +82,30 @@ describe("MockMarketDataProvider — bias", () => {
     const first = snapshot.candles[0]!.close;
     const last = snapshot.candles[snapshot.candles.length - 1]!.close;
     expect(last).toBeLessThan(first);
+  });
+});
+
+describe("MockMarketDataProvider — structured quote-fetch logging", () => {
+  it("logs provider:'mock' with the same field shape LiveMarketDataProvider uses — so a VPS log stream can tell the two apart at a glance", async () => {
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      const provider = new MockMarketDataProvider({ seed: 5, count: 20 });
+      const snapshot = await provider.getMarketData("BTC");
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        "Mock market data quote generated",
+        expect.objectContaining({
+          component: "market-data",
+          provider: "mock",
+          instrument: "BTC",
+          quoteTimestamp: snapshot.timestamp,
+          latestPrice: snapshot.latestPrice,
+          candleCount: 20,
+          fallbackOccurred: false,
+        }),
+      );
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LiveMarketDataProvider, type RateSource } from "@/lib/hermes-execution/market-data/live-market-data-provider";
 import { MarketDataProviderError } from "@/lib/hermes-execution/market-data/market-data-provider";
+import { logger } from "@/lib/logger/logger";
 
 function stubRateSource(rate: { bid: number; ask: number }): RateSource {
   return { getRate: async () => rate };
@@ -82,5 +83,66 @@ describe("LiveMarketDataProvider — malformed data handling", () => {
   it("rejects an inverted rate (ask below bid)", async () => {
     const provider = new LiveMarketDataProvider(stubRateSource({ bid: 105, ask: 100 }));
     await expect(provider.getMarketData("BTC")).rejects.toThrow(/inverted rate/);
+  });
+});
+
+describe("LiveMarketDataProvider — structured quote-fetch logging", () => {
+  it("logs provider, instrument, quote timestamp, latest price, and candle count on a successful fetch", async () => {
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      const provider = new LiveMarketDataProvider(stubRateSource({ bid: 99, ask: 101 }), { candleCount: 12 });
+      const snapshot = await provider.getMarketData("BTC");
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        "Live market data quote fetched",
+        expect.objectContaining({
+          component: "market-data",
+          provider: "live",
+          instrument: "BTC",
+          quoteTimestamp: snapshot.timestamp,
+          latestPrice: snapshot.latestPrice,
+          candleCount: 12,
+          fallbackOccurred: false,
+        }),
+      );
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("never logs the raw bid/ask rate object, credentials, or headers", async () => {
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      const provider = new LiveMarketDataProvider(stubRateSource({ bid: 99, ask: 101 }));
+      await provider.getMarketData("BTC");
+
+      const [, context] = infoSpy.mock.calls[0]!;
+      expect(context).not.toHaveProperty("apiKey");
+      expect(context).not.toHaveProperty("userKey");
+      expect(context).not.toHaveProperty("headers");
+      expect(context).not.toHaveProperty("rate");
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("logs an error with fallbackOccurred:false when the fetch fails, and still throws — never substitutes a value", async () => {
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+    try {
+      const provider = new LiveMarketDataProvider(failingRateSource(new Error("connection reset")));
+      await expect(provider.getMarketData("BTC")).rejects.toThrow(MarketDataProviderError);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Live market data quote fetch failed — no fallback attempted",
+        expect.objectContaining({
+          component: "market-data",
+          provider: "live",
+          instrument: "BTC",
+          fallbackOccurred: false,
+        }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

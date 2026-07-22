@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger/logger";
 import { generateSyntheticCandles, type CandleBias } from "../mock-candle-generator";
 import { MarketDataProviderError, type MarketDataProvider, type MarketDataSnapshot } from "./market-data-provider";
 
@@ -61,6 +62,22 @@ export class MockMarketDataProvider implements MarketDataProvider {
     const halfSpread = (latest.close * spreadRatio) / 2;
     const bid = latest.close - halfSpread;
     const ask = latest.close + halfSpread;
+
+    // Milestone 5 follow-up — Live Market Data Observability. Mirrors LiveMarketDataProvider's own
+    // log line (same field shape, provider: "mock") so a VPS log stream makes it immediately
+    // obvious if a deployment believed to be running HERMES_MARKET_DATA_PROVIDER=live is actually
+    // serving mock quotes — this provider is only ever selected by explicit configuration
+    // (market-data-provider-factory.ts fails closed on anything else), never as a silent fallback
+    // from "live", so `fallbackOccurred` is always false here too.
+    logger.info("Mock market data quote generated", {
+      component: "market-data",
+      provider: "mock",
+      instrument,
+      quoteTimestamp: latest.timestamp,
+      latestPrice: latest.close,
+      candleCount: candles.length,
+      fallbackOccurred: false,
+    });
 
     return {
       instrument,

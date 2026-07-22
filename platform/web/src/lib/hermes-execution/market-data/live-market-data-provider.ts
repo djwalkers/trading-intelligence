@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger/logger";
 import { generateSyntheticCandles } from "../mock-candle-generator";
 import { MarketDataProviderError, type MarketDataProvider, type MarketDataSnapshot } from "./market-data-provider";
 
@@ -49,6 +50,18 @@ export class LiveMarketDataProvider implements MarketDataProvider {
     try {
       rate = await this.rateSource.getRate(instrument);
     } catch (error) {
+      // No fallback to a mock/synthetic quote happens here or anywhere upstream — a failed live
+      // fetch always surfaces as a thrown MarketDataProviderError, never a silently-substituted
+      // value (see this class's own doc comment and market-data-provider-factory.ts). Logged at
+      // "error" specifically so a VPS log stream shows a real quote-fetch failure distinctly from
+      // the routine "info" line below, without needing to parse exception text.
+      logger.error("Live market data quote fetch failed — no fallback attempted", {
+        component: "market-data",
+        provider: "live",
+        instrument,
+        fallbackOccurred: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
       throw new MarketDataProviderError(
         `LiveMarketDataProvider failed to fetch a rate for "${instrument}": ${
           error instanceof Error ? error.message : String(error)
@@ -82,10 +95,25 @@ export class LiveMarketDataProvider implements MarketDataProvider {
       endTimestamp: now,
     });
     const latest = candles[candles.length - 1];
+    const timestamp = now.toISOString();
+
+    // Milestone 5 follow-up — Live Market Data Observability. The one structured log line that
+    // proves a real eToro quote was fetched and used this cycle, distinct from the synthetic
+    // candle-history caveat documented on this class above. Never logs `rate`/headers/credentials —
+    // only the already-public-facing snapshot fields also returned below.
+    logger.info("Live market data quote fetched", {
+      component: "market-data",
+      provider: "live",
+      instrument,
+      quoteTimestamp: timestamp,
+      latestPrice: midPrice,
+      candleCount: candles.length,
+      fallbackOccurred: false,
+    });
 
     return {
       instrument,
-      timestamp: now.toISOString(),
+      timestamp,
       candles,
       bid: rate.bid,
       ask: rate.ask,
