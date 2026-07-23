@@ -17,7 +17,10 @@ export function formatStatus(status: TradingRuntimeStatus): string {
     `Skipped (overlap/paused/market-closed): ${status.skippedOverlapCount}/${status.skippedPausedCount}/${status.skippedMarketClosedCount}`,
   ];
   if (status.lastResult) {
-    lines.push(`Last decision: ${status.lastResult.decision} on ${status.lastResult.instrument} (executed: ${status.lastResult.executed})`);
+    lines.push(
+      `Last decision: ${status.lastResult.decision} on ${status.lastResult.instrument} ` +
+        `(candidate created: ${status.lastResult.candidateCreated}, executed this cycle: ${status.lastResult.executedCandidateIds.length})`,
+    );
   }
   if (status.lastError) {
     lines.push(`Last error: ${status.lastError.message} (${status.lastError.occurredAt})`);

@@ -7,6 +7,8 @@ import type { MarketDataProvider, MarketDataSnapshot } from "@/lib/hermes-execut
 import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
+import { InMemoryTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
+import { approveTradeCandidate } from "@/lib/hermes-execution/trade-approval/trade-candidate-service";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import type { PaperBroker } from "@/lib/hermes-execution/paper-broker";
 import type { Account, CompletedTrade, InternalStrategy, OrderRequest, PaperPosition } from "@/lib/hermes-execution/types";
@@ -117,6 +119,7 @@ interface RuntimeHarness {
   clock: ManualSchedulerClock;
   lifecycleService: TradeLifecycleService;
   auditTrail: InMemoryAuditTrail;
+  tradeCandidateRepository: InMemoryTradeCandidateRepository;
 }
 
 function makeRuntime(
@@ -127,6 +130,7 @@ function makeRuntime(
     intervalMs?: number;
     immediateFirstRun?: boolean;
     shutdownTimeoutMs?: number;
+    tradeCandidateExpiryMs?: number;
   } = {},
 ): RuntimeHarness {
   const broker = makeMockBroker(overrides.openPositions ?? []);
@@ -140,6 +144,7 @@ function makeRuntime(
   });
   const marketDataProvider =
     overrides.marketDataProvider ?? new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+  const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
 
   const runtime = new TradingRuntime({
     broker,
@@ -155,9 +160,11 @@ function makeRuntime(
     intervalMs: overrides.intervalMs ?? 10_000,
     immediateFirstRun: overrides.immediateFirstRun ?? true,
     shutdownTimeoutMs: overrides.shutdownTimeoutMs,
+    tradeCandidateRepository,
+    tradeCandidateExpiryMs: overrides.tradeCandidateExpiryMs ?? 20 * 60_000,
   });
 
-  return { runtime, broker, clock, lifecycleService, auditTrail };
+  return { runtime, broker, clock, lifecycleService, auditTrail, tradeCandidateRepository };
 }
 
 describe("TradingRuntime — start/stop", () => {
@@ -269,17 +276,56 @@ describe("TradingRuntime — recurring scheduling", () => {
 });
 
 describe("TradingRuntime — successful cycle (pipeline integration)", () => {
-  it("actually calls through the real lifecycle-aware pipeline — a genuine OPEN lifecycle record with the broker's real entry price", async () => {
-    const { runtime, broker, lifecycleService, clock } = makeRuntime();
+  it("a BUY decision creates a PENDING trade candidate and never touches the broker automatically (Phase 3.5)", async () => {
+    const { runtime, broker, lifecycleService, clock, tradeCandidateRepository } = makeRuntime();
     await runtime.start();
     await clock.advance(0);
 
-    expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
     const status = runtime.getStatus();
     expect(status.successfulRunCount).toBe(1);
-    expect(status.lastResult).toMatchObject({ decision: "BUY", executed: true, instrument: "BTC" });
+    expect(status.lastResult).toMatchObject({ decision: "BUY", candidateCreated: true, instrument: "BTC", executedCandidateIds: [] });
     expect(status.lastRunStartedAt).toBeDefined();
     expect(status.lastRunCompletedAt).toBeDefined();
+
+    const candidates = await tradeCandidateRepository.list({ status: "PENDING" });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ strategyId: "DEMO-0001", instrument: "BTC", direction: "BUY", status: "PENDING" });
+
+    // No lifecycle record yet either — that only happens once a human approves the candidate and a
+    // later cycle actually executes it (see the "approved candidate execution" describe block).
+    const openRecord = await lifecycleService.findOpenRecord("DEMO-0001", "BTC");
+    expect(openRecord).toBeUndefined();
+  });
+});
+
+describe("TradingRuntime — approved candidate execution", () => {
+  it("executes a candidate a human approved in a prior cycle, via the real lifecycle-aware pipeline, on the next cycle", async () => {
+    const { runtime, broker, lifecycleService, clock, auditTrail, tradeCandidateRepository } = makeRuntime({ intervalMs: 10_000 });
+    await runtime.start();
+    await clock.advance(0); // cycle 1: creates a PENDING candidate, no broker call
+
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    const [pending] = await tradeCandidateRepository.list({ status: "PENDING" });
+    expect(pending).toBeDefined();
+
+    const approval = await approveTradeCandidate({
+      repository: tradeCandidateRepository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: pending!.id,
+      approvedByUserId: "user-1",
+      now: clock.now(),
+    });
+    expect(approval.outcome).toBe("approved");
+
+    await clock.advance(10_000); // cycle 2: executes the now-approved candidate, then proposes a new one
+
+    expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    const executed = await tradeCandidateRepository.getById(pending!.id);
+    expect(executed?.status).toBe("EXECUTED");
+    const status = runtime.getStatus();
+    expect(status.lastResult?.executedCandidateIds).toEqual([pending!.id]);
 
     const openRecord = await lifecycleService.findOpenRecord("DEMO-0001", "BTC");
     expect(openRecord?.status).toBe("OPEN");
@@ -289,8 +335,15 @@ describe("TradingRuntime — successful cycle (pipeline integration)", () => {
 
 describe("TradingRuntime — failed cycle", () => {
   it("records failedRunCount/lastError without throwing, and the scheduler continues afterward", async () => {
-    const { runtime, broker, clock } = makeRuntime({ intervalMs: 10_000 });
-    broker.placeMarketOrder.mockRejectedValueOnce(new Error("broker unreachable"));
+    const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    let shouldFail = true;
+    const flakyProvider: MarketDataProvider = {
+      getMarketData: async (instrument) => {
+        if (shouldFail) throw new Error("broker unreachable");
+        return inner.getMarketData(instrument);
+      },
+    };
+    const { runtime, clock } = makeRuntime({ marketDataProvider: flakyProvider, intervalMs: 10_000 });
 
     await runtime.start();
     await clock.advance(0);
@@ -302,6 +355,7 @@ describe("TradingRuntime — failed cycle", () => {
     expect(status.state).toBe("RUNNING"); // a failure never stops the runtime
 
     // Next scheduled tick succeeds normally — proves scheduling continued after the failure.
+    shouldFail = false;
     await clock.advance(10_000);
     status = runtime.getStatus();
     expect(status.successfulRunCount).toBe(1);
@@ -309,8 +363,12 @@ describe("TradingRuntime — failed cycle", () => {
   });
 
   it("lastError is a plain serialisable object, never a raw Error instance", async () => {
-    const { runtime, broker, clock } = makeRuntime();
-    broker.placeMarketOrder.mockRejectedValueOnce(new Error("boom"));
+    const failingProvider: MarketDataProvider = {
+      getMarketData: async () => {
+        throw new Error("boom");
+      },
+    };
+    const { runtime, clock } = makeRuntime({ marketDataProvider: failingProvider });
     await runtime.start();
     await clock.advance(0);
 
@@ -324,7 +382,7 @@ describe("TradingRuntime — overlap prevention", () => {
   it("skips a scheduled tick that occurs while a cycle is still active, and records it", async () => {
     const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
     const gate = makeGate();
-    const { runtime, clock, broker } = makeRuntime({
+    const { runtime, clock, tradeCandidateRepository } = makeRuntime({
       marketDataProvider: new GatedMarketDataProvider(inner, gate.promise),
       intervalMs: 10_000,
     });
@@ -336,7 +394,7 @@ describe("TradingRuntime — overlap prevention", () => {
     await clock.advance(10_000); // cycle 2's scheduled tick fires while cycle 1 is still active
     expect(runtime.getStatus().skippedOverlapCount).toBe(1);
     expect(runtime.getStatus().isCycleRunning).toBe(true); // still cycle 1, not replaced
-    expect(broker.placeMarketOrder).not.toHaveBeenCalled(); // cycle 1 hasn't reached the broker yet
+    expect(await tradeCandidateRepository.list()).toHaveLength(0); // cycle 1 hasn't produced a decision yet
 
     gate.resolve();
     await flushMicrotasks();
@@ -344,7 +402,7 @@ describe("TradingRuntime — overlap prevention", () => {
     const status = runtime.getStatus();
     expect(status.isCycleRunning).toBe(false);
     expect(status.successfulRunCount).toBe(1); // only cycle 1 ever actually ran
-    expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    expect(await tradeCandidateRepository.list()).toHaveLength(1);
   });
 
   it("runNow() also rejects while a cycle is already active", async () => {
@@ -365,7 +423,7 @@ describe("TradingRuntime — overlap prevention", () => {
 
 describe("TradingRuntime — paused tick skipping", () => {
   it("a scheduled tick while PAUSED does not run a cycle, and is counted", async () => {
-    const { runtime, clock, broker } = makeRuntime({ intervalMs: 10_000, immediateFirstRun: false });
+    const { runtime, clock, tradeCandidateRepository } = makeRuntime({ intervalMs: 10_000, immediateFirstRun: false });
     await runtime.start();
     await runtime.pause();
 
@@ -373,7 +431,7 @@ describe("TradingRuntime — paused tick skipping", () => {
     const status = runtime.getStatus();
     expect(status.skippedPausedCount).toBe(1);
     expect(status.successfulRunCount).toBe(0);
-    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    expect(await tradeCandidateRepository.list()).toHaveLength(0);
   });
 
   it("resume() does not replay the skipped tick — only future ticks run cycles again", async () => {
@@ -416,7 +474,7 @@ describe("TradingRuntime — runNow() pause convention", () => {
 describe("TradingRuntime — market-closed tick skipping", () => {
   it("skips a tick (and the immediate first run) when the market is closed, without treating it as a failure", async () => {
     const closedPolicy: MarketHoursPolicy = { isMarketOpen: () => false };
-    const { runtime, broker, clock } = makeRuntime({ marketHoursPolicy: closedPolicy });
+    const { runtime, clock, tradeCandidateRepository } = makeRuntime({ marketHoursPolicy: closedPolicy });
 
     await runtime.start();
     await clock.advance(0);
@@ -425,7 +483,7 @@ describe("TradingRuntime — market-closed tick skipping", () => {
     expect(status.skippedMarketClosedCount).toBe(1);
     expect(status.failedRunCount).toBe(0);
     expect(status.successfulRunCount).toBe(0);
-    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    expect(await tradeCandidateRepository.list()).toHaveLength(0);
   });
 });
 
@@ -433,7 +491,9 @@ describe("TradingRuntime — graceful shutdown while a cycle is active", () => {
   it("stop() transitions to STOPPING immediately, then STOPPED only once the active cycle finishes", async () => {
     const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
     const gate = makeGate();
-    const { runtime, broker, clock } = makeRuntime({ marketDataProvider: new GatedMarketDataProvider(inner, gate.promise) });
+    const { runtime, clock, tradeCandidateRepository } = makeRuntime({
+      marketDataProvider: new GatedMarketDataProvider(inner, gate.promise),
+    });
 
     await runtime.start();
     await clock.advance(0);
@@ -443,13 +503,13 @@ describe("TradingRuntime — graceful shutdown while a cycle is active", () => {
     await flushMicrotasks();
     // stop() has begun but the cycle is still gated — must not have abandoned it.
     expect(runtime.getStatus().state).toBe("STOPPING");
-    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    expect(await tradeCandidateRepository.list()).toHaveLength(0);
 
     gate.resolve();
     await stopPromise;
 
     expect(runtime.getStatus().state).toBe("STOPPED");
-    expect(broker.placeMarketOrder).toHaveBeenCalledOnce(); // the in-flight cycle ran to completion
+    expect(await tradeCandidateRepository.list()).toHaveLength(1); // the in-flight cycle ran to completion
     expect(runtime.getStatus().successfulRunCount).toBe(1);
   });
 });

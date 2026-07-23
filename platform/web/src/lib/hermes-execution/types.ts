@@ -248,7 +248,20 @@ export type AuditEventType =
   | "TRADING_CYCLE_FAILED"
   | "TRADING_CYCLE_SKIPPED_OVERLAP"
   | "TRADING_CYCLE_SKIPPED_PAUSED"
-  | "TRADING_CYCLE_SKIPPED_MARKET_CLOSED";
+  | "TRADING_CYCLE_SKIPPED_MARKET_CLOSED"
+  // Phase 3.5 — Trade Review & Approval. A new, parallel audit layer for the TradeCandidate
+  // lifecycle (trade-approval/trade-candidate-service.ts) — deliberately distinct names from the
+  // existing TRADE_APPROVED (Milestone 6, meaning "PortfolioRiskEngine's automatic check passed",
+  // nothing to do with a human) to avoid colliding with that already-shipped meaning. Fired instead
+  // of, never alongside, an automatic EXECUTION_TRIGGERED/broker call for a BUY/SELL decision — see
+  // trading-runtime.ts's own runCycleBody, which no longer calls runMarketDecisionCycleWithLifecycle
+  // automatically at all.
+  | "TRADE_CANDIDATE_CREATED"
+  | "TRADE_CANDIDATE_APPROVED"
+  | "TRADE_CANDIDATE_REJECTED"
+  | "TRADE_CANDIDATE_EXPIRED"
+  | "TRADE_CANDIDATE_EXECUTED"
+  | "TRADE_CANDIDATE_EXECUTION_FAILED";
 
 export interface AuditEvent {
   timestamp: string;

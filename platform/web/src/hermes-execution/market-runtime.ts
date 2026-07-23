@@ -13,6 +13,9 @@ import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-
 import { buildAnalysisPersistenceConfig } from "@/lib/hermes-execution/analysis/analysis-persistence-config";
 import { SupabaseAnalysisRepository } from "@/lib/hermes-execution/analysis/analysis-repository";
 import { getServiceRoleClient } from "@/lib/supabase/service-role-client";
+import { buildTradeApprovalConfig } from "@/lib/hermes-execution/trade-approval/config";
+import { SupabaseTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
+import type { TradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Constructs
 // AnalysisIntegrationDeps only when HERMES_SUPABASE_USER_ID and the Supabase service role are both
@@ -51,6 +54,33 @@ const PORTFOLIO_RISK_CONFIG: PortfolioRiskConfig = {
   maxDailyTrades: 10,
   maxPortfolioExposure: 10_000,
 };
+
+// Phase 3.5 — Trade Review & Approval. Deliberately NOT optional the way buildAnalysisIntegrationDeps
+// above is: automatic execution must remain off unconditionally, and every BUY/SELL decision this
+// runtime makes becomes a TradeCandidate — with nowhere durable to put it, the runtime cannot
+// safely start at all (a candidate that only exists in-process memory could never be reviewed from
+// the Trade Approval page, which runs in a separate Next.js process — see
+// docs/trade-candidate-lifecycle-phase-3-5.md's own architecture section). Reuses the exact same
+// HERMES_SUPABASE_USER_ID + service-role configuration Phase 2B's analysis persistence already
+// established — the same Supabase Auth user owns both a deployment's analysis rows and its trade
+// candidates.
+function buildTradeCandidateRepository(): TradeCandidateRepository | { error: string } {
+  const persistenceConfig = buildAnalysisPersistenceConfig();
+  if (!persistenceConfig.enabled || !persistenceConfig.ownerUserId) {
+    return {
+      error:
+        "Trade candidate persistence requires HERMES_SUPABASE_USER_ID and the Supabase service role " +
+        "to be configured. Automatic execution is never available in this pipeline — every BUY/SELL " +
+        "decision must be reviewed and approved via the Trade Approval page, which requires durable " +
+        "candidate storage.",
+    };
+  }
+  const client = getServiceRoleClient();
+  if (!client) {
+    return { error: "Supabase service role client could not be constructed despite being configured." };
+  }
+  return new SupabaseTradeCandidateRepository(client, persistenceConfig.ownerUserId);
+}
 
 function printFinalStatus(runtime: TradingRuntime): void {
   const status = runtime.getStatus();
@@ -135,6 +165,18 @@ export async function main(): Promise<void> {
       : "Market analysis persistence disabled — set HERMES_SUPABASE_USER_ID and the Supabase service role to enable it.",
   );
 
+  // Phase 3.5 — Trade Review & Approval. Required, not optional — see
+  // buildTradeCandidateRepository's own doc comment.
+  const tradeCandidateRepository = buildTradeCandidateRepository();
+  if ("error" in tradeCandidateRepository) {
+    console.error("Startup validation failed — the runtime was not started:");
+    console.error(`  - [tradeCandidateRepository] ${tradeCandidateRepository.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log("Trade candidate persistence enabled — every BUY/SELL decision will be queued for review (trade_candidates).");
+  const tradeApprovalConfig = buildTradeApprovalConfig();
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -150,6 +192,8 @@ export async function main(): Promise<void> {
     immediateFirstRun: config.scheduler.immediateFirstRun,
     shutdownTimeoutMs: config.scheduler.shutdownTimeoutMs,
     analysis,
+    tradeCandidateRepository,
+    tradeCandidateExpiryMs: tradeApprovalConfig.expiryMs,
   });
 
   let telegramBot: TelegramBot | undefined;

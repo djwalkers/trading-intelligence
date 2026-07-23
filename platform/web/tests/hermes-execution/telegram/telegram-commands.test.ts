@@ -95,9 +95,9 @@ describe("formatStatus", () => {
 
   it("includes the last result when present", () => {
     const text = formatStatus(
-      baseStatus({ lastResult: { decision: "BUY", executed: true, instrument: "BTC" } }),
+      baseStatus({ lastResult: { decision: "BUY", candidateCreated: true, instrument: "BTC", executedCandidateIds: ["candidate-1"] } }),
     );
-    expect(text).toContain("Last decision: BUY on BTC (executed: true)");
+    expect(text).toContain("Last decision: BUY on BTC (candidate created: true, executed this cycle: 1)");
   });
 
   it("includes the last error when present", () => {

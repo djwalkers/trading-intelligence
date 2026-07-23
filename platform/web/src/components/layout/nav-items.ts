@@ -11,6 +11,7 @@ import {
   SignalsIcon,
   StrategiesIcon,
   SystemHealthIcon,
+  TradeApprovalIcon,
   WatchlistIcon,
 } from "@/components/icons";
 
@@ -28,6 +29,7 @@ export const navItems: NavItem[] = [
   { href: "/portfolio", label: "Paper Portfolio", icon: PortfolioIcon },
   { href: "/trade-journal", label: "Trade Journal", icon: JournalIcon },
   { href: "/bot-decisions", label: "Bot Decisions", icon: BotIcon },
+  { href: "/trade-approval", label: "Trade Approval", icon: TradeApprovalIcon },
   { href: "/decision-intelligence", label: "AI Decision History", icon: DecisionIntelligenceIcon },
   { href: "/research", label: "Research", icon: ResearchIcon },
   { href: "/strategies", label: "Strategies", icon: StrategiesIcon },

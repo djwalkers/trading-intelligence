@@ -4,8 +4,8 @@ import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, InternalStrategy } from "../types";
 import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
-import type { MarketDecisionCycleResult } from "../market-decision-runner";
-import { runMarketDecisionCycleWithLifecycle, type TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
+import { MarketDecisionEngine } from "../market-decision-engine";
+import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
 import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
@@ -13,6 +13,12 @@ import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import type { MarketDecisionContext } from "../market-decision-engine";
 import { buildAnalysisRecord } from "../analysis/build-analysis-record";
 import { categorizeAnalysisPersistenceError, type AnalysisRepository } from "../analysis/analysis-repository";
+import {
+  createTradeCandidateForDecision,
+  executeApprovedTradeCandidate,
+  sweepExpiredCandidates,
+} from "../trade-approval/trade-candidate-service";
+import type { TradeCandidateRepository } from "../trade-approval/trade-candidate-repository";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
@@ -41,8 +47,18 @@ export interface AnalysisIntegrationDeps {
 // from build-market-decision-context.ts, trade-lifecycle-runner.ts, or below — every pipeline call
 // here is a call to an existing, unmodified function.
 
+/**
+ * Phase 3.5 — Trade Review & Approval. `result` on "completed" no longer nests a
+ * MarketDecisionCycleResult (position/trade/broker order) — a cycle's own fresh decision never
+ * calls the broker any more, it only ever creates a PENDING TradeCandidate (or nothing, for HOLD).
+ * `executedCandidateIds` instead reports any PRIOR-approved candidates this cycle executed via the
+ * broker (see runCycleBody, which does that before evaluating a new decision at all).
+ */
 export type TradingCycleOutcome =
-  | { kind: "completed"; result: MarketDecisionCycleResult }
+  | {
+      kind: "completed";
+      result: { decision: ReturnType<typeof MarketDecisionEngine.evaluate>; candidateId: string | undefined; executedCandidateIds: string[] };
+    }
   | { kind: "failed"; error: unknown }
   | { kind: "skipped-paused" }
   | { kind: "skipped-overlap" }
@@ -70,6 +86,15 @@ export interface TradingRuntimeDeps {
   /** Phase 2B — Decision Intelligence: Historical Analysis Persistence. Undefined (the default)
    * means this feature is entirely off — see AnalysisIntegrationDeps's own doc comment above. */
   analysis?: AnalysisIntegrationDeps;
+  /** Phase 3.5 — Trade Review & Approval. NOT optional, unlike `analysis` above: automatic
+   * execution must remain off unconditionally (this phase's own explicit requirement), so there is
+   * no "undefined means behave exactly as before" escape hatch here the way Phase 2B's analysis
+   * persistence has one — every BUY/SELL decision this runtime ever makes becomes a TradeCandidate
+   * in this repository, with no way to configure the runtime back into auto-executing. */
+  tradeCandidateRepository: TradeCandidateRepository;
+  /** How long a candidate stays valid before the next cycle's sweep marks it EXPIRED instead of
+   * executing it — see trade-approval/config.ts's own TradeApprovalConfig.expiryMs. */
+  tradeCandidateExpiryMs: number;
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -280,62 +305,120 @@ export class TradingRuntime {
     }
   }
 
+  /**
+   * Phase 3.5 — Trade Review & Approval. New flow: Analyse -> Decision -> Trade Candidate ->
+   * Persist -> Review UI -> Approved? -> Broker. Every cycle now does two, deliberately ordered,
+   * things:
+   *
+   * 1. Execute-approved-work: expire any stale candidates, then execute (via the existing,
+   *    unmodified runMarketDecisionCycleWithLifecycle, called from executeApprovedTradeCandidate)
+   *    any candidate a human already approved in some prior cycle. This is the ONLY place this
+   *    runtime ever calls the broker.
+   * 2. Decide-and-propose: build this cycle's own fresh MarketDecisionContext, evaluate it via the
+   *    existing, unmodified MarketDecisionEngine, and — for BUY/SELL only — persist a new PENDING
+   *    TradeCandidate. Never calls the risk engine or the broker for this new decision; a HOLD
+   *    creates nothing.
+   *
+   * MarketDecisionEngine, PortfolioRiskEngine, the broker, and TradeLifecycleService are all
+   * exactly as unmodified as they were before this phase — only WHEN they run changed (gated
+   * behind step 1's human-approval check instead of running automatically inside step 2).
+   */
   private async runCycleBody(trigger: "scheduled" | "manual"): Promise<TradingCycleOutcome> {
     await this.recordAudit("TRADING_CYCLE_STARTED", { trigger });
     const cycleStartedAtMs = this.deps.clock.now().getTime();
+    const executionRunId = this.executionRunId ?? "trading-runtime-unstarted";
     try {
+      const now = this.deps.clock.now();
+
+      await sweepExpiredCandidates({
+        repository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        strategyId: this.deps.strategy.strategyId,
+        instrument: this.deps.instrument,
+        now,
+      });
+
+      const approvedCandidates = await this.deps.tradeCandidateRepository.list({
+        status: "APPROVED",
+        strategyId: this.deps.strategy.strategyId,
+        instrument: this.deps.instrument,
+      });
+      const executedCandidateIds: string[] = [];
+      for (const candidate of approvedCandidates) {
+        const outcome = await executeApprovedTradeCandidate({
+          repository: this.deps.tradeCandidateRepository,
+          broker: this.deps.broker,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          lifecycleService: this.deps.lifecycleService,
+          portfolioRisk: {
+            config: this.deps.portfolioRiskConfig,
+            dailyTradeCount: this.deps.broker.getCompletedTrades().length,
+            // The broker was already connected before this runtime was constructed (the CLI's own
+            // responsibility, mirroring market-decide.ts's identical assumption) — true here
+            // reflects that, not a fresh connectivity probe every cycle.
+            brokerAvailable: true,
+          },
+          candidate,
+          now,
+        });
+        if (outcome.outcome === "executed") executedCandidateIds.push(candidate.id);
+      }
+
       const { snapshot, context } = await buildMarketDecisionContext(
         this.deps.marketDataProvider,
         this.deps.broker,
         this.deps.instrument,
         this.deps.strategy,
       );
-      const result = await runMarketDecisionCycleWithLifecycle({
-        broker: this.deps.broker,
-        auditTrail: this.deps.auditTrail,
-        executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-        marketContext: context,
-        amount: this.deps.amount,
-        portfolioRisk: {
-          config: this.deps.portfolioRiskConfig,
-          dailyTradeCount: this.deps.broker.getCompletedTrades().length,
-          // The broker was already connected before this runtime was constructed (the CLI's own
-          // responsibility, mirroring market-decide.ts's identical assumption) — true here reflects
-          // that, not a fresh connectivity probe every cycle.
-          brokerAvailable: true,
-        },
-        lifecycleService: this.deps.lifecycleService,
-        marketDataSnapshot: snapshot,
-      });
+      const decision = MarketDecisionEngine.evaluate(context);
 
-      this.successfulRunCount += 1;
-      this.lastResult = {
-        decision: result.decision.action,
-        executed: result.executed,
-        instrument: this.deps.instrument,
-        lifecycleRecordId: result.lifecycleRecord?.id,
-        lifecycleStatus: result.lifecycleRecord?.status,
-      };
-      this.lastRunCompletedAt = this.deps.clock.now().toISOString();
-      await this.recordAudit("TRADING_CYCLE_COMPLETED", {
-        decision: result.decision.action,
-        executed: result.executed,
-      });
-
-      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Strictly after the
-      // cycle's real work (decision + execution) has already fully completed — this can never
-      // change `result` or anything returned below, and can never fail this cycle (see
-      // persistAnalysis's own doc comment).
-      await this.persistAnalysis({
+      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Persisted before the
+      // candidate below so a successful write's row id can be cross-referenced on the candidate as
+      // analysisRunId — best-effort/never-throws exactly as before (see persistAnalysis's own doc
+      // comment); a disabled or failed write simply means analysisRunId stays undefined.
+      const analysisRunId = await this.persistAnalysis({
         kind: "success",
         trigger,
         snapshot,
         context,
-        result,
+        result: { decision, executed: false } as TradeLifecycleCycleResult,
         runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
       });
 
-      return { kind: "completed", result };
+      const candidate = await createTradeCandidateForDecision({
+        repository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        decision,
+        context,
+        marketDataSnapshot: snapshot,
+        amount: this.deps.amount,
+        analysisRunId,
+        now,
+        expiryMs: this.deps.tradeCandidateExpiryMs,
+      });
+
+      this.successfulRunCount += 1;
+      this.lastResult = {
+        decision: decision.action,
+        candidateCreated: candidate !== undefined,
+        candidateId: candidate?.id,
+        instrument: this.deps.instrument,
+        executedCandidateIds,
+      };
+      this.lastRunCompletedAt = this.deps.clock.now().toISOString();
+      await this.recordAudit("TRADING_CYCLE_COMPLETED", {
+        decision: decision.action,
+        candidateCreated: candidate !== undefined,
+        executedCandidateIds,
+      });
+
+      return {
+        kind: "completed",
+        result: { decision, candidateId: candidate?.id, executedCandidateIds },
+      };
     } catch (error) {
       this.failedRunCount += 1;
       const message = toErrorMessage(error);
@@ -370,6 +453,11 @@ export class TradingRuntime {
    * queued, or replayed later (see docs/decision-intelligence-architecture-phase-2b.md's own
    * "Persistence guarantees & limitations" section). A no-op entirely when `deps.analysis` is
    * undefined (the default).
+   *
+   * Phase 3.5 — now returns the new row's id (or undefined whenever nothing was written, for any
+   * reason) so runCycleBody can pass it through as TradeCandidate.analysisRunId — a best-effort
+   * cross-reference only; see trade-approval/types.ts's own doc comment on why a candidate's
+   * durability never depends on this succeeding.
    */
   private async persistAnalysis(
     outcome:
@@ -382,9 +470,9 @@ export class TradingRuntime {
           runtimeDurationMs: number;
         }
       | { kind: "failure"; trigger: "scheduled" | "manual"; error: unknown; runtimeDurationMs: number },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const analysis = this.deps.analysis;
-    if (!analysis) return;
+    if (!analysis) return undefined;
 
     try {
       const { run, events } =
@@ -420,6 +508,7 @@ export class TradingRuntime {
 
       const analysisRunId = await analysis.repository.saveAnalysis(run);
       await analysis.repository.saveEvents(analysisRunId, events);
+      return analysisRunId;
     } catch (error) {
       // Structured, credential-safe: executionRunId (the cycle id), instrument, strategyId, a
       // short errorCategory (never the raw Supabase error object/.details/.hint — see
@@ -435,6 +524,7 @@ export class TradingRuntime {
         persistenceEnabled: true,
         reason: error instanceof Error ? error.message : String(error),
       });
+      return undefined;
     }
   }
 

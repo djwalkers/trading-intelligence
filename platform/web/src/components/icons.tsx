@@ -123,6 +123,18 @@ export function ResearchIcon(props: IconProps) {
   );
 }
 
+// Checkmark-in-shield shape — human review/approval gate (Phase 3.5's Trade Approval page),
+// deliberately distinct from BotIcon (the automatic runtime) since this page is specifically where
+// a human, not the bot, makes the final call.
+export function TradeApprovalIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3.5 19 6.5V11c0 4.5-3 7.5-7 9.5-4-2-7-5-7-9.5V6.5L12 3.5Z" />
+      <path d="m9 12 2 2 4-4.5" />
+    </svg>
+  );
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

@@ -1,5 +1,4 @@
 import type { MarketDecisionAction } from "../market-decision-engine";
-import type { TradeLifecycleStatus } from "../trade-lifecycle/types";
 
 // Milestone 7 — 24/7 Scheduler & Runtime Control. Same modeling conventions as Milestone 6's
 // TradeLifecycleStatus/VALID_TRANSITIONS (trade-lifecycle/types.ts) — a plain string-literal union
@@ -45,15 +44,25 @@ export function assertValidRuntimeTransition(from: TradingRuntimeState, to: Trad
   }
 }
 
-/** A trimmed, JSON-serialisable summary of one cycle's outcome — never the full
- * MarketDecisionCycleResult (which nests PaperPosition/CompletedTrade/etc.), and never a raw Error
- * — "Do not expose raw Error objects in serialisable status." */
+/** A trimmed, JSON-serialisable summary of one cycle's outcome — never a raw Error ("Do not expose
+ * raw Error objects in serialisable status").
+ *
+ * Phase 3.5 — Trade Review & Approval. TradingRuntime never calls the broker automatically any
+ * more (see trading-runtime.ts's own runCycleBody) — a cycle's OWN fresh decision only ever creates
+ * a PENDING TradeCandidate (or nothing, for HOLD); `executed`/`lifecycleRecordId`/`lifecycleStatus`
+ * (this cycle's own immediate broker outcome) no longer exist, because there no longer is one.
+ * `executedCandidateIds` instead reports candidates a HUMAN approved in some PRIOR cycle that THIS
+ * cycle actually executed via the broker — see trade-approval/trade-candidate-service.ts's own
+ * executeApprovedTradeCandidate, which this cycle calls before evaluating any new decision. */
 export interface TradingCycleResultSummary {
   decision: MarketDecisionAction;
-  executed: boolean;
+  /** Whether this cycle's own fresh decision created a new PENDING trade candidate — always false
+   * for HOLD. */
+  candidateCreated: boolean;
+  candidateId?: string;
   instrument: string;
-  lifecycleRecordId?: string;
-  lifecycleStatus?: TradeLifecycleStatus;
+  /** Ids of previously-APPROVED candidates this cycle executed via the broker (0 or more). */
+  executedCandidateIds: string[];
 }
 
 export interface TradingErrorSummary {

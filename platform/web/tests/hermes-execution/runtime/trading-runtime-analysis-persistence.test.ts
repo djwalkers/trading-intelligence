@@ -11,6 +11,7 @@ import type { PaperBroker } from "@/lib/hermes-execution/paper-broker";
 import type { Account, CompletedTrade, InternalStrategy, OrderRequest, PaperPosition } from "@/lib/hermes-execution/types";
 import { AnalysisPersistenceError, type AnalysisRepository } from "@/lib/hermes-execution/analysis/analysis-repository";
 import type { AnalysisEventInput, AnalysisRunInput } from "@/lib/hermes-execution/analysis/types";
+import { InMemoryTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import { logger } from "@/lib/logger/logger";
 import { ManualSchedulerClock } from "./support/manual-scheduler-clock";
 
@@ -144,6 +145,8 @@ function makeRuntime(overrides: {
     intervalMs: 10_000,
     immediateFirstRun: false,
     analysis: overrides.analysis,
+    tradeCandidateRepository: new InMemoryTradeCandidateRepository(),
+    tradeCandidateExpiryMs: 20 * 60_000,
   });
 
   return { runtime, clock };
@@ -181,8 +184,8 @@ describe("TradingRuntime — analysis persistence, HOLD cycle", () => {
   });
 });
 
-describe("TradingRuntime — analysis persistence, executed trade", () => {
-  it("saves exactly one record with executedTrade:true and a tradeId — never a second record", async () => {
+describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: never auto-executed)", () => {
+  it("saves exactly one record with executedTrade:false — a BUY decision only ever creates a trade candidate, never an automatic execution", async () => {
     const repository = makeFakeAnalysisRepository();
     const { runtime } = makeRuntime({
       marketDataProvider: new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW }),
@@ -194,13 +197,14 @@ describe("TradingRuntime — analysis persistence, executed trade", () => {
 
     expect(outcome.kind).toBe("completed");
     if (outcome.kind === "completed") {
-      expect(outcome.result.executed).toBe(true);
+      expect(outcome.result.decision.action).toBe("BUY");
+      expect(outcome.result.candidateId).toBeDefined();
+      expect(outcome.result.executedCandidateIds).toEqual([]);
     }
     expect(repository.saveAnalysis).toHaveBeenCalledTimes(1);
-    expect(repository.savedRuns[0]!.executedTrade).toBe(true);
-    expect(repository.savedRuns[0]!.tradeId).toBeTruthy();
-    // "update the same record, do not create another" — markTradeExecuted is never needed because
-    // the execution outcome is already known before the single saveAnalysis() call.
+    expect(repository.savedRuns[0]!.decision).toBe("BUY");
+    expect(repository.savedRuns[0]!.executedTrade).toBe(false);
+    expect(repository.savedRuns[0]!.tradeId).toBeUndefined();
     expect(repository.markTradeExecuted).not.toHaveBeenCalled();
   });
 });
