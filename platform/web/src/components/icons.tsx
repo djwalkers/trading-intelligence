@@ -148,6 +148,18 @@ export function PerformanceAnalyticsIcon(props: IconProps) {
   );
 }
 
+// Flask-with-two-branches shape — the Strategy Laboratory (Phase 5), deliberately distinct from
+// ResearchIcon (imported Hermes Lab research, an external source) — this one represents comparing
+// two internally-run strategy variants side by side, not importing outside evidence.
+export function StrategyLabIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M9 3.5h6M10 3.5v5.3l-3.2 6.1M14 3.5v5.3l3.2 6.1" />
+      <path d="M6.8 14.9h10.4a2 2 0 0 1 1.8 2.9l-.6 1.2a2 2 0 0 1-1.8 1.1H7.4a2 2 0 0 1-1.8-1.1l-.6-1.2a2 2 0 0 1 1.8-2.9Z" />
+    </svg>
+  );
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
