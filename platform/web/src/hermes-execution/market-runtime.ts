@@ -16,6 +16,7 @@ import { getServiceRoleClient } from "@/lib/supabase/service-role-client";
 import { buildTradeApprovalConfig } from "@/lib/hermes-execution/trade-approval/config";
 import { SupabaseTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import type { TradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
+import { SupabaseTradePerformanceRepository } from "@/lib/hermes-execution/trade-performance/trade-performance-repository";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Constructs
 // AnalysisIntegrationDeps only when HERMES_SUPABASE_USER_ID and the Supabase service role are both
@@ -80,6 +81,19 @@ function buildTradeCandidateRepository(): TradeCandidateRepository | { error: st
     return { error: "Supabase service role client could not be constructed despite being configured." };
   }
   return new SupabaseTradeCandidateRepository(client, persistenceConfig.ownerUserId);
+}
+
+// Phase 4 — Trade Performance Engine. Optional, unlike buildTradeCandidateRepository above —
+// measuring trade quality is a pure observability bolt-on (same category as analysis persistence),
+// not a safety requirement; when it can't be configured, the runtime starts exactly as it did
+// before this phase existed. Reuses the same HERMES_SUPABASE_USER_ID + service-role configuration
+// analysis persistence and trade candidates already share.
+function buildTradePerformanceRepository(): SupabaseTradePerformanceRepository | undefined {
+  const persistenceConfig = buildAnalysisPersistenceConfig();
+  if (!persistenceConfig.enabled || !persistenceConfig.ownerUserId) return undefined;
+  const client = getServiceRoleClient();
+  if (!client) return undefined;
+  return new SupabaseTradePerformanceRepository(client, persistenceConfig.ownerUserId);
 }
 
 function printFinalStatus(runtime: TradingRuntime): void {
@@ -177,6 +191,15 @@ export async function main(): Promise<void> {
   console.log("Trade candidate persistence enabled — every BUY/SELL decision will be queued for review (trade_candidates).");
   const tradeApprovalConfig = buildTradeApprovalConfig();
 
+  // Phase 4 — Trade Performance Engine. Optional — see buildTradePerformanceRepository's own doc
+  // comment for exactly when this is undefined.
+  const tradePerformanceRepository = buildTradePerformanceRepository();
+  console.log(
+    tradePerformanceRepository
+      ? "Trade performance measurement enabled — every closed trade will be recorded to Supabase (trade_performance)."
+      : "Trade performance measurement disabled — set HERMES_SUPABASE_USER_ID and the Supabase service role to enable it.",
+  );
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -194,6 +217,9 @@ export async function main(): Promise<void> {
     analysis,
     tradeCandidateRepository,
     tradeCandidateExpiryMs: tradeApprovalConfig.expiryMs,
+    tradePerformance: tradePerformanceRepository
+      ? { lifecycleStore: deps.lifecycleStore, repository: tradePerformanceRepository }
+      : undefined,
   });
 
   let telegramBot: TelegramBot | undefined;

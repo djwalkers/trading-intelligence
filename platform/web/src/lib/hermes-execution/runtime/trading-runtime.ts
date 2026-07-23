@@ -19,6 +19,9 @@ import {
   sweepExpiredCandidates,
 } from "../trade-approval/trade-candidate-service";
 import type { TradeCandidateRepository } from "../trade-approval/trade-candidate-repository";
+import type { TradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
+import { recordTradePerformanceForExecutedCandidate } from "../trade-performance/trade-performance-service";
+import type { TradePerformanceRepository } from "../trade-performance/trade-performance-repository";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
@@ -95,6 +98,15 @@ export interface TradingRuntimeDeps {
   /** How long a candidate stays valid before the next cycle's sweep marks it EXPIRED instead of
    * executing it — see trade-approval/config.ts's own TradeApprovalConfig.expiryMs. */
   tradeCandidateExpiryMs: number;
+  /** Phase 4 — Trade Performance Engine. Optional and additive, same "undefined means behave
+   * exactly as before this phase existed" convention `analysis` above uses — a missing/failed
+   * performance measurement can never affect a cycle's own decision, risk, execution, or approval
+   * outcome (see persistTradePerformance's own doc comment). The SAME TradeLifecycleStore instance
+   * `lifecycleService` was constructed with — exposed directly here for read-only use, mirroring
+   * RuntimeDependencies' own established "lifecycleStore alongside lifecycleService, for a concern
+   * TradeLifecycleService itself doesn't expose a pass-through for" precedent (runtime-dependency-
+   * factory.ts). Never written to by this runtime — only ever read from. */
+  tradePerformance?: { lifecycleStore: TradeLifecycleStore; repository: TradePerformanceRepository };
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -366,6 +378,14 @@ export class TradingRuntime {
         if (outcome.outcome === "executed") executedCandidateIds.push(candidate.id);
       }
 
+      // Phase 4 — Trade Performance Engine. Strictly after execution work above has already fully
+      // completed — read-only against TradeCandidateRepository/TradeLifecycleStore (never writes
+      // to either), can never change which candidates were executed or how, and can never fail
+      // this cycle (see persistTradePerformance's own doc comment).
+      for (const candidateId of executedCandidateIds) {
+        await this.persistTradePerformance(candidateId);
+      }
+
       const { snapshot, context } = await buildMarketDecisionContext(
         this.deps.marketDataProvider,
         this.deps.broker,
@@ -525,6 +545,41 @@ export class TradingRuntime {
         reason: error instanceof Error ? error.message : String(error),
       });
       return undefined;
+    }
+  }
+
+  /**
+   * Phase 4 — Trade Performance Engine. ATTEMPTS to measure one executed candidate — a no-op
+   * (returns immediately) when `deps.tradePerformance` is undefined (the default), or when
+   * `candidateId` did not represent a closing (SELL) execution with a resolvable CLOSED lifecycle
+   * record (recordTradePerformanceForExecutedCandidate's own, expected "nothing to record" case,
+   * not an error). Never throws: any genuine failure (a Supabase outage, an unresolvable opening
+   * candidate, ...) is logged and swallowed here, the same "catch internally, log, never propagate"
+   * discipline persistAnalysis above already established — a broken performance-measurement layer
+   * can never crash, block, or alter a single trading cycle's own decision, risk, execution, or
+   * approval outcome. Only ever calls existing, unmodified read methods on TradeCandidateRepository
+   * (getById/list) and TradeLifecycleStore (getById) — never writes to either.
+   */
+  private async persistTradePerformance(candidateId: string): Promise<void> {
+    const tradePerformance = this.deps.tradePerformance;
+    if (!tradePerformance) return;
+
+    try {
+      await recordTradePerformanceForExecutedCandidate({
+        candidateRepository: this.deps.tradeCandidateRepository,
+        lifecycleStore: tradePerformance.lifecycleStore,
+        performanceRepository: tradePerformance.repository,
+        candidateId,
+      });
+    } catch (error) {
+      logger.error("Failed to record trade performance — the trading cycle's own execution outcome was unaffected", {
+        component: "hermes-trade-performance",
+        executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
+        instrument: this.deps.instrument,
+        strategyId: this.deps.strategy.strategyId,
+        candidateId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

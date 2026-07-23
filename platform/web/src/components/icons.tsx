@@ -135,6 +135,19 @@ export function TradeApprovalIcon(props: IconProps) {
   );
 }
 
+// Rising-bars-with-trend-line shape — objective performance measurement (Phase 4's Performance
+// Analytics page), deliberately distinct from MarketIntelligenceIcon (a magnifier over price
+// action) and DecisionIntelligenceIcon (an archive box) — this one is specifically about measured
+// outcomes, not raw market data or decision history.
+export function PerformanceAnalyticsIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 20V10M10 20V6M16 20V13M20 20V4" />
+      <path d="m3.5 9.5 5-4 5 3 6-6" />
+    </svg>
+  );
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

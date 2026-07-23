@@ -207,6 +207,44 @@ describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: neve
     expect(repository.savedRuns[0]!.tradeId).toBeUndefined();
     expect(repository.markTradeExecuted).not.toHaveBeenCalled();
   });
+
+  it("cross-references the saved analysis run's id on the resulting TradeCandidate", async () => {
+    const repository = makeFakeAnalysisRepository();
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const broker = makeMockBroker([]);
+    const clock = new ManualSchedulerClock(NOW);
+    const auditTrail = new InMemoryAuditTrail();
+    const lifecycleService = new TradeLifecycleService({
+      store: new InMemoryTradeLifecycleStore(),
+      auditTrail,
+      executionRunId: "test-run",
+      now: () => clock.now(),
+    });
+    const runtime = new TradingRuntime({
+      broker,
+      marketDataProvider: new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW }),
+      strategy: STRATEGY,
+      instrument: "BTC",
+      amount: 10,
+      portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+      lifecycleService,
+      auditTrail,
+      marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
+      clock,
+      intervalMs: 10_000,
+      immediateFirstRun: false,
+      analysis: makeAnalysisDeps(repository),
+      tradeCandidateRepository,
+      tradeCandidateExpiryMs: 20 * 60_000,
+    });
+    await runtime.start();
+    const outcome = await runtime.runNow();
+
+    expect(outcome.kind).toBe("completed");
+    if (outcome.kind !== "completed" || !outcome.result.candidateId) throw new Error("expected a candidate to be created");
+    const candidate = await tradeCandidateRepository.getById(outcome.result.candidateId);
+    expect(candidate?.analysisRunId).toBe("analysis-run-1");
+  });
 });
 
 describe("TradingRuntime — analysis persistence, failed cycle", () => {
