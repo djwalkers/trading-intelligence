@@ -15,7 +15,7 @@ import { ManualSchedulerClock, flushMicrotasks } from "./support/manual-schedule
 const NOW = new Date("2026-01-01T12:00:00.000Z");
 
 const STRATEGY: InternalStrategy = {
-  strategyId: "STRAT-0001",
+  strategyId: "DEMO-0001",
   version: 1,
   sourceType: "HERMES_APPROVED",
   enabled: true,
@@ -281,7 +281,7 @@ describe("TradingRuntime — successful cycle (pipeline integration)", () => {
     expect(status.lastRunStartedAt).toBeDefined();
     expect(status.lastRunCompletedAt).toBeDefined();
 
-    const openRecord = await lifecycleService.findOpenRecord("STRAT-0001", "BTC");
+    const openRecord = await lifecycleService.findOpenRecord("DEMO-0001", "BTC");
     expect(openRecord?.status).toBe("OPEN");
     expect(openRecord?.entryPrice).toBe(broker.getOpenPositions()[0]?.entryPrice);
   });

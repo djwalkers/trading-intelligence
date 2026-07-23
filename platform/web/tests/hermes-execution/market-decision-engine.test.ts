@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { MarketDecisionEngine, type MarketDecisionContext } from "@/lib/hermes-execution/market-decision-engine";
+import { InMemoryStrategyRegistry, UnknownStrategyError } from "@/lib/hermes-execution/strategies/strategy-registry";
+import type { Decision, Strategy } from "@/lib/hermes-execution/strategies/strategy";
+
+// Phase 3 — Strategy-Driven Decision Engine. Every test below this comment's own scenarios
+// (BUY/SELL/HOLD/confidence/reasoning) exercises DEMO-0001's exact rule logic, now living in
+// strategies/demo-0001-strategy.ts rather than in the engine itself — since that logic moved
+// verbatim (see that file's own doc comment), these tests unchanged and still passing is itself
+// the proof that "DEMO-0001 produces the same decisions as before for identical inputs".
 
 function makeContext(overrides: Partial<MarketDecisionContext> = {}): MarketDecisionContext {
   return {
@@ -10,7 +18,7 @@ function makeContext(overrides: Partial<MarketDecisionContext> = {}): MarketDeci
     midPrice: 100.025,
     timestamp: "2026-01-01T00:00:00Z",
     positionOpen: false,
-    strategy: { strategyId: "STRAT-0001", version: 1, sourceType: "HERMES_APPROVED" },
+    strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
     recentCandles: [],
     ema20: 110,
     ema50: 100,
@@ -130,5 +138,48 @@ describe("MarketDecisionEngine.evaluate — confidence and reasoning are always 
       makeContext({ strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "DEMO_ONLY" } }),
     );
     expect(decision.reasoning.some((r) => r.includes("DEMO-0001") && r.includes("DEMO_ONLY"))).toBe(true);
+  });
+});
+
+describe("MarketDecisionEngine.evaluate — strategy registry delegation", () => {
+  it("throws UnknownStrategyError when context.strategy.strategyId has no registered strategy (unknown strategy IDs are handled gracefully, not silently substituted)", () => {
+    expect(() => MarketDecisionEngine.evaluate(makeContext({ strategy: { strategyId: "NO-SUCH-STRATEGY", version: 1, sourceType: "HERMES_APPROVED" } }))).toThrow(
+      UnknownStrategyError,
+    );
+  });
+
+  it("switching the registered strategy for a strategyId changes the decision without any change to MarketDecisionEngine itself (requirement 5)", () => {
+    const alwaysBuy: Strategy = {
+      id: "STRATEGY-B",
+      version: 1,
+      checkEntryConditions: () => ({ met: true, reasons: [] }),
+      checkExitConditions: () => ({ met: false, reasons: [] }),
+      applyFilters: () => ({ met: true, reasons: [] }),
+      calculateEntryConfidence: () => 0.9,
+      calculateExitConfidence: () => 0.9,
+      explainHold: () => ["never holds"],
+      evaluate: (): Decision => ({
+        action: "BUY",
+        confidence: 0.9,
+        reasoning: ["Strategy B always buys"],
+        entryCriteriaMet: true,
+        exitCriteriaMet: false,
+        validationNotes: [],
+      }),
+    };
+    const customRegistry = new InMemoryStrategyRegistry();
+    customRegistry.register(alwaysBuy);
+
+    // Identical context to a scenario DEMO-0001 would HOLD on (Sideways trend) — Strategy B still BUYs.
+    const context = makeContext({ strategy: { strategyId: "STRATEGY-B", version: 1, sourceType: "HERMES_APPROVED" }, trend: "Sideways" });
+    const decision = MarketDecisionEngine.evaluate(context, customRegistry);
+    expect(decision.action).toBe("BUY");
+    expect(decision.reasoning).toEqual(["Strategy B always buys"]);
+  });
+
+  it("registering a malformed strategy fails safely at registration time, before any cycle runs", () => {
+    const registry = new InMemoryStrategyRegistry();
+    const malformed = { id: "", version: 1 } as unknown as Strategy;
+    expect(() => registry.register(malformed)).toThrow();
   });
 });

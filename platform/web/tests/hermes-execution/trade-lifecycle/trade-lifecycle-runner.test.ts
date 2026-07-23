@@ -24,7 +24,7 @@ function makeMarketContext(overrides: Partial<MarketDecisionContext> = {}): Mark
     midPrice: 100.025,
     timestamp: "2026-01-01T00:00:00.000Z",
     positionOpen: false,
-    strategy: { strategyId: "STRAT-0001", version: 1, sourceType: "HERMES_APPROVED" },
+    strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
     recentCandles: [],
     ema20: 110,
     ema50: 100,
@@ -81,7 +81,7 @@ function makeMockBroker(openPositions: PaperPosition[] = []): PaperBroker & {
       trade: {
         tradeId: "mock-trade-1",
         positionId,
-        strategyId: "STRAT-0001",
+        strategyId: "DEMO-0001",
         strategyVersion: 1,
         sourceType: "HERMES_APPROVED",
         instrument: "BTC",
@@ -134,7 +134,7 @@ describe("runMarketDecisionCycleWithLifecycle — BUY, approved and executed", (
     expect(result.lifecycleRecord!.brokerOrderId).toBe(result.orderId);
     expect(result.lifecycleRecord!.portfolioRiskDecision?.permitted).toBe(true);
 
-    const stored = await service.findOpenRecord("STRAT-0001", "BTC");
+    const stored = await service.findOpenRecord("DEMO-0001", "BTC");
     expect(stored?.id).toBe(result.lifecycleRecord!.id);
   });
 
@@ -202,7 +202,7 @@ describe("runMarketDecisionCycleWithLifecycle — BUY, broker execution fails", 
       }),
     ).rejects.toThrow("connection reset");
 
-    const all = await service.findOpenRecord("STRAT-0001", "BTC");
+    const all = await service.findOpenRecord("DEMO-0001", "BTC");
     expect(all).toBeUndefined(); // never reached OPEN
 
     const records = await new InMemoryTradeLifecycleStore().list(); // sanity: separate store stays empty
@@ -250,7 +250,7 @@ describe("runMarketDecisionCycleWithLifecycle — SELL, closes the tracked open 
   it("drives OPEN -> CLOSE_REQUESTED -> CLOSED and computes realised P/L", async () => {
     const openPosition: PaperPosition = {
       positionId: "existing-position-1",
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       strategyVersion: 1,
       sourceType: "HERMES_APPROVED",
       instrument: "BTC",
@@ -265,7 +265,7 @@ describe("runMarketDecisionCycleWithLifecycle — SELL, closes the tracked open 
 
     // Seed a matching OPEN lifecycle record the way a prior BUY cycle would have produced one.
     let record = await service.createFromDecision({
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       symbol: "BTC",
       side: "BUY",
       quantity: 50,
@@ -309,7 +309,7 @@ describe("runMarketDecisionCycleWithLifecycle — SELL, closes the tracked open 
   it("falls back to the plain cycle (no lifecycle record) when no matching open record exists", async () => {
     const openPosition: PaperPosition = {
       positionId: "existing-position-1",
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       strategyVersion: 1,
       sourceType: "HERMES_APPROVED",
       instrument: "BTC",
@@ -341,7 +341,7 @@ describe("runMarketDecisionCycleWithLifecycle — SELL, closes the tracked open 
   it("on a broker close failure, transitions CLOSE_REQUESTED -> CLOSE_FAILED and rethrows", async () => {
     const openPosition: PaperPosition = {
       positionId: "existing-position-1",
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       strategyVersion: 1,
       sourceType: "HERMES_APPROVED",
       instrument: "BTC",
@@ -356,7 +356,7 @@ describe("runMarketDecisionCycleWithLifecycle — SELL, closes the tracked open 
     const { service, store } = makeLifecycle();
 
     let record = await service.createFromDecision({
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       symbol: "BTC",
       side: "BUY",
       quantity: 50,
@@ -411,7 +411,7 @@ describe("runMarketDecisionCycleWithLifecycle — HOLD", () => {
   it("updates MFE/MAE on an existing open record even though this cycle's own decision is HOLD", async () => {
     const openPosition: PaperPosition = {
       positionId: "existing-position-1",
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       strategyVersion: 1,
       sourceType: "HERMES_APPROVED",
       instrument: "BTC",
@@ -425,7 +425,7 @@ describe("runMarketDecisionCycleWithLifecycle — HOLD", () => {
     const { service } = makeLifecycle();
 
     let record = await service.createFromDecision({
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       symbol: "BTC",
       side: "BUY",
       quantity: 50,
@@ -451,7 +451,7 @@ describe("runMarketDecisionCycleWithLifecycle — HOLD", () => {
     });
 
     expect(result.decision.action).toBe("HOLD");
-    const updated = await service.findOpenRecord("STRAT-0001", "BTC");
+    const updated = await service.findOpenRecord("DEMO-0001", "BTC");
     expect(updated?.maximumFavourableExcursion).toBeCloseTo((105 - 90) * 50, 10);
   });
 });

@@ -32,7 +32,7 @@ function makeMarketContext(overrides: Partial<MarketDecisionContext> = {}): Mark
     midPrice: 100.025,
     timestamp: "2026-01-01T00:00:00Z",
     positionOpen: false,
-    strategy: { strategyId: "STRAT-0001", version: 1, sourceType: "HERMES_APPROVED" },
+    strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
     recentCandles: [],
     ema20: 110,
     ema50: 100,
@@ -81,7 +81,7 @@ function makeMockBroker(openPositions: PaperPosition[] = []): PaperBroker & {
       trade: {
         tradeId: "mock-trade-1",
         positionId,
-        strategyId: "STRAT-0001",
+        strategyId: "DEMO-0001",
         strategyVersion: 1,
         sourceType: "HERMES_APPROVED",
         instrument: "BTC",
@@ -144,7 +144,7 @@ describe("runMarketDecisionCycle — BUY blocked by open position limit (convert
     const existingPositions: PaperPosition[] = [
       {
         positionId: "existing-1",
-        strategyId: "STRAT-0001",
+        strategyId: "DEMO-0001",
         strategyVersion: 1,
         sourceType: "HERMES_APPROVED",
         instrument: "ETH",
@@ -219,7 +219,7 @@ describe("runMarketDecisionCycle — SELL (execution triggered)", () => {
   it("calls closePosition on the existing open position and records the decision + trigger", async () => {
     const openPosition: PaperPosition = {
       positionId: "existing-position-1",
-      strategyId: "STRAT-0001",
+      strategyId: "DEMO-0001",
       strategyVersion: 1,
       sourceType: "HERMES_APPROVED",
       instrument: "BTC",

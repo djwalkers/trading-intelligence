@@ -24,7 +24,7 @@ import { ManualSchedulerClock } from "./support/manual-scheduler-clock";
 const NOW = new Date("2026-01-01T12:00:00.000Z");
 
 const STRATEGY: InternalStrategy = {
-  strategyId: "STRAT-0001",
+  strategyId: "DEMO-0001",
   version: 1,
   sourceType: "HERMES_APPROVED",
   enabled: true,
@@ -176,7 +176,7 @@ describe("TradingRuntime — analysis persistence, HOLD cycle", () => {
     expect(run.brokerProvider).toBe("etoro-demo");
     expect(run.marketProvider).toBe("live");
     expect(run.timeframe).toBe("1h");
-    expect(run.strategyId).toBe("STRAT-0001");
+    expect(run.strategyId).toBe("DEMO-0001");
     expect(run.instrument).toBe("BTC");
   });
 });
@@ -318,7 +318,7 @@ describe("TradingRuntime — structured, credential-safe persistence-failure log
           component: "hermes-analysis-persistence",
           executionRunId: expect.any(String),
           instrument: "BTC",
-          strategyId: "STRAT-0001",
+          strategyId: "DEMO-0001",
           errorCategory: "42501",
           persistenceEnabled: true,
         }),
