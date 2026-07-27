@@ -12,7 +12,7 @@ import type { MarketDataProvider } from "../market-data/market-data-provider";
 import type { MarketHoursPolicy } from "../runtime/market-hours-policy";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
-import type { Candle, InternalStrategy } from "../types";
+import type { Candle, InternalStrategy, OrderSizingMode } from "../types";
 import { BROKER_CAPABILITIES } from "./broker-capabilities";
 import { validateStartup, type StartupValidationProblem } from "./startup-validation";
 
@@ -52,6 +52,11 @@ export interface RuntimeDependencies {
   lifecycleStore: TradeLifecycleStore;
   symbol: string;
   quantity: number;
+  /** Broker Sizing Semantic Fix. This broker's own declared sizing mode (BROKER_CAPABILITIES[
+   * brokerProvider].orderSizingMode) — computed once, here, from the same registry
+   * broker-capabilities.ts already maintains, so every caller of this factory gets it for free
+   * instead of re-deriving it from `brokerProvider` itself. */
+  orderSizingMode: OrderSizingMode;
   portfolioRiskConfig: PortfolioRiskConfig;
 }
 
@@ -187,6 +192,7 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
       lifecycleStore,
       symbol: config.runtimeTrading.symbol,
       quantity: config.runtimeTrading.quantity,
+      orderSizingMode: capabilities.orderSizingMode,
       portfolioRiskConfig: options.portfolioRiskConfig,
     },
   };

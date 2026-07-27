@@ -17,6 +17,13 @@ import type { ResearchDecisionPoint, ResearchRunParams, ResearchRunResult, Simul
 // calculateHoldingDurationMs, calculateUnrealizedPnl) is imported, never duplicated or altered, from
 // trade-lifecycle/calculations.ts — the exact same math a real, live trade would have used.
 //
+// Broker Sizing Semantic Fix: this simulation engine is broker-agnostic by design — it replays
+// historical AnalysisRun rows, never a specific broker's own OrderRequest/PaperPosition — so it has
+// no broker sizing mode to source. It always simulates "UNITS" (a plain unit count), matching this
+// module's pre-existing behaviour exactly; it is not wired to eToro's NOTIONAL semantics and makes
+// no claim to simulate an eToro-specific backtest.
+const SIZING_MODE = "UNITS";
+//
 // Position simulation is entirely local to this run: `positionOpen` starts false and is tracked
 // independently for whichever Strategy is being tested, never read from — or written to — any
 // live broker, TradeLifecycleStore, or TradeCandidateRepository. Two different strategies run over
@@ -78,7 +85,7 @@ export async function runStrategyResearch(input: RunStrategyResearchInput): Prom
     });
 
     if (positionOpen) {
-      const unrealised = calculateUnrealizedPnl("BUY", entryPrice, context.bid, amount);
+      const unrealised = calculateUnrealizedPnl(SIZING_MODE, "BUY", entryPrice, context.bid, amount);
       peak = Math.max(peak, unrealised, 0);
       trough = Math.min(trough, unrealised, 0);
     }
@@ -93,7 +100,7 @@ export async function runStrategyResearch(input: RunStrategyResearchInput): Prom
     } else if (decision.action === "SELL" && positionOpen && entryContext) {
       const exitPrice = context.bid;
       const exitTime = context.timestamp;
-      const grossPnl = calculateRealisedPnl("BUY", entryPrice, exitPrice, amount);
+      const grossPnl = calculateRealisedPnl(SIZING_MODE, "BUY", entryPrice, exitPrice, amount);
       const entryNotional = entryPrice * amount;
       const returnPercent = entryNotional > 0 ? (grossPnl / entryNotional) * 100 : 0;
       const holdingTimeMs = calculateHoldingDurationMs(entryTime, exitTime);

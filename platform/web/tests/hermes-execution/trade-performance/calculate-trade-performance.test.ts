@@ -15,6 +15,7 @@ function makeClosedRecord(overrides: Partial<TradeLifecycleRecord> = {}): TradeL
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
+    sizingMode: "UNITS",
     decision: "BUY",
     confidence: 0.75,
     decisionReasons: ["EMA20 above EMA50"],
@@ -88,6 +89,7 @@ function makeOpeningCandidate(overrides: Partial<TradeCandidate> = {}): TradeCan
     executedAt: "2026-01-01T00:00:00.000Z",
     execution: {
       amount: 10,
+      sizingMode: "UNITS",
       marketContext: makeClosedRecord().intelligenceSummary,
       marketDataSnapshot: makeClosedRecord().marketDataSnapshot,
     },
@@ -128,6 +130,28 @@ describe("calculateRiskMultiple", () => {
   it("computes a negative R for a losing trade", () => {
     const r = calculateRiskMultiple(-25, makeOpeningCandidate());
     expect(r).toBeCloseTo(-0.5);
+  });
+
+  // Broker Sizing Semantic Fix — a NOTIONAL (eToro-style) opening candidate's `execution.amount` is
+  // already the invested notional, not a unit count, so the stop-loss distance must be applied as a
+  // PERCENTAGE of entryPrice against that notional, never |entryPrice - stopLoss| * amount directly
+  // (which would silently treat the eToro notional as an asset-unit count).
+  it("computes dollar risk as a percentage of entryPrice applied to the notional, for a NOTIONAL opening candidate", () => {
+    // entryPrice 100, stopLoss 95 -> 5% risk; notional (amount) 10 -> dollarRisk = 0.5; net_pnl 1 -> R = 2
+    const opening = makeOpeningCandidate({
+      entryPrice: 100,
+      stopLoss: 95,
+      execution: { ...makeOpeningCandidate().execution, amount: 10, sizingMode: "NOTIONAL" },
+    });
+    const r = calculateRiskMultiple(1, opening);
+    expect(r).toBeCloseTo(2, 10);
+  });
+
+  it("is undefined (fails closed) when the opening candidate's own sizing mode is missing or unrecognised", () => {
+    const opening = makeOpeningCandidate({
+      execution: { ...makeOpeningCandidate().execution, sizingMode: undefined as never },
+    });
+    expect(calculateRiskMultiple(60, opening)).toBeUndefined();
   });
 });
 
@@ -177,6 +201,20 @@ describe("buildTradePerformanceInput", () => {
     expect(input.maximumDrawdown).toBe(20);
     expect(input.winLoss).toBe("WIN");
     expect(input.exitReason).toBe("market-decision-sell");
+  });
+
+  // Broker Sizing Semantic Fix — for a NOTIONAL (eToro-style) record, entry notional is `quantity`
+  // itself, never entryPrice x quantity — proving returnPercent is never computed against a
+  // fabricated (and wildly wrong) entryPrice-multiplied notional.
+  it("computes returnPercent against `quantity` itself as the entry notional for a NOTIONAL record", () => {
+    const record = makeClosedRecord({ sizingMode: "NOTIONAL", quantity: 10, entryPrice: 65_000, realisedPnl: 1 });
+    const input = buildTradePerformanceInput({
+      record,
+      closingCandidate: { id: "c", analysisRunId: undefined },
+      openingCandidate: undefined,
+    });
+    // entryNotional = 10 (NOT 65_000 * 10); netPnl 1 / 10 * 100 = 10%
+    expect(input.returnPercent).toBeCloseTo(10, 10);
   });
 
   it("subtracts fees from gross_pnl to compute net_pnl and re-derives win_loss from net, not gross", () => {

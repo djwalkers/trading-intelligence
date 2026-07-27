@@ -206,6 +206,7 @@ export async function main(): Promise<void> {
     strategy: deps.strategy,
     instrument: deps.symbol,
     amount: deps.quantity,
+    orderSizingMode: deps.orderSizingMode,
     portfolioRiskConfig: deps.portfolioRiskConfig,
     lifecycleService: deps.lifecycleService,
     auditTrail,

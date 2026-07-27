@@ -5,6 +5,8 @@ import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
+import { assertOrderSizingMode } from "../order-sizing";
+import type { OrderSizingMode } from "../types";
 import { buildTradeCandidateInput } from "./build-trade-candidate";
 import type { TradeCandidate } from "./types";
 import type { TradeCandidateRepository } from "./trade-candidate-repository";
@@ -33,6 +35,9 @@ export interface CreateTradeCandidateForDecisionInput {
   context: MarketDecisionContext;
   marketDataSnapshot: MarketDataSnapshot;
   amount: number;
+  /** Broker Sizing Semantic Fix. Frozen onto the candidate's own execution snapshot — see
+   * TradeCandidateExecutionSnapshot's own doc comment. */
+  sizingMode: OrderSizingMode;
   analysisRunId: string | undefined;
   now: Date;
   expiryMs: number;
@@ -43,7 +48,8 @@ export interface CreateTradeCandidateForDecisionInput {
 export async function createTradeCandidateForDecision(
   input: CreateTradeCandidateForDecisionInput,
 ): Promise<TradeCandidate | undefined> {
-  const { repository, auditTrail, executionRunId, decision, context, marketDataSnapshot, amount, analysisRunId, now, expiryMs } = input;
+  const { repository, auditTrail, executionRunId, decision, context, marketDataSnapshot, amount, sizingMode, analysisRunId, now, expiryMs } =
+    input;
 
   if (decision.action === "HOLD") {
     return undefined;
@@ -54,6 +60,7 @@ export async function createTradeCandidateForDecision(
     context,
     marketDataSnapshot,
     amount,
+    sizingMode,
     analysisRunId,
     now,
     expiryMs,
@@ -240,12 +247,18 @@ export async function executeApprovedTradeCandidate(input: ExecuteApprovedTradeC
   }
 
   try {
+    // Broker Sizing Semantic Fix. Fails closed (throws, caught below -> candidate marked FAILED
+    // with a clear reason) rather than guessing UNITS or NOTIONAL for a legacy candidate persisted
+    // before this field existed — see TradeCandidateExecutionSnapshot's own doc comment.
+    const sizingMode = assertOrderSizingMode(candidate.execution.sizingMode, `trade candidate "${candidate.id}"`);
+
     const result = await runMarketDecisionCycleWithLifecycle({
       broker,
       auditTrail,
       executionRunId,
       marketContext: candidate.execution.marketContext,
       amount: candidate.execution.amount,
+      orderSizingMode: sizingMode,
       portfolioRisk,
       lifecycleService,
       marketDataSnapshot: candidate.execution.marketDataSnapshot,

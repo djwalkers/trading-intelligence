@@ -152,6 +152,7 @@ function makeRuntime(
     strategy: STRATEGY,
     instrument: "BTC",
     amount: 10,
+    orderSizingMode: "UNITS",
     portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
     lifecycleService,
     auditTrail,

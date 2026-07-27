@@ -52,6 +52,7 @@ function makeRecord(id: string, status: TradeLifecycleStatus, overrides: Partial
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
+    sizingMode: "UNITS",
     decision: "BUY",
     confidence: 0.7,
     decisionReasons: ["EMA20 above EMA50"],

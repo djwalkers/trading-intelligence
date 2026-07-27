@@ -16,6 +16,7 @@ import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import type { EtoroResolvedInstrument } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { selectStrategy } from "@/lib/hermes-execution/runtime-config/strategy-selection";
+import { BROKER_CAPABILITIES } from "@/lib/hermes-execution/runtime-config/broker-capabilities";
 
 // Milestones 2/3 — Market Decision Integration + Rich Market Context. Proves, end to end, against
 // the already-validated eToro demo broker:
@@ -224,6 +225,7 @@ export async function main(): Promise<void> {
     executionRunId,
     marketContext: firstContext,
     amount: config.etoro.testAmount,
+    orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
     // brokerAvailable: true — the connect() + resolveInstrument() calls above already succeeded,
     // so the broker is known-reachable at this point in the cycle. dailyTradeCount: this run's own
     // completed-trade count so far — this demo CLI has no persistent cross-run trade counter.
@@ -264,6 +266,7 @@ export async function main(): Promise<void> {
       executionRunId,
       marketContext: secondContext,
       amount: config.etoro.testAmount,
+      orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
       portfolioRisk: {
         config: PORTFOLIO_RISK_CONFIG,
         dailyTradeCount: broker.getCompletedTrades().length,

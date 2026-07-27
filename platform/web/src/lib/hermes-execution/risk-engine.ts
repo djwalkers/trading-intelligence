@@ -1,4 +1,5 @@
-import type { Account, InternalStrategy, OrderRequest, PaperPosition, RiskCheck, RiskDecision } from "./types";
+import { calculateNotional } from "./order-sizing";
+import type { Account, InternalStrategy, OrderRequest, OrderSizingMode, PaperPosition, RiskCheck, RiskDecision } from "./types";
 
 export interface RiskEngineConfig {
   demoExecutionModeEnabled: boolean;
@@ -7,6 +8,11 @@ export interface RiskEngineConfig {
    * configured, account-wide ceiling used by the newer Milestone 4 pipeline. Same domain concept,
    * two different scopes/sources of truth. */
   strategyMaxOpenPositions: number;
+  /** Broker Sizing Semantic Fix. This pipeline (execution-runner.ts) only ever runs against
+   * LocalPaperBroker today — see runtime-config/broker-capabilities.ts's own BROKER_CAPABILITIES.local
+   * — so callers pass that broker's own declared sizing mode explicitly rather than this engine
+   * guessing or hard-coding "UNITS" internally. */
+  orderSizingMode: OrderSizingMode;
 }
 
 /**
@@ -59,7 +65,7 @@ export function evaluateRisk(
     detail: order.quantity > 0 ? `Quantity ${order.quantity} is positive.` : `Quantity ${order.quantity} must be positive.`,
   });
 
-  const orderValue = order.quantity * order.price;
+  const orderValue = calculateNotional(config.orderSizingMode, order.quantity, order.price);
   const cashSufficient = orderValue <= account.cashBalance;
   checks.push({
     name: "sufficient-cash",

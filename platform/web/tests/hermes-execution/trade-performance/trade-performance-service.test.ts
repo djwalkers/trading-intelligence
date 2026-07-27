@@ -59,7 +59,7 @@ function makeCandidateInput(overrides: Partial<TradeCandidateInput> = {}): Trade
     reasoning: ["EMA20 above EMA50"],
     validationNotes: [],
     expiresAt: "2026-01-01T00:20:00.000Z",
-    execution: { amount: 10, marketContext: MARKET_CONTEXT, marketDataSnapshot: MARKET_SNAPSHOT },
+    execution: { amount: 10, sizingMode: "UNITS", marketContext: MARKET_CONTEXT, marketDataSnapshot: MARKET_SNAPSHOT },
     ...overrides,
   };
 }
@@ -71,6 +71,7 @@ function makeClosedLifecycleRecord(overrides: Partial<TradeLifecycleRecord> = {}
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
+    sizingMode: "UNITS",
     decision: "SELL",
     confidence: 0.8,
     decisionReasons: ["Trend has turned Bearish"],

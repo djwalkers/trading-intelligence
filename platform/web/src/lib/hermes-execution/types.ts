@@ -74,6 +74,22 @@ export interface SignalDecision {
 
 export type OrderSide = "BUY" | "SELL";
 
+/**
+ * How a broker's `OrderRequest.quantity` (and the resulting `PaperPosition.quantity`) must be
+ * interpreted to get a notional/exposure value out of it — see order-sizing.ts's own
+ * `calculateNotional`, THE single place this interpretation happens. Every broker declares exactly
+ * one of these in runtime-config/broker-capabilities.ts; nothing here ever infers it from a broker
+ * name or instrument string.
+ *
+ * - "UNITS": `quantity` is an asset/share/contract count — notional = quantity x price. Trading212,
+ *   Hyperliquid, and the generic LocalPaperBroker all use this (their own `closePosition` P/L
+ *   formulas already assume it).
+ * - "NOTIONAL": `quantity` IS the notional/invested amount already, in account currency — notional =
+ *   quantity, full stop; price is never multiplied in. eToro's CFD adapter uses this — see
+ *   etoro-demo-broker.ts's own top-of-class doc comment.
+ */
+export type OrderSizingMode = "UNITS" | "NOTIONAL";
+
 export interface OrderRequest {
   strategyId: string;
   strategyVersion: number;

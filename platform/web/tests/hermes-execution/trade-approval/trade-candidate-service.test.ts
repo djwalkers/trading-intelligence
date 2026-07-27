@@ -141,6 +141,7 @@ async function createBuyCandidate(
     context,
     marketDataSnapshot: MARKET_DATA_SNAPSHOT,
     amount: 10,
+    sizingMode: "UNITS",
     analysisRunId: undefined,
     now,
     expiryMs,
@@ -167,6 +168,7 @@ describe("createTradeCandidateForDecision", () => {
       context,
       marketDataSnapshot: MARKET_DATA_SNAPSHOT,
       amount: 10,
+      sizingMode: "UNITS",
       analysisRunId: undefined,
       now,
       expiryMs: 20 * 60_000,
@@ -195,6 +197,7 @@ describe("createTradeCandidateForDecision", () => {
       context,
       marketDataSnapshot: MARKET_DATA_SNAPSHOT,
       amount: 10,
+      sizingMode: "UNITS",
       analysisRunId: undefined,
       now: new Date(),
       expiryMs: 20 * 60_000,
@@ -218,6 +221,7 @@ describe("createTradeCandidateForDecision", () => {
       context,
       marketDataSnapshot: MARKET_DATA_SNAPSHOT,
       amount: 10,
+      sizingMode: "UNITS",
       analysisRunId: "analysis-run-42",
       now: new Date(),
       expiryMs: 20 * 60_000,
@@ -567,5 +571,112 @@ describe("executeApprovedTradeCandidate", () => {
 
     expect(outcome.outcome).toBe("already-handled");
     expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  // Broker Sizing Semantic Fix — Compatibility requirement: an approved candidate must execute
+  // using the EXACT sizing semantics reviewed by the human, frozen at creation time, never
+  // re-derived at approval/execution time.
+  it("executes a NOTIONAL (eToro-style) candidate using its own frozen sizing mode, not the order's price", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+
+    const context = makeMarketContext(); // ask 100.05, BUY decision
+    const decision = MarketDecisionEngine.evaluate(context);
+    const candidate = await createTradeCandidateForDecision({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      decision,
+      context,
+      marketDataSnapshot: MARKET_DATA_SNAPSHOT,
+      amount: 10, // NOTIONAL: this is an order value of 10, not 10 * 100.05
+      sizingMode: "NOTIONAL",
+      analysisRunId: undefined,
+      now,
+      expiryMs: 20 * 60_000,
+    });
+    if (!candidate) throw new Error("Test fixture error: expected a BUY decision.");
+
+    const approved = await approveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      approvedByUserId: "user-1",
+      now,
+    });
+    expect(approved.outcome).toBe("approved");
+    if (approved.outcome !== "approved") throw new Error("unreachable");
+
+    const broker = makeMockBroker();
+    // A max exposure of 50 would reject this order if (wrongly) treated as UNITS (10 * 100.05 ~
+    // 1000.50 > 50), but must permit it under its own correct NOTIONAL value of 10.
+    const strictButSufficientConfig: PortfolioRiskConfig = { ...PERMISSIVE_RISK_CONFIG, maxPortfolioExposure: 50 };
+    const lifecycleService = makeLifecycleService(auditTrail, now);
+
+    const outcome = await executeApprovedTradeCandidate({
+      repository,
+      broker,
+      auditTrail,
+      executionRunId: "test-run",
+      lifecycleService,
+      portfolioRisk: { config: strictButSufficientConfig, dailyTradeCount: 0, brokerAvailable: true },
+      candidate: approved.candidate,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("executed");
+    expect(broker.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({ quantity: 10 }));
+  });
+
+  // Broker Sizing Semantic Fix — Compatibility requirement: an ambiguous legacy candidate (persisted
+  // before sizing modes existed, so execution_snapshot.sizingMode is simply absent after JSON
+  // parsing) must fail closed, never be silently reinterpreted as UNITS or NOTIONAL.
+  it("fails closed (never executes) when an approved candidate's frozen sizing mode is missing", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const approved = await approveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      approvedByUserId: "user-1",
+      now,
+    });
+    expect(approved.outcome).toBe("approved");
+    if (approved.outcome !== "approved") throw new Error("unreachable");
+
+    // Simulate a legacy row: execution_snapshot predates this field, so it is simply absent after
+    // being read back from Supabase's jsonb column — never a wrong guess, genuinely `undefined`.
+    const legacyCandidate = {
+      ...approved.candidate,
+      execution: { ...approved.candidate.execution, sizingMode: undefined as never },
+    };
+
+    const broker = makeMockBroker();
+    const lifecycleService = makeLifecycleService(auditTrail, now);
+
+    const outcome = await executeApprovedTradeCandidate({
+      repository,
+      broker,
+      auditTrail,
+      executionRunId: "test-run",
+      lifecycleService,
+      portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+      candidate: legacyCandidate,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("failed");
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    if (outcome.outcome === "failed") {
+      expect(outcome.reason).toMatch(/sizing mode/i);
+    }
+    const stored = await repository.getById(candidate.id);
+    expect(stored?.status).toBe("FAILED");
   });
 });

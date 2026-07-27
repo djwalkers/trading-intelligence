@@ -51,6 +51,7 @@ function makeRecord(id: string, overrides: Partial<TradeLifecycleRecord> = {}): 
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
+    sizingMode: "UNITS",
     decision: "BUY",
     confidence: 0.7,
     decisionReasons: ["EMA20 above EMA50"],

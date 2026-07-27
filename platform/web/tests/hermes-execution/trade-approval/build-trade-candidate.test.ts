@@ -78,6 +78,7 @@ describe("buildTradeCandidateInput", () => {
       context,
       marketDataSnapshot: SNAPSHOT,
       amount: 10,
+      sizingMode: "UNITS",
       analysisRunId: "analysis-run-1",
       now,
       expiryMs: 20 * 60_000,
@@ -90,7 +91,7 @@ describe("buildTradeCandidateInput", () => {
     expect(input.reasoning).toEqual(decision.reasoning);
     expect(input.analysisRunId).toBe("analysis-run-1");
     expect(input.expiresAt).toBe(new Date(now.getTime() + 20 * 60_000).toISOString());
-    expect(input.execution).toEqual({ marketContext: context, marketDataSnapshot: SNAPSHOT, amount: 10 });
+    expect(input.execution).toEqual({ marketContext: context, marketDataSnapshot: SNAPSHOT, amount: 10, sizingMode: "UNITS" });
   });
 
   it("carries validationNotes through, defaulting to an empty array when the decision has none", () => {
@@ -101,6 +102,7 @@ describe("buildTradeCandidateInput", () => {
       context,
       marketDataSnapshot: SNAPSHOT,
       amount: 10,
+      sizingMode: "UNITS",
       analysisRunId: undefined,
       now,
       expiryMs: 1000,

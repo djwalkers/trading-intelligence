@@ -1,6 +1,6 @@
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import type { MarketDecisionContext } from "../market-decision-engine";
-import type { OrderSide } from "../types";
+import type { OrderSide, OrderSizingMode } from "../types";
 
 // Phase 3.5 — Trade Review & Approval. New flow: Analyse -> Decision -> Trade Candidate -> Persist
 // -> Review UI -> Approved? -> Broker. A TradeCandidate is a BUY/SELL decision MarketDecisionEngine
@@ -61,6 +61,16 @@ export interface TradeCandidateExecutionSnapshot {
   marketContext: MarketDecisionContext;
   marketDataSnapshot: MarketDataSnapshot;
   amount: number;
+  /** Broker Sizing Semantic Fix. THE sizing semantics `amount` above was reviewed under, frozen at
+   * candidate-creation time (Compatibility requirement: an approved candidate must execute under the
+   * exact sizing semantics a human reviewed, never a value re-derived at approval/execution time,
+   * which could have drifted if the broker configuration changed in between). Stored inside this
+   * existing JSONB `execution_snapshot` column (supabase/migrations/0024_trade_candidates.sql) — no
+   * schema migration needed. A row persisted before this field existed simply has it absent after
+   * JSON parsing (`undefined`, not a wrong guess) — trade-candidate-service.ts's own
+   * executeApprovedTradeCandidate runs this through assertOrderSizingMode and fails that one
+   * candidate closed (FAILED, with a clear reason) rather than assuming UNITS or NOTIONAL. */
+  sizingMode: OrderSizingMode;
 }
 
 export interface TradeCandidateInput {

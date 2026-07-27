@@ -98,6 +98,7 @@ function makeClosingCandidate(id: string): TradeCandidate {
     brokerOrderId: "mock-close-1",
     execution: {
       amount: 10,
+      sizingMode: "UNITS",
       marketContext: MARKET_CONTEXT,
       marketDataSnapshot: {
         instrument: "BTC",

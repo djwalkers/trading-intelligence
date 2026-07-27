@@ -112,6 +112,7 @@ describe("runMarketDecisionCycle — BUY (execution triggered)", () => {
       executionRunId: "test-run",
       marketContext: makeMarketContext(),
       amount: 50,
+      orderSizingMode: "UNITS",
       portfolioRisk: makePortfolioRisk(),
     });
 
@@ -164,6 +165,7 @@ describe("runMarketDecisionCycle — BUY blocked by open position limit (convert
       executionRunId: "test-run",
       marketContext: makeMarketContext(),
       amount: 50,
+      orderSizingMode: "UNITS",
       portfolioRisk: makePortfolioRisk({ config: { ...PERMISSIVE_RISK_CONFIG, portfolioMaxOpenPositions: 1 } }),
     });
 
@@ -197,6 +199,7 @@ describe("runMarketDecisionCycle — BUY blocked by insufficient cash (converted
       executionRunId: "test-run",
       marketContext: makeMarketContext(),
       amount: 50,
+      orderSizingMode: "UNITS",
       portfolioRisk: makePortfolioRisk(),
     });
 
@@ -238,6 +241,7 @@ describe("runMarketDecisionCycle — SELL (execution triggered)", () => {
       executionRunId: "test-run",
       marketContext: makeMarketContext({ positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 }),
       amount: 50,
+      orderSizingMode: "UNITS",
       // Deliberately a risk config that would block a BUY (zero open positions allowed) — proves
       // SELL is never risk-gated, per the milestone's own "SELL still permitted" requirement.
       portfolioRisk: makePortfolioRisk({ config: { ...PERMISSIVE_RISK_CONFIG, portfolioMaxOpenPositions: 0 } }),
@@ -268,6 +272,7 @@ describe("runMarketDecisionCycle — HOLD (execution skipped)", () => {
       executionRunId: "test-run",
       marketContext: makeMarketContext({ rsi14: 90 }), // overbought — outside the 45-65 entry band
       amount: 50,
+      orderSizingMode: "UNITS",
       portfolioRisk: makePortfolioRisk(),
     });
 
@@ -295,6 +300,7 @@ describe("runMarketDecisionCycle — does not duplicate existing execution audit
       executionRunId: "test-run",
       marketContext: makeMarketContext(),
       amount: 50,
+      orderSizingMode: "UNITS",
       portfolioRisk: makePortfolioRisk(),
     });
 

@@ -1,3 +1,4 @@
+import { calculateNotional, isOrderSizingMode } from "../order-sizing";
 import type { TradeLifecycleRecord } from "../trade-lifecycle/types";
 import type { TradeCandidate } from "../trade-approval/types";
 import type { TradePerformanceInput, WinLoss } from "./types";
@@ -21,19 +22,34 @@ export function classifyWinLoss(netPnl: number): WinLoss {
 }
 
 /**
- * net_pnl / initial dollar risk, where initial dollar risk is |entryPrice - stopLoss| x quantity
- * on the ORIGINATING (opening) TradeCandidate — never the closing candidate's own stopLoss, which
- * describes a hypothetical fresh entry at close time, not the risk actually taken when this
- * position was opened. Undefined when no opening candidate (and therefore no stop-loss) could be
- * resolved, or when the resolved stop-loss implies zero risk (never returns Infinity/NaN).
+ * net_pnl / initial dollar risk, where initial dollar risk is the notional distance between
+ * entryPrice and stopLoss on the ORIGINATING (opening) TradeCandidate — never the closing
+ * candidate's own stopLoss, which describes a hypothetical fresh entry at close time, not the risk
+ * actually taken when this position was opened. Undefined when no opening candidate (and therefore
+ * no stop-loss) could be resolved, when the resolved stop-loss implies zero risk (never returns
+ * Infinity/NaN), or when the opening candidate's own frozen sizing mode is missing/unrecognised (a
+ * legacy candidate persisted before this field existed — Broker Sizing Semantic Fix: this never
+ * guesses UNITS to keep old rows "working", it simply reports risk_multiple as unavailable).
+ *
+ * Sizing-mode aware: for "UNITS" this is byte-for-byte the pre-existing |entryPrice - stopLoss| x
+ * quantity formula; for "NOTIONAL" (eToro) `execution.amount` is already a notional amount, not a
+ * unit count, so the stop distance is applied as a PERCENTAGE of entryPrice against that notional —
+ * the same generalisation calculateRealisedPnl/calculateNotional already apply elsewhere, not a
+ * second competing formula.
  */
 export function calculateRiskMultiple(
   netPnl: number,
   openingCandidate: Pick<TradeCandidate, "entryPrice" | "stopLoss" | "execution"> | undefined,
 ): number | undefined {
   if (!openingCandidate) return undefined;
-  const riskPerUnit = Math.abs(openingCandidate.entryPrice - openingCandidate.stopLoss);
-  const dollarRisk = riskPerUnit * openingCandidate.execution.amount;
+  if (!isOrderSizingMode(openingCandidate.execution.sizingMode)) return undefined;
+
+  const { sizingMode, amount } = openingCandidate.execution;
+  const priceRisk = Math.abs(openingCandidate.entryPrice - openingCandidate.stopLoss);
+  // "UNITS": priceRisk (a per-unit currency distance) x amount (a unit count) = dollar risk.
+  // "NOTIONAL": priceRisk expressed as a fraction of entryPrice (a percentage move), applied against
+  // amount (already the notional itself) — mirrors calculateRealisedPnl's own UNITS/NOTIONAL split.
+  const dollarRisk = sizingMode === "UNITS" ? priceRisk * amount : (priceRisk / openingCandidate.entryPrice) * amount;
   if (!Number.isFinite(dollarRisk) || dollarRisk <= 0) return undefined;
   return netPnl / dollarRisk;
 }
@@ -90,7 +106,7 @@ export function buildTradePerformanceInput(options: BuildTradePerformanceInputOp
 
   const grossPnl = record.realisedPnl;
   const netPnl = grossPnl - fees;
-  const entryNotional = record.entryPrice * record.quantity;
+  const entryNotional = calculateNotional(record.sizingMode, record.quantity, record.entryPrice);
   const returnPercent = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
   const maxFavourableExcursion = record.maximumFavourableExcursion ?? 0;
   const maxAdverseExcursion = record.maximumAdverseExcursion ?? 0;

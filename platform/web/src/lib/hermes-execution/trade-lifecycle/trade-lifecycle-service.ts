@@ -1,5 +1,5 @@
 import type { AuditTrail } from "../audit-trail";
-import type { AuditEventType, OrderSide } from "../types";
+import type { AuditEventType, OrderSide, OrderSizingMode } from "../types";
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import type { MarketDecision, MarketDecisionContext } from "../market-decision-engine";
 import type { PortfolioRiskDecision } from "../portfolio-risk-engine";
@@ -19,6 +19,10 @@ export interface CreateFromDecisionInput {
   symbol: string;
   side: OrderSide;
   quantity: number;
+  /** Broker Sizing Semantic Fix. Frozen onto the created record (see TradeLifecycleRecord's own
+   * doc comment) — sourced by the caller from the broker's own declared sizing mode, never guessed
+   * here. */
+  sizingMode: OrderSizingMode;
   decision: MarketDecision;
   marketDataSnapshot: MarketDataSnapshot;
   intelligenceSummary: MarketDecisionContext;
@@ -75,6 +79,7 @@ export class TradeLifecycleService {
       symbol: input.symbol,
       side: input.side,
       quantity: input.quantity,
+      sizingMode: input.sizingMode,
       decision: input.decision.action,
       confidence: input.decision.confidence,
       decisionReasons: input.decision.reasoning,
@@ -152,8 +157,14 @@ export class TradeLifecycleService {
       );
     }
     const closedAt = input.closedAt ?? this.now().toISOString();
-    const realisedPnl = calculateRealisedPnl(record.side, record.entryPrice, input.exitPrice, record.quantity);
-    const realisedPnlPercent = calculateRealisedPnlPercent(record.side, record.entryPrice, input.exitPrice, record.quantity);
+    const realisedPnl = calculateRealisedPnl(record.sizingMode, record.side, record.entryPrice, input.exitPrice, record.quantity);
+    const realisedPnlPercent = calculateRealisedPnlPercent(
+      record.sizingMode,
+      record.side,
+      record.entryPrice,
+      input.exitPrice,
+      record.quantity,
+    );
     const holdingDurationMs = calculateHoldingDurationMs(record.openedAt, closedAt);
 
     const updated = await this.transition(record, "CLOSED", {
@@ -201,7 +212,7 @@ export class TradeLifecycleService {
       maximumFavourableExcursion: record.maximumFavourableExcursion ?? 0,
       maximumAdverseExcursion: record.maximumAdverseExcursion ?? 0,
     };
-    const next = updateExcursionValues(record.side, record.entryPrice, currentPrice, record.quantity, previous);
+    const next = updateExcursionValues(record.sizingMode, record.side, record.entryPrice, currentPrice, record.quantity, previous);
 
     if (
       next.maximumFavourableExcursion === previous.maximumFavourableExcursion &&

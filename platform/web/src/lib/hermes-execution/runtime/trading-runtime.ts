@@ -1,7 +1,7 @@
 import { logger } from "@/lib/logger/logger";
 import { buildMarketDecisionContext } from "../build-market-decision-context";
 import type { AuditTrail } from "../audit-trail";
-import type { AuditEventType, InternalStrategy } from "../types";
+import type { AuditEventType, InternalStrategy, OrderSizingMode } from "../types";
 import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
 import { MarketDecisionEngine } from "../market-decision-engine";
@@ -73,6 +73,14 @@ export interface TradingRuntimeDeps {
   strategy: InternalStrategy;
   instrument: string;
   amount: number;
+  /** Broker Sizing Semantic Fix. How `amount` must be interpreted to get a notional value — NOT
+   * optional, same "no silent default" convention `tradeCandidateRepository` below already
+   * establishes: the caller (market-runtime.ts) sources this from
+   * runtime-config/broker-capabilities.ts's own BROKER_CAPABILITIES[provider].orderSizingMode, this
+   * runtime never infers it from `broker` itself. Frozen onto every TradeCandidate this runtime
+   * creates (see runCycleBody's own createTradeCandidateForDecision call) and forwarded to
+   * PortfolioRiskEngine for every candidate it later executes. */
+  orderSizingMode: OrderSizingMode;
   portfolioRiskConfig: PortfolioRiskConfig;
   lifecycleService: TradeLifecycleService;
   auditTrail: AuditTrail;
@@ -415,6 +423,7 @@ export class TradingRuntime {
         context,
         marketDataSnapshot: snapshot,
         amount: this.deps.amount,
+        sizingMode: this.deps.orderSizingMode,
         analysisRunId,
         now,
         expiryMs: this.deps.tradeCandidateExpiryMs,

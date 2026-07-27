@@ -1,4 +1,5 @@
-import type { Account, OrderRequest, PaperPosition, RiskCheck } from "./types";
+import { calculateNotional } from "./order-sizing";
+import type { Account, OrderRequest, OrderSizingMode, PaperPosition, RiskCheck } from "./types";
 
 /**
  * Milestone 4 — Portfolio & Risk Engine. Sits between MarketDecisionEngine and the execution
@@ -35,6 +36,13 @@ export interface PortfolioRiskInput {
    * market-decision-runner.ts) — closing an existing position is always permitted. */
   proposedOrder: OrderRequest;
   config: PortfolioRiskConfig;
+  /** Broker Sizing Semantic Fix. How `proposedOrder.quantity` AND every `openPositions[].quantity`
+   * must be interpreted to get a notional value — one broker instance's positions and proposed
+   * orders always share the same sizing mode, so a single value covers both (see
+   * order-sizing.ts's own `calculateNotional`). Sourced by the caller from
+   * runtime-config/broker-capabilities.ts's own BROKER_CAPABILITIES[provider].orderSizingMode —
+   * never inferred here from an instrument string or broker name. */
+  sizingMode: OrderSizingMode;
 }
 
 export type PortfolioRiskDecision =
@@ -47,8 +55,8 @@ export type PortfolioRiskDecision =
       blockedReasons: string[];
     };
 
-function positionNotional(position: PaperPosition): number {
-  return position.quantity * position.entryPrice;
+function positionNotional(position: PaperPosition, sizingMode: OrderSizingMode): number {
+  return calculateNotional(sizingMode, position.quantity, position.entryPrice);
 }
 
 /**
@@ -59,10 +67,10 @@ function positionNotional(position: PaperPosition): number {
  */
 export const PortfolioRiskEngine = {
   evaluate(input: PortfolioRiskInput): PortfolioRiskDecision {
-    const { account, openPositions, dailyTradeCount, brokerAvailable, proposedOrder, config } = input;
+    const { account, openPositions, dailyTradeCount, brokerAvailable, proposedOrder, config, sizingMode } = input;
 
-    const existingExposure = openPositions.reduce((sum, p) => sum + positionNotional(p), 0);
-    const orderValue = proposedOrder.quantity * proposedOrder.price;
+    const existingExposure = openPositions.reduce((sum, p) => sum + positionNotional(p, sizingMode), 0);
+    const orderValue = calculateNotional(sizingMode, proposedOrder.quantity, proposedOrder.price);
     const projectedExposure = existingExposure + orderValue;
     const accountEquity = account.cashBalance + existingExposure;
 

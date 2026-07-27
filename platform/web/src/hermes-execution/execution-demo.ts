@@ -8,6 +8,7 @@ import { LocalPaperBroker } from "@/lib/hermes-execution/paper-broker";
 import { JsonFilePaperBrokerStore } from "@/lib/hermes-execution/json-file-paper-broker-store";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { ExecutionRunner } from "@/lib/hermes-execution/execution-runner";
+import { BROKER_CAPABILITIES } from "@/lib/hermes-execution/runtime-config/broker-capabilities";
 import type { AuditEvent } from "@/lib/hermes-execution/types";
 
 const FIXTURE_PATH = path.join(process.cwd(), "src", "hermes-execution", "fixtures", "demo-candles.json");
@@ -121,6 +122,9 @@ async function main(): Promise<void> {
     riskConfig: {
       demoExecutionModeEnabled: config.demoExecutionModeEnabled,
       strategyMaxOpenPositions: config.strategyMaxOpenPositions,
+      // This demo replay only ever runs against LocalPaperBroker (see below) — its own declared
+      // sizing mode, not a hard-coded literal.
+      orderSizingMode: BROKER_CAPABILITIES.local.orderSizingMode,
     },
     executionRunId,
   });

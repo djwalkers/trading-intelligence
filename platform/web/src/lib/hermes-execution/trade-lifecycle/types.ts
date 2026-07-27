@@ -1,7 +1,7 @@
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import type { MarketDecisionAction, MarketDecisionContext } from "../market-decision-engine";
 import type { PortfolioRiskDecision } from "../portfolio-risk-engine";
-import type { OrderSide } from "../types";
+import type { OrderSide, OrderSizingMode } from "../types";
 
 // Milestone 6 — Trade Lifecycle & Performance Tracking. Reuses existing domain types wherever one
 // already fits (OrderSide, MarketDecisionAction, MarketDecisionContext, MarketDataSnapshot,
@@ -91,6 +91,12 @@ export interface TradeLifecycleRecord {
   symbol: string;
   side: OrderSide;
   quantity: number;
+  /** Broker Sizing Semantic Fix. How `quantity` must be interpreted to get a notional value —
+   * frozen at creation time (the broker's own declared mode at the moment this record was opened)
+   * and never re-derived later, so every P/L, MFE/MAE, and risk-multiple calculation against this
+   * record uses the exact semantics the record was actually opened under. See order-sizing.ts's
+   * own `calculateNotional`. */
+  sizingMode: OrderSizingMode;
   /** The entry decision's action — reuses MarketDecisionEngine's own MarketDecisionAction rather
    * than a narrower literal, even though only "BUY" ever creates a record today (see
    * trade-lifecycle-runner.ts) — keeps this type honest if a future decision engine change ever

@@ -56,7 +56,7 @@ function toErrorMessage(error: unknown): string {
 export async function runMarketDecisionCycleWithLifecycle(
   input: TradeLifecycleCycleInput,
 ): Promise<TradeLifecycleCycleResult> {
-  const { broker, marketContext, amount, lifecycleService, portfolioRisk, marketDataSnapshot } = input;
+  const { broker, marketContext, amount, orderSizingMode, lifecycleService, portfolioRisk, marketDataSnapshot } = input;
   const { instrument, strategy } = marketContext;
 
   // Excursion tracking for whatever's already open on this strategy+instrument, independent of
@@ -82,6 +82,7 @@ export async function runMarketDecisionCycleWithLifecycle(
       symbol: instrument,
       side: "BUY",
       quantity: amount,
+      sizingMode: orderSizingMode,
       decision,
       marketDataSnapshot,
       intelligenceSummary: marketContext,
@@ -105,6 +106,7 @@ export async function runMarketDecisionCycleWithLifecycle(
       brokerAvailable: portfolioRisk.brokerAvailable,
       proposedOrder,
       config: portfolioRisk.config,
+      sizingMode: orderSizingMode,
     });
 
     if (!riskDecision.permitted) {

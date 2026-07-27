@@ -1,4 +1,5 @@
 import type { BrokerProvider, RuntimeMode } from "../config";
+import type { OrderSizingMode } from "../types";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. A static, declarative capability table —
 // not a method added to each broker class. Capabilities here are inherent, fixed properties of
@@ -30,6 +31,13 @@ export interface BrokerCapabilities {
    * unchanged, by config.ts's own existing per-broker checks at config-build time; this list is not
    * a second enforcement mechanism, purely descriptive. */
   requiredCredentialEnvVars: readonly string[];
+  /** Broker Sizing Semantic Fix. How this broker's own `OrderRequest.quantity`/
+   * `PaperPosition.quantity` must be interpreted to get a notional value — see
+   * order-sizing.ts's own `calculateNotional` and types.ts's own `OrderSizingMode` doc comment.
+   * Only "etoro-demo" is "NOTIONAL" (its own documented CFD "amount" semantics); every other broker
+   * here is the standard "UNITS" (asset/share/contract count) a paper/testnet/demo equity-style
+   * broker uses. */
+  orderSizingMode: OrderSizingMode;
 }
 
 export const BROKER_CAPABILITIES: Record<BrokerProvider, BrokerCapabilities> = {
@@ -39,6 +47,7 @@ export const BROKER_CAPABILITIES: Record<BrokerProvider, BrokerCapabilities> = {
     requiresSymbolResolution: false,
     canSupplyLiveRates: false,
     requiredCredentialEnvVars: [],
+    orderSizingMode: "UNITS",
   },
   "hyperliquid-testnet": {
     provider: "hyperliquid-testnet",
@@ -46,6 +55,7 @@ export const BROKER_CAPABILITIES: Record<BrokerProvider, BrokerCapabilities> = {
     requiresSymbolResolution: false,
     canSupplyLiveRates: false,
     requiredCredentialEnvVars: ["HYPERLIQUID_TESTNET_PRIVATE_KEY", "HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS"],
+    orderSizingMode: "UNITS",
   },
   "trading212-demo": {
     provider: "trading212-demo",
@@ -53,6 +63,7 @@ export const BROKER_CAPABILITIES: Record<BrokerProvider, BrokerCapabilities> = {
     requiresSymbolResolution: false,
     canSupplyLiveRates: false,
     requiredCredentialEnvVars: ["TRADING212_API_KEY", "TRADING212_API_SECRET"],
+    orderSizingMode: "UNITS",
   },
   "etoro-demo": {
     provider: "etoro-demo",
@@ -60,6 +71,7 @@ export const BROKER_CAPABILITIES: Record<BrokerProvider, BrokerCapabilities> = {
     requiresSymbolResolution: true,
     canSupplyLiveRates: true,
     requiredCredentialEnvVars: ["ETORO_API_KEY", "ETORO_USER_KEY"],
+    orderSizingMode: "NOTIONAL",
   },
 };
 

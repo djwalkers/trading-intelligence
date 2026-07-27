@@ -61,6 +61,7 @@ const BASE_INPUT: TradeCandidateInput = {
   expiresAt: "2026-01-01T00:20:00.000Z",
   execution: {
     amount: 10,
+    sizingMode: "UNITS",
     marketContext: {
       instrument: "BTC",
       bid: 100,

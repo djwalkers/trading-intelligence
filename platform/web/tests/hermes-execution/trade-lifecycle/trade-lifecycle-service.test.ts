@@ -71,12 +71,13 @@ function makeService(overrides: { clock?: string[] } = {}) {
   return { store, auditTrail, service };
 }
 
-async function createRecord(service: TradeLifecycleService) {
+async function createRecord(service: TradeLifecycleService, sizingMode: "UNITS" | "NOTIONAL" = "UNITS") {
   return service.createFromDecision({
     strategyId: "STRAT-0001",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
+    sizingMode,
     decision: BUY_DECISION,
     marketDataSnapshot: MARKET_DATA_SNAPSHOT,
     intelligenceSummary: INTELLIGENCE_SUMMARY,
@@ -228,8 +229,8 @@ describe("TradeLifecycleService — failed execution", () => {
   });
 });
 
-async function openRecord(service: TradeLifecycleService) {
-  let record = await createRecord(service);
+async function openRecord(service: TradeLifecycleService, sizingMode: "UNITS" | "NOTIONAL" = "UNITS") {
+  let record = await createRecord(service, sizingMode);
   record = await service.recordApproved(record, PERMITTED_RISK);
   record = await service.recordExecutionSubmitted(record);
   record = await service.recordOpened(record, {
@@ -291,6 +292,22 @@ describe("TradeLifecycleService — successful closure", () => {
       eventType: "TRADE_CLOSED",
       details: { exitPrice: 110, realisedPnl: 100, exitReason: "market-decision-sell" },
     });
+  });
+
+  // Broker Sizing Semantic Fix — proves recordClosed's own recomputed P/L for a NOTIONAL (eToro-style)
+  // record matches EtoroDemoBroker.closePosition's own inline percent-return formula exactly, never
+  // the UNITS price-delta-times-quantity formula (which would treat the notional as an asset-unit
+  // count and produce a wildly wrong figure).
+  it("computes NOTIONAL-mode P/L as the percentage return on the notional, not price-delta x quantity", async () => {
+    const { service } = makeService();
+    let record = await openRecord(service, "NOTIONAL"); // entryPrice 100, quantity 10 (a $10 notional)
+    record = await service.recordCloseRequested(record);
+    record = await service.recordClosed(record, { exitPrice: 110, exitReason: "market-decision-sell" }); // +10% move
+
+    // Broker-correct: 10 (notional) * 10% = 1 — NOT (110-100)*10 = 100, which is what the UNITS
+    // formula would wrongly produce if quantity were misread as an asset-unit count.
+    expect(record.realisedPnl).toBeCloseTo(1, 10);
+    expect(record.realisedPnlPercent).toBeCloseTo(10, 10);
   });
 
   it("refuses to close a record that was never opened", async () => {

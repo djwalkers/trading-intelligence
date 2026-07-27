@@ -2,7 +2,7 @@ import { MarketDecisionEngine, type MarketDecision, type MarketDecisionContext }
 import { PortfolioRiskEngine, type PortfolioRiskConfig } from "./portfolio-risk-engine";
 import type { PaperBroker } from "./paper-broker";
 import type { AuditTrail } from "./audit-trail";
-import type { CompletedTrade, OrderRequest, PaperPosition } from "./types";
+import type { CompletedTrade, OrderRequest, OrderSizingMode, PaperPosition } from "./types";
 
 /**
  * Milestone 2/3 — Market Decision Integration + Rich Market Context. Deliberately broker-agnostic:
@@ -36,6 +36,11 @@ export interface MarketDecisionCycleInput {
    * whichever the concrete broker expects for `OrderRequest.quantity`). Sourcing this value is the
    * caller's responsibility; this runner never invents or defaults it. */
   amount: number;
+  /** Broker Sizing Semantic Fix. How `amount` (and every existing open position's own quantity)
+   * must be interpreted to get a notional value — forwarded verbatim to PortfolioRiskEngine.evaluate
+   * below. Sourced by the caller from runtime-config/broker-capabilities.ts's own
+   * BROKER_CAPABILITIES[provider].orderSizingMode — this runner never infers it itself. */
+  orderSizingMode: OrderSizingMode;
   /** Portfolio-level governance inputs consulted only for a BUY decision (see
    * portfolio-risk-engine.ts) — dailyTradeCount/brokerAvailable are observed facts this runner
    * never computes itself, sourced by the caller. */
@@ -137,6 +142,7 @@ export async function runMarketDecisionCycle(
       brokerAvailable: input.portfolioRisk.brokerAvailable,
       proposedOrder: order,
       config: input.portfolioRisk.config,
+      sizingMode: input.orderSizingMode,
     });
 
     await auditTrail.record({
