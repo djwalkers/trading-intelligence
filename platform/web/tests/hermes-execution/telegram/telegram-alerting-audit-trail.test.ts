@@ -85,6 +85,20 @@ describe("formatAlert — the eight required alert-worthy event types", () => {
     expect(formatAlert(makeEvent("TRADING_CYCLE_STARTED"))).toBeUndefined();
     expect(formatAlert(makeEvent("TRADE_APPROVED"))).toBeUndefined();
   });
+
+  // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+  // review: "emit a durable alert event whenever a lifecycle enters CLOSED_UNRECONCILED").
+  it("BROKER_RECONCILIATION_MISMATCH — alerts when the resolution is 'reconciled-closed-unreconciled'", () => {
+    const text = formatAlert(
+      makeEvent("BROKER_RECONCILIATION_MISMATCH", { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" }),
+    );
+    expect(text).toContain("CLOSED_UNRECONCILED");
+    expect(text).toContain("lifecycle-1");
+  });
+
+  it("BROKER_RECONCILIATION_MISMATCH — does NOT alert for the other 'failed-closed' resolution (already covered elsewhere)", () => {
+    expect(formatAlert(makeEvent("BROKER_RECONCILIATION_MISMATCH", { resolution: "failed-closed" }))).toBeUndefined();
+  });
 });
 
 describe("TelegramAlertingAuditTrail", () => {

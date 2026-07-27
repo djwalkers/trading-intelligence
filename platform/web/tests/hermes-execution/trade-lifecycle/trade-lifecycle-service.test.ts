@@ -71,10 +71,12 @@ function makeService(overrides: { clock?: string[] } = {}) {
   return { store, auditTrail, service };
 }
 
-async function createRecord(service: TradeLifecycleService, sizingMode: "UNITS" | "NOTIONAL" = "UNITS") {
+async function createRecord(service: TradeLifecycleService, sizingMode: "UNITS" | "NOTIONAL" = "UNITS", symbol = "BTC") {
   return service.createFromDecision({
     strategyId: "STRAT-0001",
-    symbol: "BTC",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
+    symbol,
     side: "BUY",
     quantity: 10,
     sizingMode,
@@ -105,8 +107,11 @@ describe("TradeLifecycleService.createFromDecision", () => {
 
   it("assigns a distinct id to each created record", async () => {
     const { service } = makeService();
-    const first = await createRecord(service);
-    const second = await createRecord(service);
+    // Distinct symbols: two DECISION_CREATED records for the SAME strategy+instrument would
+    // collide with the store's own active-record uniqueness invariant (Restart-Resilient Autonomy
+    // Phase — reconciliation hardening) — this test's own point is id distinctness, not that.
+    const first = await createRecord(service, "UNITS", "BTC");
+    const second = await createRecord(service, "UNITS", "ETH");
     expect(first.id).not.toBe(second.id);
   });
 

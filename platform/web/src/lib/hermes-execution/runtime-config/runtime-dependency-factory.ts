@@ -81,6 +81,12 @@ export interface BuildRuntimeDependenciesOptions {
    * not call for env-configurable portfolio risk limits) — supplied by the caller, not sourced from
    * HermesExecutionConfig. */
   portfolioRiskConfig: PortfolioRiskConfig;
+  /** Restart-Resilient Autonomy Phase — Phase 2 (durable trade lifecycle persistence). Defaults to
+   * a fresh InMemoryTradeLifecycleStore (this factory's own pre-existing behaviour, unchanged —
+   * market-decide.ts never passes this) when omitted. market-runtime.ts (the production, continuous
+   * runtime) passes a SupabaseTradeLifecycleStore here instead — see that file's own doc comment on
+   * why it fails closed rather than silently falling back to memory when Supabase isn't configured. */
+  lifecycleStoreOverride?: TradeLifecycleStore;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -117,6 +123,7 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
     marketDataProvider: config.marketDataProvider,
     strategyId: config.runtimeTrading.strategyId,
     availableStrategies: loadResult.strategies,
+    approvalMode: config.approvalMode,
   });
   if (!validation.valid) {
     return { ok: false, problems: validation.problems };
@@ -174,7 +181,7 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
 
   const marketHoursPolicy = MarketHoursPolicyFactory.create(config.scheduler.marketHoursPolicy, config.scheduler);
 
-  const lifecycleStore = new InMemoryTradeLifecycleStore();
+  const lifecycleStore = options.lifecycleStoreOverride ?? new InMemoryTradeLifecycleStore();
   const lifecycleService = new TradeLifecycleService({
     store: lifecycleStore,
     auditTrail: options.auditTrail,

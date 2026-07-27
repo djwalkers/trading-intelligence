@@ -117,4 +117,34 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     const body = await response.json();
     expect(JSON.stringify(body)).not.toContain(VALID_TOKEN);
   });
+
+  // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+  // review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics").
+  it("surfaces a CLOSED_UNRECONCILED closure in both unreconciledClosures and warnings", async () => {
+    mockReadAuditLog.mockResolvedValue({
+      events: [
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          eventType: "BROKER_RECONCILIATION_MISMATCH",
+          executionRunId: "run-1",
+          instrument: "BTC",
+          strategyId: "DEMO-0001",
+          details: { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" },
+        },
+      ],
+      available: true,
+    });
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.unreconciledClosures).toEqual([
+      { timestamp: "2026-01-01T00:00:00.000Z", instrument: "BTC", strategyId: "DEMO-0001", lifecycleRecordId: "lifecycle-1" },
+    ]);
+    expect(body.data.warnings.some((w: string) => w.includes("CLOSED_UNRECONCILED"))).toBe(true);
+  });
+
+  it("returns an empty unreconciledClosures array (never omitted) when there are none", async () => {
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.unreconciledClosures).toEqual([]);
+  });
 });

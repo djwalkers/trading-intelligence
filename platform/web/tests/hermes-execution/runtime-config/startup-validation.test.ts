@@ -26,6 +26,7 @@ describe("validateStartup — valid default-safe configuration", () => {
       marketDataProvider: "mock",
       strategyId: undefined,
       availableStrategies: [strategy],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(true);
     if (result.valid) expect(result.strategy).toEqual(strategy);
@@ -46,6 +47,7 @@ describe("validateStartup — supported broker/mode combinations", () => {
       marketDataProvider: "mock",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(true);
   });
@@ -59,6 +61,7 @@ describe("validateStartup — unsupported broker/mode combinations", () => {
       marketDataProvider: "mock",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.problems.some((p) => p.field === "runtimeMode")).toBe(true);
@@ -73,6 +76,7 @@ describe("validateStartup — Trading212 is rejected for Prototype V1", () => {
       marketDataProvider: "mock",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
     if (!result.valid) {
@@ -89,6 +93,7 @@ describe("validateStartup — live market-data provider missing RateSource", () 
       marketDataProvider: "live",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.problems.some((p) => p.field === "marketDataProvider")).toBe(true);
@@ -101,6 +106,7 @@ describe("validateStartup — live market-data provider missing RateSource", () 
       marketDataProvider: "live",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(true);
   });
@@ -114,6 +120,7 @@ describe("validateStartup — unknown/disabled strategy", () => {
       marketDataProvider: "mock",
       strategyId: "STRAT-9999",
       availableStrategies: [makeStrategy({ strategyId: "STRAT-0001" })],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.problems.some((p) => p.field === "strategyId")).toBe(true);
@@ -126,6 +133,7 @@ describe("validateStartup — unknown/disabled strategy", () => {
       marketDataProvider: "mock",
       strategyId: "STRAT-0001",
       availableStrategies: [makeStrategy({ strategyId: "STRAT-0001", enabled: false })],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
   });
@@ -139,12 +147,36 @@ describe("validateStartup — collects multiple independent problems at once", (
       marketDataProvider: "live", // also incompatible with local
       strategyId: "STRAT-9999", // also unknown
       availableStrategies: [makeStrategy({ strategyId: "STRAT-0001" })],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(false);
     if (result.valid) return;
     const fields = result.problems.map((p) => p.field).sort();
     expect(fields).toEqual(["marketDataProvider", "runtimeMode", "strategyId"]);
   });
+});
+
+// Restart-Resilient Autonomy Phase — AUTO_DEMO startup gate (safety-review hardening pass).
+describe("validateStartup — AUTO_DEMO broker eligibility gate", () => {
+  it("AUTO_DEMO passes for every currently supported broker", () => {
+    for (const brokerProvider of ["local", "hyperliquid-testnet", "etoro-demo"] as const) {
+      const result = validateStartup({
+        runtimeMode: brokerProvider === "local" ? "paper" : brokerProvider === "etoro-demo" ? "demo" : "testnet",
+        brokerProvider,
+        marketDataProvider: "mock",
+        strategyId: undefined,
+        availableStrategies: [makeStrategy()],
+        approvalMode: "AUTO_DEMO",
+      });
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  // An unrecognised brokerProvider can never actually reach validateStartup in production
+  // (config.ts's own parseEnum(BROKER_PROVIDER, SUPPORTED_BROKER_PROVIDERS, ...) already closes
+  // that door before a HermesExecutionConfig exists at all) — "fails closed for a missing
+  // capability" is exercised directly against checkApprovalModeCompatibility instead (see
+  // compatibility.test.ts), the correct, isolated unit for that behaviour.
 });
 
 describe("validateStartup — explicit rejection of accidental live operation", () => {
@@ -158,6 +190,7 @@ describe("validateStartup — explicit rejection of accidental live operation", 
       marketDataProvider: "mock",
       strategyId: undefined,
       availableStrategies: [makeStrategy()],
+      approvalMode: "MANUAL",
     });
     expect(result.valid).toBe(true);
   });

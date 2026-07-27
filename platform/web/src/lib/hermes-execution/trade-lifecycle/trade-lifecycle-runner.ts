@@ -35,6 +35,18 @@ export interface TradeLifecycleCycleInput extends MarketDecisionCycleInput {
    * derivable from `marketContext` alone, so the caller (whoever already called
    * MarketDataProvider.getMarketData()) must pass it through. */
   marketDataSnapshot: MarketDataSnapshot;
+  /** Restart-Resilient Autonomy Phase. Frozen onto the created TradeLifecycleRecord — see
+   * TradeLifecycleRecord's own doc comment. */
+  brokerProvider: string;
+  /** Restart-Resilient Autonomy Phase. Set only when this cycle originates from an approved
+   * TradeCandidate (executeApprovedTradeCandidate's own call site) — undefined for market-decide.ts's
+   * direct, candidate-less use of this function. */
+  candidateId?: string;
+  /** Restart-Resilient Autonomy Phase. The originating candidate's own stop-loss/take-profit levels
+   * (informational at candidate-creation time, now also frozen onto the opened lifecycle record so
+   * runtime/exit-monitor.ts can actually evaluate them) — undefined when no candidate exists. */
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 export interface TradeLifecycleCycleResult extends MarketDecisionCycleResult {
@@ -56,7 +68,8 @@ function toErrorMessage(error: unknown): string {
 export async function runMarketDecisionCycleWithLifecycle(
   input: TradeLifecycleCycleInput,
 ): Promise<TradeLifecycleCycleResult> {
-  const { broker, marketContext, amount, orderSizingMode, lifecycleService, portfolioRisk, marketDataSnapshot } = input;
+  const { broker, marketContext, amount, orderSizingMode, lifecycleService, portfolioRisk, marketDataSnapshot, brokerProvider, candidateId, stopLoss, takeProfit } =
+    input;
   const { instrument, strategy } = marketContext;
 
   // Excursion tracking for whatever's already open on this strategy+instrument, independent of
@@ -79,10 +92,15 @@ export async function runMarketDecisionCycleWithLifecycle(
   if (decision.action === "BUY") {
     let record = await lifecycleService.createFromDecision({
       strategyId: strategy.strategyId,
+      strategyVersion: strategy.version,
       symbol: instrument,
       side: "BUY",
       quantity: amount,
       sizingMode: orderSizingMode,
+      candidateId,
+      brokerProvider,
+      stopLoss,
+      takeProfit,
       decision,
       marketDataSnapshot,
       intelligenceSummary: marketContext,
@@ -138,6 +156,7 @@ export async function runMarketDecisionCycleWithLifecycle(
     record = await lifecycleService.recordOpened(record, {
       entryPrice: result.position.entryPrice,
       brokerOrderId: result.orderId ?? "",
+      brokerPositionId: result.position.brokerPositionId,
     });
     return { ...result, lifecycleRecord: record };
   }

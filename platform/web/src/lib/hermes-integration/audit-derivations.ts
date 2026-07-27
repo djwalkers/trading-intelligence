@@ -263,3 +263,37 @@ export function latestFailureOrWarning(events: AuditEvent[]): HermesRecentFailur
   }
   return null;
 }
+
+export interface HermesUnreconciledClosure {
+  timestamp: string;
+  instrument?: string;
+  strategyId?: string;
+  lifecycleRecordId?: string;
+}
+
+/**
+ * Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+ * review). Every BROKER_RECONCILIATION_MISMATCH event whose own `details.resolution` is
+ * "reconciled-closed-unreconciled" marks a lifecycle record that entered CLOSED_UNRECONCILED —
+ * genuinely gone at the broker, but with no confirmed exit price or realised P&L (see
+ * position-reconciliation.ts's own reconcileLocalActiveButBrokerAbsent). Sourced entirely from the
+ * audit trail, the same "no direct TradeLifecycleStore read" convention every other derivation in
+ * this file already follows (audit-log-reader.ts is the only durable, cross-process record this
+ * Next.js server has of the standalone runtime process). Never scoped to "since last start" — an
+ * unreconciled closure is exactly the kind of thing that must remain visible across a restart, not
+ * reset to zero the moment the runtime that produced it restarts.
+ */
+export function listUnreconciledClosures(events: AuditEvent[]): HermesUnreconciledClosure[] {
+  const results: HermesUnreconciledClosure[] = [];
+  for (const event of events) {
+    if (event.eventType !== "BROKER_RECONCILIATION_MISMATCH") continue;
+    if (detailString(event.details, "resolution") !== "reconciled-closed-unreconciled") continue;
+    results.push({
+      timestamp: event.timestamp,
+      instrument: event.instrument,
+      strategyId: event.strategyId,
+      lifecycleRecordId: detailString(event.details, "lifecycleRecordId"),
+    });
+  }
+  return results;
+}

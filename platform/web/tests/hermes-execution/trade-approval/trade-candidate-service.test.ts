@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   approveTradeCandidate,
+  autoApproveTradeCandidate,
+  AUTO_DEMO_APPROVER_ID,
   createTradeCandidateForDecision,
   executeApprovedTradeCandidate,
   rejectTradeCandidate,
@@ -461,6 +463,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
       candidate: approved.candidate,
       now,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("executed");
@@ -505,6 +508,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: strictRiskConfig, dailyTradeCount: 0, brokerAvailable: true },
       candidate: approved.candidate,
       now,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("failed");
@@ -543,6 +547,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
       candidate: approved.candidate,
       now: later,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("expired");
@@ -567,6 +572,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
       candidate,
       now,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("already-handled");
@@ -624,6 +630,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: strictButSufficientConfig, dailyTradeCount: 0, brokerAvailable: true },
       candidate: approved.candidate,
       now,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("executed");
@@ -669,6 +676,7 @@ describe("executeApprovedTradeCandidate", () => {
       portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
       candidate: legacyCandidate,
       now,
+      brokerProvider: "etoro-demo",
     });
 
     expect(outcome.outcome).toBe("failed");
@@ -678,5 +686,165 @@ describe("executeApprovedTradeCandidate", () => {
     }
     const stored = await repository.getById(candidate.id);
     expect(stored?.status).toBe("FAILED");
+  });
+});
+
+// Restart-Resilient Autonomy Phase — Phase 5 (AUTO_DEMO approval mode).
+//
+// Covers required scenarios:
+//  11. AUTO_DEMO persists candidate before auto-approval.
+//  12. AUTO_DEMO runs all normal risk checks.
+describe("autoApproveTradeCandidate", () => {
+  it("persists the candidate as PENDING BEFORE auto-approval — never the other way around (scenario 11)", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+
+    // The candidate is created (persisted as PENDING) via the exact same path a human-approval flow
+    // uses — createTradeCandidateForDecision — entirely BEFORE autoApproveTradeCandidate is ever
+    // called, proving persistence always happens first.
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+    expect(candidate.status).toBe("PENDING");
+    const persistedBeforeApproval = await repository.getById(candidate.id);
+    expect(persistedBeforeApproval?.status).toBe("PENDING");
+
+    const outcome = await autoApproveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("approved");
+    if (outcome.outcome === "approved") {
+      expect(outcome.candidate.approvedByUserId).toBe(AUTO_DEMO_APPROVER_ID);
+    }
+  });
+
+  it("uses the exact same PENDING -> APPROVED transition approveTradeCandidate uses, and additionally emits a durable, distinguishable TRADE_CANDIDATE_AUTO_APPROVED event", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    await autoApproveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+
+    const events = await auditTrail.getEvents();
+    const eventTypes = events.map((e) => e.eventType);
+    // Both the normal human-approval event (from the reused approveTradeCandidate) AND the
+    // distinct automatic-approval marker fire — never one instead of the other.
+    expect(eventTypes).toContain("TRADE_CANDIDATE_APPROVED");
+    expect(eventTypes).toContain("TRADE_CANDIDATE_AUTO_APPROVED");
+    const autoEvent = events.find((e) => e.eventType === "TRADE_CANDIDATE_AUTO_APPROVED");
+    expect(autoEvent?.details).toMatchObject({ candidateId: candidate.id, approvedByUserId: AUTO_DEMO_APPROVER_ID });
+  });
+
+  it("cannot auto-approve an already-expired candidate (the same expiry guard approveTradeCandidate already enforces)", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, createdAt, 60_000);
+    const later = new Date(createdAt.getTime() + 5 * 60_000);
+
+    const outcome = await autoApproveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now: later,
+    });
+
+    expect(outcome.outcome).toBe("expired");
+  });
+
+  // Restart-Resilient Autonomy Phase — audit-durability hardening (required scenario: "AUTO_DEMO
+  // partial persistence/audit failure"). The candidate is already durably APPROVED in the
+  // repository by the time TRADE_CANDIDATE_AUTO_APPROVED is attempted — if THAT specific write
+  // cannot be durably persisted, execution must not continue on an incomplete audit trail.
+  it("reverts the candidate to REJECTED when its own TRADE_CANDIDATE_AUTO_APPROVED audit event cannot be durably recorded", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+
+    class FailOnAutoApprovedAuditTrail extends InMemoryAuditTrail {
+      async record(event: Parameters<AuditTrail["record"]>[0]): ReturnType<AuditTrail["record"]> {
+        if (event.eventType === "TRADE_CANDIDATE_AUTO_APPROVED") {
+          throw new Error("disk full — simulated durability failure");
+        }
+        return super.record(event);
+      }
+    }
+    const auditTrail = new FailOnAutoApprovedAuditTrail();
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const outcome = await autoApproveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+
+    // Not reported as "approved" — the caller (trading-runtime.ts) must not treat this as a
+    // successful auto-approval and must not proceed to execute it.
+    expect(outcome.outcome).toBe("failed");
+
+    const stored = await repository.getById(candidate.id);
+    expect(stored?.status).toBe("FAILED");
+    expect(stored?.failureReason).toMatch(/could not be durably recorded/);
+
+    const events = await auditTrail.getEvents();
+    const eventTypes = events.map((e) => e.eventType);
+    // The underlying approval DID happen (TRADE_CANDIDATE_APPROVED fired, and is durable) — but the
+    // candidate was subsequently, explicitly reverted, visibly, rather than left silently APPROVED
+    // with an incomplete audit trail or allowed to execute.
+    expect(eventTypes).toContain("TRADE_CANDIDATE_APPROVED");
+    expect(eventTypes).not.toContain("TRADE_CANDIDATE_AUTO_APPROVED");
+    expect(eventTypes).toContain("TRADE_CANDIDATE_EXECUTION_FAILED");
+  });
+
+  it("runs the exact existing PortfolioRiskEngine/strategy checks at execution time — auto-approval never bypasses them (scenario 12)", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const approvedOutcome = await autoApproveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+    expect(approvedOutcome.outcome).toBe("approved");
+    if (approvedOutcome.outcome !== "approved") throw new Error("unreachable");
+
+    const broker = makeMockBroker();
+    const lifecycleService = makeLifecycleService(auditTrail, now);
+    // A zero daily-trade allowance blocks this BUY at execution time — proving the normal
+    // PortfolioRiskEngine check still runs in full for an auto-approved candidate, exactly as it
+    // does for a human-approved one; auto-approval only skips the HUMAN CLICK, never a risk gate.
+    const strictRiskConfig: PortfolioRiskConfig = { ...PERMISSIVE_RISK_CONFIG, maxDailyTrades: 0 };
+
+    const outcome = await executeApprovedTradeCandidate({
+      repository,
+      broker,
+      auditTrail,
+      executionRunId: "test-run",
+      lifecycleService,
+      portfolioRisk: { config: strictRiskConfig, dailyTradeCount: 0, brokerAvailable: true },
+      candidate: approvedOutcome.candidate,
+      now,
+      brokerProvider: "etoro-demo",
+    });
+
+    expect(outcome.outcome).toBe("failed");
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
   });
 });

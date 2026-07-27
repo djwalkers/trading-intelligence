@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, OrderSide, OrderSizingMode } from "../types";
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
@@ -16,6 +17,9 @@ import type { TradeLifecycleStore } from "./trade-lifecycle-store";
 
 export interface CreateFromDecisionInput {
   strategyId: string;
+  /** Restart-Resilient Autonomy Phase. Moved to a top-level, always-required field — see
+   * TradeLifecycleRecord.strategyVersion's own doc comment for why. */
+  strategyVersion: number;
   symbol: string;
   side: OrderSide;
   quantity: number;
@@ -23,6 +27,16 @@ export interface CreateFromDecisionInput {
    * doc comment) — sourced by the caller from the broker's own declared sizing mode, never guessed
    * here. */
   sizingMode: OrderSizingMode;
+  /** Restart-Resilient Autonomy Phase. Undefined when this record is adopted from an orphaned
+   * broker position rather than created from an executed candidate — see TradeLifecycleRecord's own
+   * doc comment. */
+  candidateId?: string;
+  /** Restart-Resilient Autonomy Phase. Always known at creation time from runtime configuration. */
+  brokerProvider: string;
+  /** Restart-Resilient Autonomy Phase. Frozen from the originating TradeCandidate when one exists —
+   * undefined for an adopted orphaned position (genuinely unknown, never guessed). */
+  stopLoss?: number;
+  takeProfit?: number;
   decision: MarketDecision;
   marketDataSnapshot: MarketDataSnapshot;
   intelligenceSummary: MarketDecisionContext;
@@ -36,6 +50,10 @@ export interface RecordFailureInput {
 export interface RecordOpenedInput {
   entryPrice: number;
   brokerOrderId: string;
+  /** Restart-Resilient Autonomy Phase. The broker's own durable position identifier (see
+   * PaperPosition.brokerPositionId) — undefined only for a broker that doesn't expose one (out of
+   * this phase's scope; EtoroDemoBroker always populates it). */
+  brokerPositionId?: string;
   /** Injectable for deterministic tests; defaults to the service's own clock. */
   openedAt?: string;
 }
@@ -64,22 +82,30 @@ export interface TradeLifecycleServiceDeps {
 export class TradeLifecycleService {
   private readonly now: () => Date;
   private readonly idGenerator: () => string;
-  private sequence = 0;
 
   constructor(private readonly deps: TradeLifecycleServiceDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.idGenerator = deps.idGenerator ?? (() => `trade-lifecycle-${(this.sequence += 1)}`);
+    // Restart-Resilient Autonomy Phase: a real UUID (not the old sequential "trade-lifecycle-N"
+    // counter) so ids stay globally unique across process restarts — required for durable (Supabase)
+    // storage, where a fresh process's counter restarting at 1 would otherwise collide with a
+    // still-open record a PRIOR process already persisted under the same id.
+    this.idGenerator = deps.idGenerator ?? (() => randomUUID());
   }
 
   async createFromDecision(input: CreateFromDecisionInput): Promise<TradeLifecycleRecord> {
     const timestamp = this.now().toISOString();
     const record: TradeLifecycleRecord = {
       id: this.idGenerator(),
+      candidateId: input.candidateId,
+      brokerProvider: input.brokerProvider,
       strategyId: input.strategyId,
+      strategyVersion: input.strategyVersion,
       symbol: input.symbol,
       side: input.side,
       quantity: input.quantity,
       sizingMode: input.sizingMode,
+      stopLoss: input.stopLoss,
+      takeProfit: input.takeProfit,
       decision: input.decision.action,
       confidence: input.decision.confidence,
       decisionReasons: input.decision.reasoning,
@@ -131,9 +157,14 @@ export class TradeLifecycleService {
     const updated = await this.transition(record, "OPEN", {
       entryPrice: input.entryPrice,
       brokerOrderId: input.brokerOrderId,
+      brokerPositionId: input.brokerPositionId,
       openedAt,
     });
-    await this.audit("TRADE_OPENED", updated, { entryPrice: input.entryPrice, brokerOrderId: input.brokerOrderId });
+    await this.audit("TRADE_OPENED", updated, {
+      entryPrice: input.entryPrice,
+      brokerOrderId: input.brokerOrderId,
+      brokerPositionId: input.brokerPositionId,
+    });
     return updated;
   }
 

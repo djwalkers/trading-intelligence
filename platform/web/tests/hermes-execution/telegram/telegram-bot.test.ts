@@ -48,6 +48,8 @@ function makeRecord(id: string, overrides: Partial<TradeLifecycleRecord> = {}): 
   return {
     id,
     strategyId: "STRAT-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
@@ -212,6 +214,40 @@ describe("TelegramBot — command dispatch", () => {
 
     await bot.handleUpdate(update("/pnl"));
     expect(at(transport.sent, 1).text).toContain("Total realised P/L: 10.00");
+  });
+
+  // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+  // review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics").
+  it("/reconciliation replies using the lifecycle store's CLOSED_UNRECONCILED records — never listOpen()/listClosed(), which both exclude it", async () => {
+    const transport = makeFakeTransport();
+    const bot = new TelegramBot({
+      transport,
+      allowedChatId: ALLOWED_CHAT_ID,
+      runtime: makeFakeRuntime(),
+      lifecycleStore: await makeStoreWithRecords(
+        makeRecord("t1", {
+          status: "CLOSED_UNRECONCILED",
+          closedAt: "2026-01-02T00:00:00.000Z",
+          exitReason: "reconciled-broker-position-absent",
+        }),
+      ),
+    });
+    await bot.handleUpdate(update("/reconciliation"));
+    const text = at(transport.sent, 0).text;
+    expect(text).toContain("BTC (t1)");
+    expect(text).toContain("exit price UNKNOWN");
+  });
+
+  it("/reconciliation reports none when the only records are OPEN/CLOSED (never conflated with those)", async () => {
+    const transport = makeFakeTransport();
+    const bot = new TelegramBot({
+      transport,
+      allowedChatId: ALLOWED_CHAT_ID,
+      runtime: makeFakeRuntime(),
+      lifecycleStore: await makeStoreWithRecords(makeRecord("t1", { status: "OPEN" })),
+    });
+    await bot.handleUpdate(update("/reconciliation"));
+    expect(at(transport.sent, 0).text).toMatch(/No unreconciled closures/);
   });
 
   it("/help replies with the fixed command list", async () => {

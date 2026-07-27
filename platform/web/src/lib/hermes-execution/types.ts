@@ -131,6 +131,14 @@ export interface PaperPosition {
   entryOrderId: string;
   takeProfitPercent?: number;
   stopLossPercent?: number;
+  /** Restart-Resilient Autonomy Phase. The broker's OWN durable position identifier (e.g. eToro's
+   * numeric `positionID`, stringified) — distinct from `positionId` above, which is this pipeline's
+   * own internally-assigned label (e.g. "etoro-position-3") and is never guaranteed stable across a
+   * process restart. Only `EtoroDemoBroker` populates this today; every other broker leaves it
+   * undefined (out of this phase's scope) — see position-reconciliation.ts, which requires a
+   * genuine broker-native identifier to correlate a live broker position back to a durable
+   * TradeLifecycleRecord, never `instrument` alone. */
+  brokerPositionId?: string;
 }
 
 export interface CompletedTrade {
@@ -277,7 +285,112 @@ export type AuditEventType =
   | "TRADE_CANDIDATE_REJECTED"
   | "TRADE_CANDIDATE_EXPIRED"
   | "TRADE_CANDIDATE_EXECUTED"
-  | "TRADE_CANDIDATE_EXECUTION_FAILED";
+  | "TRADE_CANDIDATE_EXECUTION_FAILED"
+  // Restart-Resilient Autonomy Phase — position-reconciliation.ts. Fired once per cycle (and at
+  // startup) for the configured instrument, always in this relative order when applicable:
+  // BROKER_POSITION_DISCOVERED (a real, live broker position for this instrument was found at all)
+  // -> either BROKER_POSITION_RECONCILED (it matches an existing durable TradeLifecycleRecord) or
+  // BROKER_POSITION_ORPHANED (no durable record referenced it — the exact "PM2 restarted and lost
+  // context" / "position exists at eToro but no lifecycle record exists locally" scenario; a new
+  // lifecycle record is adopted from the broker's own genuinely-reported fields only, never a
+  // guessed/fabricated one). BROKER_RECONCILIATION_FAILED fires instead of any of the above whenever
+  // the broker's portfolio could not be read at all, or reported an ambiguous state (e.g. more than
+  // one live position for the configured instrument) — this cycle's fresh entry decision is skipped
+  // entirely (fail closed) whenever this fires.
+  | "BROKER_POSITION_DISCOVERED"
+  | "BROKER_POSITION_RECONCILED"
+  | "BROKER_POSITION_ORPHANED"
+  | "BROKER_RECONCILIATION_FAILED"
+  // Restart-Resilient Autonomy Phase — runtime/exit-monitor.ts. Fired the moment any automatic exit
+  // trigger (stop loss / take profit / opposing strategy signal / max holding duration / strategy
+  // disabled / kill switch) is detected for a reconciled open position, BEFORE the broker close call
+  // is attempted — so the trigger itself is always recorded even if the close subsequently fails.
+  // POSITION_CLOSED/REALISED_PNL (existing, unchanged) still fire from inside the broker's own
+  // closePosition — never duplicated here.
+  | "AUTOMATIC_EXIT_TRIGGERED"
+  // Restart-Resilient Autonomy Phase — trade-approval/trade-candidate-service.ts. Fired ONLY for an
+  // AUTO_DEMO auto-approval, always in addition to (never instead of) the existing
+  // TRADE_CANDIDATE_APPROVED event approveTradeCandidate() itself already emits for every approval,
+  // human or automatic — this is what makes the two kinds of approval distinguishable in the audit
+  // trail (`approvedByUserId` alone is also a marker, but never the only one).
+  | "TRADE_CANDIDATE_AUTO_APPROVED"
+  // Restart-Resilient Autonomy Phase — duplicate-prevention.ts. Fired when a fresh BUY decision is
+  // deliberately NOT turned into a new TradeCandidate because an equivalent one (broker position,
+  // durable OPEN/in-flight lifecycle record, PENDING or APPROVED candidate) already exists for the
+  // same strategy + instrument.
+  | "DUPLICATE_ENTRY_SUPPRESSED"
+  // Restart-Resilient Autonomy Phase — reconciliation/kill-switch hardening. Fired at every point
+  // entry activity (fresh BUY candidate creation, AUTO_DEMO auto-approval, or execution of a
+  // previously-APPROVED BUY candidate) is skipped specifically because killSwitchEnabled is true —
+  // distinct from DUPLICATE_ENTRY_SUPPRESSED (a different reason for the same "no new BUY this
+  // cycle" outcome) so an operator can tell "the kill switch is doing its job" apart from ordinary
+  // duplicate suppression. `details.context` names which of the three call sites fired it.
+  | "KILL_SWITCH_ENTRY_BLOCKED"
+  // Restart-Resilient Autonomy Phase — reconciliation/cycle-ordering hardening. Fired when a
+  // previously-APPROVED BUY candidate's execution is deferred (left APPROVED, untouched, to be
+  // reconsidered next cycle) because reconciliation already shows a broker position or an
+  // unresolved lifecycle record active for this strategy+instrument — never because of the kill
+  // switch (that gets its own KILL_SWITCH_ENTRY_BLOCKED event above).
+  | "APPROVED_CANDIDATE_EXECUTION_DEFERRED"
+  // Restart-Resilient Autonomy Phase — reconciliation hardening. Fired when reconciliation finds a
+  // local record still in an active status (OPEN/CLOSE_REQUESTED/CLOSE_FAILED) for this
+  // strategy+instrument, but a clean, successful broker read reports no matching position at all —
+  // `details.resolution` says what happened next: "reconciled-closed-unreconciled" (the mismatch was
+  // safely resolved to CLOSED_UNRECONCILED, broker evidence being authoritative for that record's
+  // status) or "failed-closed" (the mismatch could not be safely resolved automatically).
+  | "BROKER_RECONCILIATION_MISMATCH"
+  // Restart-Resilient Autonomy Phase — reconciliation hardening. Fired instead of adopting a
+  // "new" orphaned broker position whenever more than one local lifecycle record is found that
+  // could plausibly already represent it (same brokerPositionId across several records, or more
+  // than one locally-active record for the same strategy+instrument) — reconciliation refuses to
+  // guess which one is authoritative and fails closed rather than ever risking a second record for
+  // one real position. Also fired when the DATABASE's own uniqueness constraint (migration 0026's
+  // two partial unique indexes) rejects an insert/update that this process's own pre-check missed
+  // (e.g. a genuine cross-process race) — `details.detectedBy` distinguishes
+  // "local-pre-check"/"database-constraint".
+  | "DUPLICATE_LIFECYCLE_RECORD_DETECTED"
+  // Restart-Resilient Autonomy Phase — reconciliation hardening. Fired when reconciliation finds a
+  // CLOSE_FAILED record whose broker position is STILL live — the prior close attempt failed, but
+  // the position itself is confirmed unchanged, so the record is safely reverted to OPEN (a real,
+  // validated state-machine transition — see trade-lifecycle/types.ts's own VALID_TRANSITIONS) to
+  // be re-evaluated fresh by the normal automatic-exit path next.
+  | "TRADE_LIFECYCLE_REOPENED_FOR_RETRY"
+  // Restart-Resilient Autonomy Phase — crash-window recovery (deployment safety review,
+  // runtime/lifecycle-recovery.ts). Fired whenever the recovery sweep transitions a stale
+  // DECISION_CREATED/APPROVED/EXECUTION_SUBMITTED/EXECUTION_RECONCILIATION_REQUIRED record to the
+  // terminal EXECUTION_ABANDONED status, having proven (or, for DECISION_CREATED/APPROVED, having
+  // relied on the structural guarantee that no broker call could yet have occurred) that no real
+  // broker order/position exists for it. Recorded BEFORE the store transition itself (deliberately
+  // reversing this codebase's usual "store first, audit second" order) — see that module's own doc
+  // comment for why a durability failure here must block the transition rather than silently
+  // succeed with an incomplete trail.
+  | "LIFECYCLE_RECOVERY_ABANDONED"
+  // Restart-Resilient Autonomy Phase — crash-window recovery. Fired when the recovery sweep
+  // correlates a stale EXECUTION_SUBMITTED record against the broker's own authoritative portfolio
+  // read and finds exactly one matching, previously-unassociated real position — the EXISTING
+  // record is transitioned to OPEN and attached to it (never a second, new record).
+  | "LIFECYCLE_RECOVERY_CORRELATED"
+  // Restart-Resilient Autonomy Phase — crash-window recovery. Fired when the recovery sweep cannot
+  // determine a stale EXECUTION_SUBMITTED record's fate from the broker's own state (a read
+  // failure, more than one plausible match, or a broker that cannot make an authoritative claim
+  // either way) — the record is transitioned to (or left at) EXECUTION_RECONCILIATION_REQUIRED,
+  // remaining active and blocking a fresh entry until a later sweep resolves it.
+  | "LIFECYCLE_RECOVERY_AMBIGUOUS"
+  // Restart-Resilient Autonomy Phase — candidate/lifecycle repair (deployment safety review). Fired
+  // when a TradeCandidate stuck APPROVED (its own execution attempt crashed after the underlying
+  // TradeLifecycleRecord reached OPEN, or after that record later resolved to CLOSED_UNRECONCILED)
+  // is repaired to EXECUTED, tying the two records' bookkeeping back together — never calls the
+  // broker and never re-runs risk checks; the position's existence is already proven by the
+  // lifecycle record itself.
+  | "CANDIDATE_EXECUTION_RECONCILED"
+  // Restart-Resilient Autonomy Phase — candidate/lifecycle repair. Fired (never silently) whenever a
+  // TradeCandidate already marked FAILED is found to have a confirmed, real broker position open
+  // against its own originating lifecycle record — deliberately NOT a status change (the candidate
+  // state machine has no FAILED -> EXECUTED transition, and rewriting FAILED to EXECUTED would erase
+  // a real, historically-accurate signal that the execution flow itself reported failure) — this is
+  // the "documented repair transition" alternative: a clear, durable, actionable record for an
+  // operator that the two stores disagree and manual review is warranted.
+  | "CANDIDATE_FAILED_WITH_CONFIRMED_BROKER_POSITION";
 
 export interface AuditEvent {
   timestamp: string;

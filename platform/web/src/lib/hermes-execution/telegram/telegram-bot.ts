@@ -1,6 +1,6 @@
 import type { TradingRuntime } from "../runtime/trading-runtime";
 import type { TradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
-import { formatHelp, formatPnl, formatPositions, formatStatus, formatTrades } from "./telegram-commands";
+import { formatHelp, formatPnl, formatPositions, formatReconciliation, formatStatus, formatTrades } from "./telegram-commands";
 import type { TelegramTransport, TelegramUpdate } from "./telegram-transport";
 
 // Prototype V1 — minimum operational Telegram bot. Long-polls for updates, authorizes every sender
@@ -71,6 +71,15 @@ export class TelegramBot {
       case "/pnl":
         await this.reply(formatPnl(await this.deps.lifecycleStore.listClosed()));
         return;
+      case "/reconciliation": {
+        // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility. Neither
+        // listOpen() nor listClosed() ever returns a CLOSED_UNRECONCILED record (by design — see
+        // trade-lifecycle-store.ts's own doc comments) — list() + a client-side filter is the
+        // correct, deliberate way to surface it, not a workaround.
+        const all = await this.deps.lifecycleStore.list();
+        await this.reply(formatReconciliation(all.filter((record) => record.status === "CLOSED_UNRECONCILED")));
+        return;
+      }
       case "/pause":
         await this.runRuntimeAction(() => this.deps.runtime.pause(), "Paused.");
         return;

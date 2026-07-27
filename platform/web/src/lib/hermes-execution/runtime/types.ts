@@ -63,6 +63,22 @@ export interface TradingCycleResultSummary {
   instrument: string;
   /** Ids of previously-APPROVED candidates this cycle executed via the broker (0 or more). */
   executedCandidateIds: string[];
+  /** Restart-Resilient Autonomy Phase. Whether position-reconciliation.ts could not be completed
+   * this cycle (broker read failure, ambiguous state, ...) — when true, no fresh entry OR exit
+   * decision was evaluated this cycle at all (fail closed); `decision` above is a HOLD placeholder,
+   * not a genuine evaluation. */
+  reconciliationFailed?: boolean;
+  /** Whether the reconciled broker state shows an open position for this instrument this cycle. */
+  positionOpen?: boolean;
+  /** Set only when an automatic exit trigger fired this cycle (see runtime/exit-monitor.ts). */
+  exitTrigger?: string;
+  /** Set only alongside `exitTrigger` — whether the resulting automatic close actually succeeded. */
+  exitClosed?: boolean;
+  /** Set only when a fresh BUY decision was deliberately NOT turned into a new candidate because an
+   * equivalent one already existed (see trade-approval/duplicate-prevention.ts). */
+  duplicateEntrySuppressed?: boolean;
+  /** Set only when AUTO_DEMO auto-approved the candidate this cycle created. */
+  autoApproved?: boolean;
 }
 
 export interface TradingErrorSummary {

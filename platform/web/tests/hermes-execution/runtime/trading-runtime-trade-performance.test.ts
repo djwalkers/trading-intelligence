@@ -140,8 +140,10 @@ function makeHarness() {
     instrument: "BTC",
     amount: 10,
     orderSizingMode: "UNITS",
+    brokerProvider: "etoro-demo",
     portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
     lifecycleService,
+    lifecycleStore,
     auditTrail,
     marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
     clock,
@@ -150,6 +152,10 @@ function makeHarness() {
     tradeCandidateRepository,
     tradeCandidateExpiryMs: 60 * 60_000,
     tradePerformance: { lifecycleStore, repository: tradePerformanceRepository },
+    approvalMode: "MANUAL",
+    autoDemoMinConfidence: 0.75,
+    killSwitchEnabled: false,
+    recoveryThresholdMs: 5 * 60_000,
   });
 
   return { runtime, clock, auditTrail, tradeCandidateRepository, tradePerformanceRepository, marketDataProvider };
@@ -245,8 +251,9 @@ describe("TradingRuntime — trade performance measurement (Phase 4)", () => {
     const broker = makeMockBroker([]);
     const clock = new ManualSchedulerClock(NOW);
     const auditTrail = new InMemoryAuditTrail();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
     const lifecycleService = new TradeLifecycleService({
-      store: new InMemoryTradeLifecycleStore(),
+      store: lifecycleStore,
       auditTrail,
       executionRunId: "test-run",
       now: () => clock.now(),
@@ -258,8 +265,10 @@ describe("TradingRuntime — trade performance measurement (Phase 4)", () => {
       instrument: "BTC",
       amount: 10,
       orderSizingMode: "UNITS",
+      brokerProvider: "etoro-demo",
       portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
       lifecycleService,
+      lifecycleStore,
       auditTrail,
       marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
       clock,
@@ -268,6 +277,10 @@ describe("TradingRuntime — trade performance measurement (Phase 4)", () => {
       tradeCandidateRepository: new InMemoryTradeCandidateRepository(),
       tradeCandidateExpiryMs: 60 * 60_000,
       // tradePerformance omitted entirely
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0.75,
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
     });
 
     await runtime.start();

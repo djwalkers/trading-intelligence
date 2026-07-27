@@ -66,6 +66,11 @@ describe("HermesExecutionConfig — demo mode defaults", () => {
   ETORO_DEMO_TEST_INSTRUMENT: undefined,
   ETORO_DEMO_TEST_AMOUNT: undefined,
   ETORO_HTTP_TIMEOUT_MS: undefined,
+  HERMES_APPROVAL_MODE: undefined,
+  HERMES_AUTO_DEMO_MIN_CONFIDENCE: undefined,
+  HERMES_KILL_SWITCH_ENABLED: undefined,
+  HERMES_MAX_HOLDING_DURATION_MS: undefined,
+  HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: undefined,
   };
 
   it("defaults DEMO_EXECUTION_MODE to false when unset", () => {

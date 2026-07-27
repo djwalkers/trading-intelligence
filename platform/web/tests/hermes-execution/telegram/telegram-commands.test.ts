@@ -3,6 +3,7 @@ import {
   formatHelp,
   formatPnl,
   formatPositions,
+  formatReconciliation,
   formatStatus,
   formatTrades,
   summarizePnl,
@@ -49,6 +50,8 @@ function makeRecord(id: string, status: TradeLifecycleStatus, overrides: Partial
   return {
     id,
     strategyId: "STRAT-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
@@ -208,10 +211,42 @@ describe("summarizePnl / formatPnl", () => {
 });
 
 describe("formatHelp", () => {
-  it("documents exactly the eight supported commands", () => {
+  it("documents exactly the nine supported commands", () => {
     const text = formatHelp();
-    for (const command of ["/status", "/positions", "/trades", "/pnl", "/pause", "/resume", "/run", "/help"]) {
+    for (const command of ["/status", "/positions", "/trades", "/pnl", "/reconciliation", "/pause", "/resume", "/run", "/help"]) {
       expect(text).toContain(command);
     }
+  });
+});
+
+// Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+// review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics").
+describe("formatReconciliation", () => {
+  it("reports no unreconciled closures for an empty list", () => {
+    expect(formatReconciliation([])).toMatch(/No unreconciled closures/);
+  });
+
+  it("labels exit price and realised P/L as UNKNOWN, never a fabricated value", () => {
+    const text = formatReconciliation([
+      makeRecord("lifecycle-1", "CLOSED_UNRECONCILED", {
+        closedAt: "2026-01-02T00:00:00.000Z",
+        exitReason: "reconciled-broker-position-absent",
+        exitPrice: undefined,
+        realisedPnl: undefined,
+      }),
+    ]);
+    expect(text).toContain("BTC (lifecycle-1)");
+    expect(text).toContain("exit price UNKNOWN");
+    expect(text).toContain("realised P/L UNKNOWN");
+    expect(text).toContain("reconciled-broker-position-absent");
+  });
+
+  it("sorts multiple closures most recent first", () => {
+    const text = formatReconciliation([
+      makeRecord("a", "CLOSED_UNRECONCILED", { closedAt: "2026-01-01T00:00:00.000Z" }),
+      makeRecord("b", "CLOSED_UNRECONCILED", { closedAt: "2026-01-03T00:00:00.000Z" }),
+    ]);
+    const lines = text.split("\n");
+    expect(lines.findIndex((l) => l.includes("(b)"))).toBeLessThan(lines.findIndex((l) => l.includes("(a)")));
   });
 });

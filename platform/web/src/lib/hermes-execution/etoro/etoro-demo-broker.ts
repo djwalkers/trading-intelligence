@@ -9,7 +9,7 @@ import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
 import type { EtoroDemoConfig } from "../config";
 import type { MarketTimeframe } from "../market-data/candle-validation";
-import type { Account, Candle, CompletedTrade, OrderRequest, PaperPosition } from "../types";
+import type { Account, Candle, CompletedTrade, OrderRequest, PaperPosition, StrategySourceType } from "../types";
 
 const ORDER_CURRENCY = "usd"; // Every documented request-body example used "usd" — not per-instrument.
 
@@ -368,9 +368,56 @@ export class EtoroDemoBroker implements PaperBroker {
   }
 
   /** The account's full demo portfolio straight from eToro — for the smoke test's own reporting
-   * and its own "did my position actually appear" confirmation step. */
+   * and its own "did my position actually appear" confirmation step. Also the one call
+   * position-reconciliation.ts (Restart-Resilient Autonomy Phase) uses to discover a real broker
+   * position this instance's own trackedPositions map doesn't know about (e.g. after a process
+   * restart) — see adoptPosition below for turning such a discovery into a trackable position. */
   async getRawPortfolio(): Promise<EtoroDemoPortfolio> {
     return this.client.getDemoPortfolio();
+  }
+
+  /**
+   * Restart-Resilient Autonomy Phase — Phase 1 (reconciliation). Registers a position this
+   * instance did NOT itself open (discovered via getRawPortfolio(), never via placeMarketOrder())
+   * into trackedPositions/etoroPositionIdByInternalId, so the EXISTING, unmodified
+   * getOpenPositions()/closePosition() can find and close it exactly like a position this instance
+   * opened itself. Submits no order and calls no eToro endpoint — purely local bookkeeping over
+   * fields the broker's own portfolio response already reported. `strategyId`/`strategyVersion`/
+   * `sourceType` are supplied by the caller (position-reconciliation.ts) since the broker itself has
+   * no notion of which strategy is currently running — never guessed here.
+   */
+  adoptPosition(
+    raw: {
+      positionID: number;
+      orderID: number;
+      isBuy?: boolean;
+      amount?: number;
+      openRate?: number;
+      openDateTime?: string;
+    },
+    internalInstrument: string,
+    strategyContext: { strategyId: string; strategyVersion: number; sourceType: StrategySourceType },
+  ): PaperPosition {
+    this.requireConnected();
+    assertValidAmount(raw.amount ?? Number.NaN, internalInstrument);
+    this.nextPositionSeq += 1;
+    const positionId = `etoro-position-${this.nextPositionSeq}`;
+    const position: PaperPosition = {
+      positionId,
+      strategyId: strategyContext.strategyId,
+      strategyVersion: strategyContext.strategyVersion,
+      sourceType: strategyContext.sourceType,
+      instrument: internalInstrument,
+      side: raw.isBuy === false ? "SELL" : "BUY",
+      quantity: raw.amount!,
+      entryPrice: raw.openRate!,
+      entryTimestamp: raw.openDateTime ?? new Date().toISOString(),
+      entryOrderId: String(raw.orderID),
+      brokerPositionId: String(raw.positionID),
+    };
+    this.trackedPositions.set(positionId, position);
+    this.etoroPositionIdByInternalId.set(positionId, raw.positionID);
+    return position;
   }
 
   async placeMarketOrder(order: OrderRequest): Promise<{ position: PaperPosition; orderId: string }> {
@@ -473,6 +520,10 @@ export class EtoroDemoBroker implements PaperBroker {
       entryOrderId: String(identifier),
       takeProfitPercent: order.takeProfitPercent,
       stopLossPercent: order.stopLossPercent,
+      // Restart-Resilient Autonomy Phase — the one durable, broker-native identifier
+      // position-reconciliation.ts correlates a live eToro portfolio read back against; `positionId`
+      // above is only this pipeline's own internal label, never guaranteed stable across a restart.
+      brokerPositionId: String(matched.positionID),
     };
     this.trackedPositions.set(positionId, position);
     this.etoroPositionIdByInternalId.set(positionId, matched.positionID);

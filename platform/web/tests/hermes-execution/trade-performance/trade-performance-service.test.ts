@@ -68,6 +68,8 @@ function makeClosedLifecycleRecord(overrides: Partial<TradeLifecycleRecord> = {}
   return {
     id: "trade-lifecycle-1",
     strategyId: "DEMO-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
@@ -157,6 +159,41 @@ describe("recordTradePerformanceForExecutedCandidate", () => {
       lifecycleStore,
       performanceRepository,
       candidateId: candidate.id,
+    });
+    expect(result).toBeUndefined();
+    expect(await performanceRepository.list()).toHaveLength(0);
+  });
+
+  // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+  // review, required test 13: "normal performance excludes unknown-P&L reconciled closures").
+  it("returns undefined (nothing to record) for a CLOSED_UNRECONCILED lifecycle record — never fabricates exit price/P&L", async () => {
+    const candidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const performanceRepository = new InMemoryTradePerformanceRepository();
+
+    const closing = await candidateRepository.create(makeCandidateInput({ direction: "SELL" }));
+    await candidateRepository.transition(closing.id, "PENDING", { status: "APPROVED", approvedAt: "x", approvedByUserId: "u" });
+    await candidateRepository.transition(closing.id, "APPROVED", {
+      status: "EXECUTED",
+      executedAt: "2026-01-01T01:00:00.000Z",
+      lifecycleRecordId: "trade-lifecycle-1",
+    });
+    await lifecycleStore.create(
+      makeClosedLifecycleRecord({
+        status: "CLOSED_UNRECONCILED",
+        exitPrice: undefined,
+        realisedPnl: undefined,
+        realisedPnlPercent: undefined,
+        holdingDurationMs: undefined,
+        exitReason: "reconciled-broker-position-absent",
+      }),
+    );
+
+    const result = await recordTradePerformanceForExecutedCandidate({
+      candidateRepository,
+      lifecycleStore,
+      performanceRepository,
+      candidateId: closing.id,
     });
     expect(result).toBeUndefined();
     expect(await performanceRepository.list()).toHaveLength(0);

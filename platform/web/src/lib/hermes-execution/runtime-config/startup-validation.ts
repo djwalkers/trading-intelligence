@@ -1,6 +1,7 @@
-import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
+import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, RuntimeMode } from "../config";
 import type { InternalStrategy } from "../types";
 import {
+  checkApprovalModeCompatibility,
   checkMarketDataCompatibility,
   checkModeCompatibility,
   checkPrototypeV1BrokerSupport,
@@ -34,6 +35,9 @@ export interface StartupValidationInput {
   strategyId: string | undefined;
   /** Already loaded by the caller (loadEnabledStrategies) — this function performs no I/O. */
   availableStrategies: InternalStrategy[];
+  /** Restart-Resilient Autonomy Phase — AUTO_DEMO startup gate (see
+   * checkApprovalModeCompatibility's own doc comment). */
+  approvalMode: ExecutionApprovalMode;
 }
 
 /** Every check here is static — no broker connection, no network call, no registry read (the
@@ -51,6 +55,9 @@ export function validateStartup(input: StartupValidationInput): StartupValidatio
 
   const marketDataProblem = checkMarketDataCompatibility(input.brokerProvider, input.marketDataProvider);
   if (marketDataProblem) problems.push(marketDataProblem);
+
+  const approvalModeProblem = checkApprovalModeCompatibility(input.brokerProvider, input.approvalMode);
+  if (approvalModeProblem) problems.push(approvalModeProblem);
 
   const strategyResult = selectStrategy(input.availableStrategies, input.strategyId);
   if (!strategyResult.found) {

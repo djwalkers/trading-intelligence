@@ -94,6 +94,12 @@ export async function createTradeCandidateForDecision(
 export type ApprovalOutcome =
   | { outcome: "approved"; candidate: TradeCandidate }
   | { outcome: "expired"; candidate: TradeCandidate }
+  /** Restart-Resilient Autonomy Phase — audit-durability hardening. Only ever produced by
+   * autoApproveTradeCandidate, when its own TRADE_CANDIDATE_AUTO_APPROVED audit write could not be
+   * durably persisted and the approval was reverted to FAILED (the only valid APPROVED-state exit
+   * besides EXECUTED/EXPIRED — see VALID_CANDIDATE_TRANSITIONS) — see that function's own doc
+   * comment. Never produced by approveTradeCandidate/rejectTradeCandidate themselves. */
+  | { outcome: "failed"; candidate: TradeCandidate; reason: string }
   | { outcome: "already-handled" }
   | { outcome: "not-found" };
 
@@ -197,6 +203,91 @@ export async function rejectTradeCandidate(input: RejectTradeCandidateInput): Pr
   return { outcome: "rejected", candidate: rejected };
 }
 
+// --- Automatic approval (AUTO_DEMO only — Restart-Resilient Autonomy Phase, Phase 5) ------------
+
+/** Sentinel `approvedByUserId` for every automatic approval — never a real Supabase auth user id,
+ * so it is unambiguous in any audit/UI display which approvals were automatic. */
+export const AUTO_DEMO_APPROVER_ID = "system:auto-demo";
+
+export interface AutoApproveTradeCandidateInput {
+  repository: TradeCandidateRepository;
+  auditTrail: AuditTrail;
+  executionRunId: string;
+  candidateId: string;
+  now: Date;
+}
+
+/**
+ * AUTO_DEMO's own auto-approval — deliberately a thin wrapper around approveTradeCandidate()
+ * above, never a second, parallel transition path: it calls the EXACT SAME function a human
+ * approval uses (same PENDING -> APPROVED conditional transition, same expiry check, same
+ * TRADE_CANDIDATE_APPROVED audit event), then additionally records a durable, distinctly-named
+ * TRADE_CANDIDATE_AUTO_APPROVED event so an automatic approval is never indistinguishable from a
+ * human one in the audit trail. The candidate itself was already persisted as PENDING by
+ * createTradeCandidateForDecision before this is ever called (see trading-runtime.ts's own
+ * runCycleBody) — this function never creates or executes anything itself, only approves.
+ *
+ * Restart-Resilient Autonomy Phase — audit-durability hardening. Unlike every other audit call in
+ * this pipeline (which is best-effort — a broken audit trail must never block a trading cycle, see
+ * trading-runtime.ts's own recordAudit() wrapper), THIS specific write is safety-critical enough
+ * that its own durability failure must not let execution continue: the candidate is already
+ * durably APPROVED in the repository by the time this write is attempted, so if the ONE audit
+ * event marking that approval as AUTOMATIC (rather than human) cannot be durably recorded, this
+ * function reverts the candidate to FAILED (the only valid APPROVED-state exit for this besides
+ * EXECUTED/EXPIRED — see VALID_CANDIDATE_TRANSITIONS; APPROVED -> REJECTED is not a valid
+ * transition) — explicit, visible, and safe (nothing further ever executes it) — rather than
+ * either silently letting a capital-committing trade proceed with a gap in its own audit trail, or
+ * leaving it stuck APPROVED with an incomplete one.
+ */
+export async function autoApproveTradeCandidate(input: AutoApproveTradeCandidateInput): Promise<ApprovalOutcome> {
+  const { repository, auditTrail, executionRunId, candidateId, now } = input;
+
+  const outcome = await approveTradeCandidate({
+    repository,
+    auditTrail,
+    executionRunId,
+    candidateId,
+    approvedByUserId: AUTO_DEMO_APPROVER_ID,
+    now,
+  });
+
+  if (outcome.outcome !== "approved") return outcome;
+
+  try {
+    await auditTrail.record({
+      timestamp: now.toISOString(),
+      eventType: "TRADE_CANDIDATE_AUTO_APPROVED",
+      executionRunId,
+      strategyId: outcome.candidate.strategyId,
+      instrument: outcome.candidate.instrument,
+      details: { candidateId: outcome.candidate.id, approvedByUserId: AUTO_DEMO_APPROVER_ID },
+    });
+  } catch (error) {
+    const reason =
+      `AUTO_DEMO auto-approval audit event could not be durably recorded, so this approval is being reverted: ` +
+      `${error instanceof Error ? error.message : String(error)}`;
+    const failed = await repository.transition(candidateId, "APPROVED", {
+      status: "FAILED",
+      failureReason: reason,
+    });
+    if (!failed) return { outcome: "already-handled" };
+    // Reuses the SAME event type executeApprovedTradeCandidate's own execution-failure path emits
+    // — this candidate's fate (APPROVED -> FAILED) is identical in shape, just triggered by an
+    // audit-durability failure instead of a broker/risk-engine failure.
+    await auditTrail.record({
+      timestamp: now.toISOString(),
+      eventType: "TRADE_CANDIDATE_EXECUTION_FAILED",
+      executionRunId,
+      strategyId: failed.strategyId,
+      instrument: failed.instrument,
+      details: { candidateId: failed.id, reason },
+    });
+    return { outcome: "failed", candidate: failed, reason };
+  }
+
+  return outcome;
+}
+
 // --- Execution of an approved candidate (still only ever run by the standalone trading-runtime
 // process, which owns the live broker/lifecycle-service instances — see trading-runtime.ts) --------
 
@@ -215,6 +306,9 @@ export interface ExecuteApprovedTradeCandidateInput {
   portfolioRisk: { config: PortfolioRiskConfig; dailyTradeCount: number; brokerAvailable: boolean };
   candidate: TradeCandidate;
   now: Date;
+  /** Restart-Resilient Autonomy Phase. Frozen onto the resulting TradeLifecycleRecord — sourced by
+   * the caller from runtime configuration, never inferred here. */
+  brokerProvider: string;
 }
 
 /**
@@ -228,7 +322,7 @@ export interface ExecuteApprovedTradeCandidateInput {
  * downgraded or retried.
  */
 export async function executeApprovedTradeCandidate(input: ExecuteApprovedTradeCandidateInput): Promise<ExecutionOutcome> {
-  const { repository, broker, auditTrail, executionRunId, lifecycleService, portfolioRisk, candidate, now } = input;
+  const { repository, broker, auditTrail, executionRunId, lifecycleService, portfolioRisk, candidate, now, brokerProvider } = input;
 
   if (candidate.status !== "APPROVED") return { outcome: "already-handled" };
 
@@ -262,6 +356,10 @@ export async function executeApprovedTradeCandidate(input: ExecuteApprovedTradeC
       portfolioRisk,
       lifecycleService,
       marketDataSnapshot: candidate.execution.marketDataSnapshot,
+      brokerProvider,
+      candidateId: candidate.id,
+      stopLoss: candidate.stopLoss,
+      takeProfit: candidate.takeProfit,
     });
 
     if (!result.executed) {

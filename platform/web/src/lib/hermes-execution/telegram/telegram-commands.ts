@@ -99,6 +99,23 @@ export function formatPnl(closedRecords: TradeLifecycleRecord[]): string {
   ].join("\n");
 }
 
+/** Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+ * review). Deliberately its own command, never folded into /trades: a CLOSED_UNRECONCILED record
+ * has no confirmed exit price or realised P&L, and must never be silently mixed into (or read as if
+ * it were) a normal, fully-valued closed trade — formatTrades/formatPnl above only ever receive
+ * `listClosed()` (status CLOSED only), so those two commands already structurally exclude these
+ * records; this command is the one place they ARE surfaced, with both unknowns explicitly labelled. */
+export function formatReconciliation(unreconciledRecords: TradeLifecycleRecord[]): string {
+  if (unreconciledRecords.length === 0) return "No unreconciled closures — every closed position has a confirmed exit price and P/L.";
+  const sorted = [...unreconciledRecords].sort((a, b) => (b.closedAt ?? "").localeCompare(a.closedAt ?? ""));
+  const lines = sorted.map(
+    (record) =>
+      `${record.symbol} (${record.id}): closed ${record.closedAt ?? "—"} — exit price UNKNOWN, realised P/L UNKNOWN. ` +
+      `Reason: ${record.exitReason ?? "—"}.`,
+  );
+  return [`${unreconciledRecords.length} unreconciled closure(s) — exit price/P&L could not be confirmed:`, ...lines].join("\n");
+}
+
 export function formatHelp(): string {
   return [
     "Available commands:",
@@ -106,6 +123,7 @@ export function formatHelp(): string {
     "/positions — currently open positions",
     "/trades — most recent completed trades",
     "/pnl — win rate and realised P/L summary",
+    "/reconciliation — closed positions with unknown exit price/P&L (CLOSED_UNRECONCILED)",
     "/pause — pause the scheduler",
     "/resume — resume the scheduler",
     "/run — run one cycle immediately",

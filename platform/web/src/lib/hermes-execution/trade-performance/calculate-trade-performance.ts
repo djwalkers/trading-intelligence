@@ -117,7 +117,7 @@ export function buildTradePerformanceInput(options: BuildTradePerformanceInputOp
     analysisRunId: closingCandidate.analysisRunId,
     candidateId: closingCandidate.id,
     strategyId: record.strategyId,
-    strategyVersion: record.intelligenceSummary.strategy.version,
+    strategyVersion: record.strategyVersion,
     instrument: record.symbol,
     side: record.side,
     entryTime: record.openedAt,

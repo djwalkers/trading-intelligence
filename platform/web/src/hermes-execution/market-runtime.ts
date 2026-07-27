@@ -17,6 +17,9 @@ import { buildTradeApprovalConfig } from "@/lib/hermes-execution/trade-approval/
 import { SupabaseTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import type { TradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import { SupabaseTradePerformanceRepository } from "@/lib/hermes-execution/trade-performance/trade-performance-repository";
+import { SupabaseTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/supabase-trade-lifecycle-store";
+import type { TradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
+import { FileSystemRegistryClient } from "@/lib/hermes-execution/registry-client";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Constructs
 // AnalysisIntegrationDeps only when HERMES_SUPABASE_USER_ID and the Supabase service role are both
@@ -83,6 +86,29 @@ function buildTradeCandidateRepository(): TradeCandidateRepository | { error: st
   return new SupabaseTradeCandidateRepository(client, persistenceConfig.ownerUserId);
 }
 
+// Restart-Resilient Autonomy Phase — Phase 2 (Durable trade lifecycle persistence). Required, not
+// optional, exactly like buildTradeCandidateRepository above and for the identical reason: this
+// runtime must never silently fall back to the in-memory store in production — an open eToro
+// position tracked only in-process memory is lost the moment PM2 restarts (the very defect this
+// phase exists to fix). Reuses the exact same HERMES_SUPABASE_USER_ID + service-role configuration
+// trade candidates already require.
+function buildTradeLifecycleStore(): TradeLifecycleStore | { error: string } {
+  const persistenceConfig = buildAnalysisPersistenceConfig();
+  if (!persistenceConfig.enabled || !persistenceConfig.ownerUserId) {
+    return {
+      error:
+        "Durable trade lifecycle persistence requires HERMES_SUPABASE_USER_ID and the Supabase service " +
+        "role to be configured. This runtime never falls back to in-memory lifecycle storage — an open " +
+        "position tracked only in process memory would be lost on the next restart.",
+    };
+  }
+  const client = getServiceRoleClient();
+  if (!client) {
+    return { error: "Supabase service role client could not be constructed despite being configured." };
+  }
+  return new SupabaseTradeLifecycleStore(client, persistenceConfig.ownerUserId);
+}
+
 // Phase 4 — Trade Performance Engine. Optional, unlike buildTradeCandidateRepository above —
 // measuring trade quality is a pure observability bolt-on (same category as analysis persistence),
 // not a safety requirement; when it can't be configured, the runtime starts exactly as it did
@@ -121,7 +147,11 @@ export async function main(): Promise<void> {
   const executionRunId = `market-runtime-${Date.now()}`;
   console.log(`Execution run id: ${executionRunId}`);
 
-  const baseAuditTrail = await JsonFileAuditTrail.createFresh(HERMES_RUNTIME_AUDIT_LOG_PATH);
+  // Restart-Resilient Autonomy Phase — Phase 7 (Audit durability). loadExisting, never createFresh:
+  // this production audit log must not be destructively truncated on every PM2 restart (the
+  // pre-existing behaviour this phase fixes) — a fresh file is only ever created the very first
+  // time this path doesn't exist yet (loadExisting's own fallback).
+  const baseAuditTrail = await JsonFileAuditTrail.loadExisting(HERMES_RUNTIME_AUDIT_LOG_PATH);
 
   // Prototype V1 — minimum Telegram integration. When enabled, every alert-worthy audit event (see
   // telegram-alerting-audit-trail.ts's own formatAlert) is also sent to the one configured chat id,
@@ -143,6 +173,19 @@ export async function main(): Promise<void> {
     console.log("Telegram alerts enabled.");
   }
 
+  // Restart-Resilient Autonomy Phase — Phase 2. Required, not optional — see
+  // buildTradeLifecycleStore's own doc comment. Built before buildRuntimeDependencies so it can be
+  // injected as that factory's lifecycleStoreOverride, replacing its own default
+  // InMemoryTradeLifecycleStore.
+  const tradeLifecycleStore = buildTradeLifecycleStore();
+  if ("error" in tradeLifecycleStore) {
+    console.error("Startup validation failed — the runtime was not started:");
+    console.error(`  - [tradeLifecycleStore] ${tradeLifecycleStore.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log("Durable trade lifecycle persistence enabled — open positions survive a restart (trade_lifecycle_records).");
+
   // Startup validation happens entirely inside this call, before anything scheduler-related is
   // ever touched: strategy loading, mode/broker/market-data compatibility, broker construction,
   // and (for eToro) symbol resolution. Every problem found is collected and reported together,
@@ -153,6 +196,7 @@ export async function main(): Promise<void> {
     executionRunId,
     resetBrokerState: false, // a continuous runtime persists its paper account/positions across restarts
     portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    lifecycleStoreOverride: tradeLifecycleStore,
   });
 
   if (!built.ok) {
@@ -200,6 +244,45 @@ export async function main(): Promise<void> {
       : "Trade performance measurement disabled — set HERMES_SUPABASE_USER_ID and the Supabase service role to enable it.",
   );
 
+  // Restart-Resilient Autonomy Phase — Phase 3 (strategy-disabled exit trigger). Only meaningful
+  // when a registry path is configured at all — buildRuntimeDependencies above already fails
+  // closed on a missing HERMES_STRATEGY_REGISTRY_PATH, so config.registryPath is always defined by
+  // this point, but this stays defensive rather than asserting it.
+  const registryClient = config.registryPath ? new FileSystemRegistryClient(config.registryPath) : undefined;
+
+  console.log(`Approval mode: ${config.approvalMode}`);
+  if (config.killSwitchEnabled) {
+    console.log("KILL SWITCH ENABLED — every reconciled open position will be closed automatically this run.");
+  }
+  // Restart-Resilient Autonomy Phase — kill-switch operational visibility (deployment safety
+  // review). HERMES_KILL_SWITCH_ENABLED is read once here, at process startup, and cached for this
+  // process's entire lifetime (TradingRuntimeDeps.killSwitchEnabled is a plain boolean, not a
+  // live-reloaded value) — flipping the env var alone does NOT affect an already-running process.
+  // No control endpoint exists to change this at runtime (deliberately out of this phase's scope);
+  // the only way to apply a change is the PM2 restart below, which reloads env vars.
+  console.log(
+    `NOTE: HERMES_KILL_SWITCH_ENABLED is only read at process startup — a running process does not ` +
+      `notice a later change to it. To apply a change, restart with updated environment: ` +
+      `pm2 restart hermes-market-runtime --update-env`,
+  );
+
+  // Restart-Resilient Autonomy Phase — Phase 4 (Protection model). eToro's own documented Public
+  // API for opening a demo position (POST /api/v2/trading/execution/demo/orders — see
+  // etoro/etoro-client.ts's own placeDemoMarketOrder) has NO stop-loss/take-profit request field in
+  // any confirmed request-body example or documented schema this adapter's own client is built
+  // from — nothing was invented or guessed here. Protection is therefore LOCAL ONLY (Phase 3's own
+  // exit monitor, evaluated once per scheduled cycle) and depends entirely on this runtime process
+  // remaining up and running; it is not enforced by eToro itself the way a broker-native stop order
+  // would be.
+  if (config.brokerProvider === "etoro-demo") {
+    console.log(
+      "WARNING: eToro's demo order API has no documented native stop-loss/take-profit field — " +
+        "protection for open positions is LOCAL ONLY (evaluated once per scheduled cycle, every " +
+        `${config.scheduler.intervalMs}ms) and depends entirely on this runtime process remaining ` +
+        "up. A position is unprotected for the duration of any outage or restart gap.",
+    );
+  }
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -207,8 +290,10 @@ export async function main(): Promise<void> {
     instrument: deps.symbol,
     amount: deps.quantity,
     orderSizingMode: deps.orderSizingMode,
+    brokerProvider: config.brokerProvider,
     portfolioRiskConfig: deps.portfolioRiskConfig,
     lifecycleService: deps.lifecycleService,
+    lifecycleStore: deps.lifecycleStore,
     auditTrail,
     marketHoursPolicy: deps.marketHoursPolicy,
     clock: new SystemSchedulerClock(),
@@ -221,6 +306,13 @@ export async function main(): Promise<void> {
     tradePerformance: tradePerformanceRepository
       ? { lifecycleStore: deps.lifecycleStore, repository: tradePerformanceRepository }
       : undefined,
+    approvalMode: config.approvalMode,
+    autoDemoMinConfidence: config.autoDemoMinConfidence,
+    killSwitchEnabled: config.killSwitchEnabled,
+    maxHoldingDurationMs: config.maxHoldingDurationMs,
+    recoveryThresholdMs: config.recoveryThresholdMs,
+    registryClient,
+    demoExecutionModeEnabled: config.demoExecutionModeEnabled,
   });
 
   let telegramBot: TelegramBot | undefined;
@@ -234,7 +326,7 @@ export async function main(): Promise<void> {
       lifecycleStore: deps.lifecycleStore,
     });
     telegramBot.start();
-    console.log("Telegram bot started — listening for /status /positions /trades /pnl /pause /resume /run /help.");
+    console.log("Telegram bot started — listening for /status /positions /trades /pnl /reconciliation /pause /resume /run /help.");
   }
 
   await runtime.start();

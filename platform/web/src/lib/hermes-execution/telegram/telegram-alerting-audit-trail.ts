@@ -43,6 +43,18 @@ function formatAlert(event: AuditEvent): string | undefined {
       return `Broker error: connection failed — ${details.reason}.`;
     case "TRADING_CYCLE_FAILED":
       return `Runtime error: cycle failed — ${details.message}.`;
+    // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+    // review). Alerted ONLY on the specific resolution that means a position genuinely entered
+    // CLOSED_UNRECONCILED — the OTHER resolution this same event type carries ("failed-closed", a
+    // reconciliation failure) is already covered by TRADING_CYCLE_FAILED-style alerting via its own
+    // path, so this stays scoped to exactly the "durable alert whenever a lifecycle enters
+    // CLOSED_UNRECONCILED" requirement, never double-alerting the other case.
+    case "BROKER_RECONCILIATION_MISMATCH":
+      if (details.resolution !== "reconciled-closed-unreconciled") return undefined;
+      return (
+        `Position closed with UNKNOWN exit price/P&L (CLOSED_UNRECONCILED): ${event.instrument} ` +
+        `(lifecycle record ${details.lifecycleRecordId}). See /reconciliation for details.`
+      );
     default:
       return undefined;
   }

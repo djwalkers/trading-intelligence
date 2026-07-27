@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
+import { InMemoryTradeLifecycleStore, TradeLifecycleUniqueConstraintViolationError } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import type { TradeLifecycleRecord, TradeLifecycleStatus } from "@/lib/hermes-execution/trade-lifecycle/types";
 import type { MarketDataSnapshot } from "@/lib/hermes-execution/market-data/market-data-provider";
 import type { MarketDecisionContext } from "@/lib/hermes-execution/market-decision-engine";
@@ -41,6 +41,8 @@ function makeRecord(id: string, status: TradeLifecycleStatus, overrides: Partial
   return {
     id,
     strategyId: "STRAT-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
@@ -109,29 +111,33 @@ describe("InMemoryTradeLifecycleStore — update", () => {
 describe("InMemoryTradeLifecycleStore — list/listOpen/listClosed", () => {
   it("list() returns every record regardless of status", async () => {
     const store = new InMemoryTradeLifecycleStore();
-    await store.create(makeRecord("a", "DECISION_CREATED"));
-    await store.create(makeRecord("b", "OPEN"));
-    await store.create(makeRecord("c", "CLOSED"));
+    // Distinct instruments: DECISION_CREATED and OPEN are both "active" statuses, and this test's
+    // own point is "list() returns everything regardless of status," not strategy+instrument
+    // uniqueness — see the dedicated "active-record uniqueness invariants" describe block below
+    // for that.
+    await store.create(makeRecord("a", "DECISION_CREATED", { symbol: "BTC" }));
+    await store.create(makeRecord("b", "OPEN", { symbol: "ETH" }));
+    await store.create(makeRecord("c", "CLOSED", { symbol: "BTC" }));
     const all = await store.list();
     expect(all.map((r) => r.id).sort()).toEqual(["a", "b", "c"]);
   });
 
   it("listOpen() returns OPEN and CLOSE_REQUESTED records only", async () => {
     const store = new InMemoryTradeLifecycleStore();
-    await store.create(makeRecord("a", "DECISION_CREATED"));
-    await store.create(makeRecord("b", "OPEN"));
-    await store.create(makeRecord("c", "CLOSE_REQUESTED"));
-    await store.create(makeRecord("d", "CLOSED"));
-    await store.create(makeRecord("e", "RISK_REJECTED"));
+    await store.create(makeRecord("a", "DECISION_CREATED", { symbol: "BTC" }));
+    await store.create(makeRecord("b", "OPEN", { symbol: "ETH" }));
+    await store.create(makeRecord("c", "CLOSE_REQUESTED", { symbol: "SOL" }));
+    await store.create(makeRecord("d", "CLOSED", { symbol: "BTC" }));
+    await store.create(makeRecord("e", "RISK_REJECTED", { symbol: "BTC" }));
     const open = await store.listOpen();
     expect(open.map((r) => r.id).sort()).toEqual(["b", "c"]);
   });
 
   it("listClosed() returns CLOSED records only", async () => {
     const store = new InMemoryTradeLifecycleStore();
-    await store.create(makeRecord("a", "OPEN"));
-    await store.create(makeRecord("b", "CLOSED"));
-    await store.create(makeRecord("c", "CLOSE_FAILED"));
+    await store.create(makeRecord("a", "OPEN", { symbol: "BTC" }));
+    await store.create(makeRecord("b", "CLOSED", { symbol: "BTC" }));
+    await store.create(makeRecord("c", "CLOSE_FAILED", { symbol: "ETH" }));
     const closed = await store.listClosed();
     expect(closed.map((r) => r.id)).toEqual(["b"]);
   });
@@ -152,5 +158,78 @@ describe("InMemoryTradeLifecycleStore — list/listOpen/listClosed", () => {
     expect(await store.list()).toEqual([]);
     expect(await store.listOpen()).toEqual([]);
     expect(await store.listClosed()).toEqual([]);
+  });
+
+  it("listOpen()/listClosed() never include CLOSED_UNRECONCILED — it has no confirmed exit economics", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "CLOSED_UNRECONCILED"));
+    expect(await store.listOpen()).toEqual([]);
+    expect(await store.listClosed()).toEqual([]);
+    expect((await store.list()).map((r) => r.id)).toEqual(["a"]);
+  });
+});
+
+// Restart-Resilient Autonomy Phase — reconciliation hardening. Mirrors migration 0026's own two
+// partial unique indexes so dev/tests exercise the exact same invariant Supabase enforces in
+// production — see trade-lifecycle-store.ts's own TradeLifecycleUniqueConstraintViolationError doc
+// comment.
+describe("InMemoryTradeLifecycleStore — active-record uniqueness invariants", () => {
+  it("refuses a second active record for the same broker_provider + broker_position_id", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "OPEN", { brokerPositionId: "555" }));
+    await expect(store.create(makeRecord("b", "OPEN", { brokerPositionId: "555" }))).rejects.toThrow(
+      TradeLifecycleUniqueConstraintViolationError,
+    );
+  });
+
+  it("CLOSE_FAILED counts as active for the broker-position invariant too", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "CLOSE_FAILED", { brokerPositionId: "555" }));
+    await expect(store.create(makeRecord("b", "OPEN", { brokerPositionId: "555" }))).rejects.toThrow(
+      TradeLifecycleUniqueConstraintViolationError,
+    );
+  });
+
+  it("allows a second record for the same broker_position_id once the first is CLOSED (terminal, frees the slot)", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "CLOSED", { brokerPositionId: "555" }));
+    await expect(store.create(makeRecord("b", "OPEN", { brokerPositionId: "555" }))).resolves.toBeUndefined();
+  });
+
+  it("null broker_position_id never collides with itself (NULLs are never duplicates)", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    // Distinct instruments here specifically to isolate the broker-position-id axis from the
+    // separate strategy+instrument invariant (covered by its own tests below).
+    await store.create(makeRecord("a", "OPEN", { symbol: "BTC" }));
+    await expect(store.create(makeRecord("b", "OPEN", { symbol: "ETH" }))).resolves.toBeUndefined();
+  });
+
+  it("refuses a second active record for the same strategy_id + instrument", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "APPROVED"));
+    await expect(store.create(makeRecord("b", "DECISION_CREATED"))).rejects.toThrow(TradeLifecycleUniqueConstraintViolationError);
+  });
+
+  it("allows a second record for the same strategy+instrument once the first is a terminal outcome (RISK_REJECTED)", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "RISK_REJECTED"));
+    await expect(store.create(makeRecord("b", "DECISION_CREATED"))).resolves.toBeUndefined();
+  });
+
+  it("update() enforces the same invariant (a transition INTO the active set can still collide)", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    // Distinct instruments so "a" and "b" don't also collide on the separate strategy+instrument
+    // invariant — isolates the broker-position-id axis specifically.
+    await store.create(makeRecord("a", "OPEN", { symbol: "BTC", brokerPositionId: "555" }));
+    await store.create(makeRecord("b", "CLOSE_FAILED", { symbol: "ETH", brokerPositionId: "999" }));
+    await expect(store.update(makeRecord("b", "OPEN", { symbol: "ETH", brokerPositionId: "555" }))).rejects.toThrow(
+      TradeLifecycleUniqueConstraintViolationError,
+    );
+  });
+
+  it("update() excludes the record's own prior row from the clash check (a no-op status re-write is never a self-collision)", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "OPEN", { brokerPositionId: "555" }));
+    await expect(store.update(makeRecord("a", "OPEN", { brokerPositionId: "555", confidence: 0.9 }))).resolves.toBeUndefined();
   });
 });

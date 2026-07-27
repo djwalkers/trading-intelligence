@@ -1,5 +1,5 @@
-import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
-import { BROKER_CAPABILITIES, brokersWithLiveRateSupport } from "./broker-capabilities";
+import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, RuntimeMode } from "../config";
+import { BROKER_CAPABILITIES, brokersWithLiveRateSupport, isAutoDemoEligible } from "./broker-capabilities";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. Pure, static compatibility checks — no I/O,
 // no broker construction, no network call. This is exactly the check the mission calls for
@@ -65,5 +65,31 @@ export function checkPrototypeV1BrokerSupport(brokerProvider: BrokerProvider): C
       'Trading212 is not supported for Prototype V1 — live testing confirmed the adapter\'s order-fill ' +
       "polling can fail (HTTP 404) after a real position is opened, leaving it unmanaged. Select a " +
       'different BROKER_PROVIDER ("local", "hyperliquid-testnet", or "etoro-demo") until this is fixed.',
+  };
+}
+
+/**
+ * Restart-Resilient Autonomy Phase — AUTO_DEMO startup gate. HERMES_APPROVAL_MODE=AUTO_DEMO
+ * requires a broker whose OWN declared capabilities (BROKER_CAPABILITIES[brokerProvider]) prove it
+ * is demo/paper/testnet-only (see broker-capabilities.ts's own isAutoDemoEligible) — never inferred
+ * by pattern-matching the broker's name/string (e.g. a "-demo" suffix). A brokerProvider missing
+ * from BROKER_CAPABILITIES entirely (structurally shouldn't happen — every SUPPORTED_BROKER_PROVIDERS
+ * entry has one, enforced by broker-capabilities.test.ts's own "declares an entry for every
+ * supported broker provider" assertion) fails closed here too, defensively, rather than being
+ * silently treated as eligible.
+ */
+export function checkApprovalModeCompatibility(
+  brokerProvider: BrokerProvider,
+  approvalMode: ExecutionApprovalMode,
+): CompatibilityProblem | undefined {
+  if (approvalMode !== "AUTO_DEMO") return undefined;
+  const capabilities = BROKER_CAPABILITIES[brokerProvider];
+  if (capabilities && isAutoDemoEligible(capabilities)) return undefined;
+  return {
+    field: "approvalMode",
+    message:
+      `HERMES_APPROVAL_MODE=AUTO_DEMO requires a broker whose declared capabilities are demonstrably ` +
+      `demo/paper/testnet-only; "${brokerProvider}" ${capabilities ? "does not qualify" : "has no declared BROKER_CAPABILITIES entry at all"}. ` +
+      `Select HERMES_APPROVAL_MODE=MANUAL, or a broker whose BROKER_CAPABILITIES entry declares only demo/paper/testnet runtime modes.`,
   };
 }

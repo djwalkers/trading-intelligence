@@ -131,20 +131,27 @@ function makeRuntime(
     immediateFirstRun?: boolean;
     shutdownTimeoutMs?: number;
     tradeCandidateExpiryMs?: number;
+    approvalMode?: "MANUAL" | "AUTO_DEMO";
+    autoDemoMinConfidence?: number;
+    killSwitchEnabled?: boolean;
+    broker?: PaperBroker;
+    tradeCandidateRepository?: InMemoryTradeCandidateRepository;
+    lifecycleStore?: InMemoryTradeLifecycleStore;
   } = {},
 ): RuntimeHarness {
-  const broker = makeMockBroker(overrides.openPositions ?? []);
+  const broker = (overrides.broker ?? makeMockBroker(overrides.openPositions ?? [])) as ReturnType<typeof makeMockBroker>;
   const clock = new ManualSchedulerClock(NOW);
   const auditTrail = new InMemoryAuditTrail();
+  const lifecycleStore = overrides.lifecycleStore ?? new InMemoryTradeLifecycleStore();
   const lifecycleService = new TradeLifecycleService({
-    store: new InMemoryTradeLifecycleStore(),
+    store: lifecycleStore,
     auditTrail,
     executionRunId: "test-run",
     now: () => clock.now(),
   });
   const marketDataProvider =
     overrides.marketDataProvider ?? new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
-  const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+  const tradeCandidateRepository = overrides.tradeCandidateRepository ?? new InMemoryTradeCandidateRepository();
 
   const runtime = new TradingRuntime({
     broker,
@@ -153,8 +160,10 @@ function makeRuntime(
     instrument: "BTC",
     amount: 10,
     orderSizingMode: "UNITS",
+    brokerProvider: "etoro-demo",
     portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
     lifecycleService,
+    lifecycleStore,
     auditTrail,
     marketHoursPolicy: overrides.marketHoursPolicy ?? new AlwaysOpenMarketHoursPolicy(),
     clock,
@@ -163,6 +172,10 @@ function makeRuntime(
     shutdownTimeoutMs: overrides.shutdownTimeoutMs,
     tradeCandidateRepository,
     tradeCandidateExpiryMs: overrides.tradeCandidateExpiryMs ?? 20 * 60_000,
+    approvalMode: overrides.approvalMode ?? "MANUAL",
+    autoDemoMinConfidence: overrides.autoDemoMinConfidence ?? 0.75,
+    killSwitchEnabled: overrides.killSwitchEnabled ?? false,
+    recoveryThresholdMs: 5 * 60_000,
   });
 
   return { runtime, broker, clock, lifecycleService, auditTrail, tradeCandidateRepository };
@@ -606,5 +619,724 @@ describe("TradingRuntime — status is serialisable", () => {
     expect(roundTripped.state).toBe(status.state);
     expect(roundTripped.successfulRunCount).toBe(status.successfulRunCount);
     expect(roundTripped.lastResult).toEqual(status.lastResult);
+  });
+});
+
+// Restart-Resilient Autonomy Phase — full-runtime integration coverage.
+//
+// Covers required scenarios:
+//   1. Runtime startup discovers an existing eToro position.
+//   2. Existing broker position prevents a duplicate BUY candidate.
+//   3. Reconciled position survives simulated runtime restart.
+//  16. MANUAL mode remains unchanged (no candidate is ever auto-approved).
+function makeEtoroLikeBroker(rawPositions: Array<{ positionID: number; orderID: number; instrumentID: number; isBuy?: boolean; amount?: number; openRate?: number }>) {
+  const tracked = new Map<string, PaperPosition>();
+  let seq = 0;
+  return {
+    getAccount: (): Account => ({ cashBalance: 1_000_000, startingCashBalance: 1_000_000 }),
+    getOpenPositions: (): PaperPosition[] => [...tracked.values()],
+    getCompletedTrades: (): CompletedTrade[] => [],
+    resolveInstrument: async (_term: string) => ({ instrumentId: 100000 }),
+    getRate: async (_instrument: string) => ({ bid: 100, ask: 100.05 }),
+    getRawPortfolio: async () => ({ clientPortfolio: { positions: rawPositions, credit: 1_000_000 } }),
+    adoptPosition: (
+      raw: { positionID: number; orderID: number; isBuy?: boolean; amount?: number; openRate?: number },
+      internalInstrument: string,
+      strategyContext: { strategyId: string; strategyVersion: number; sourceType: InternalStrategy["sourceType"] },
+    ): PaperPosition => {
+      seq += 1;
+      const position: PaperPosition = {
+        positionId: `fake-position-${seq}`,
+        strategyId: strategyContext.strategyId,
+        strategyVersion: strategyContext.strategyVersion,
+        sourceType: strategyContext.sourceType,
+        instrument: internalInstrument,
+        side: raw.isBuy === false ? "SELL" : "BUY",
+        quantity: raw.amount ?? 10,
+        entryPrice: raw.openRate ?? 100,
+        entryTimestamp: NOW.toISOString(),
+        entryOrderId: String(raw.orderID),
+        brokerPositionId: String(raw.positionID),
+      };
+      tracked.set(position.positionId, position);
+      return position;
+    },
+    placeMarketOrder: vi.fn(async (order: OrderRequest) => ({
+      position: {
+        positionId: "mock-position-1",
+        strategyId: order.strategyId,
+        strategyVersion: order.strategyVersion,
+        sourceType: order.sourceType,
+        instrument: order.instrument,
+        side: order.side,
+        quantity: order.quantity,
+        entryPrice: order.price,
+        entryTimestamp: order.timestamp,
+        entryOrderId: "mock-order-1",
+      } satisfies PaperPosition,
+      orderId: "mock-order-1",
+    })),
+    closePosition: vi.fn(async () => {
+      throw new Error("not exercised in this describe block");
+    }),
+  };
+}
+
+describe("TradingRuntime — Restart-Resilient Autonomy: startup reconciliation + duplicate prevention", () => {
+  it("discovers an existing broker position on the very first cycle and never proposes a duplicate BUY (scenarios 1 & 2)", async () => {
+    const broker = makeEtoroLikeBroker([
+      { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 },
+    ]);
+    const clock = new ManualSchedulerClock(NOW);
+    const auditTrail = new InMemoryAuditTrail();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const lifecycleService = new TradeLifecycleService({ store: lifecycleStore, auditTrail, executionRunId: "test-run", now: () => clock.now() });
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    // Bullish market data would otherwise satisfy DEMO-0001's own entry conditions — proving any
+    // absence of a BUY candidate below is due to reconciliation, not merely "no entry signal".
+    const marketDataProvider = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+
+    const runtime = new TradingRuntime({
+      broker: broker as never,
+      marketDataProvider,
+      strategy: STRATEGY,
+      instrument: "BTC",
+      amount: 10,
+      orderSizingMode: "NOTIONAL",
+      brokerProvider: "etoro-demo",
+      portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+      lifecycleService,
+      lifecycleStore,
+      auditTrail,
+      marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
+      clock,
+      intervalMs: 10_000,
+      immediateFirstRun: true,
+      tradeCandidateRepository,
+      tradeCandidateExpiryMs: 20 * 60_000,
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0.75,
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("BROKER_POSITION_DISCOVERED");
+    expect(events).toContain("BROKER_POSITION_ORPHANED");
+
+    // No BUY candidate was created — the reconciled open position blocked it.
+    const candidates = await tradeCandidateRepository.list();
+    expect(candidates.filter((c) => c.direction === "BUY")).toHaveLength(0);
+
+    const status = runtime.getStatus();
+    expect(status.lastResult?.positionOpen).toBe(true);
+    expect(status.lastResult?.candidateCreated).toBe(false);
+
+    await runtime.stop();
+  });
+
+  it("a position adopted in one runtime instance is recognised (RECONCILED) by a second instance sharing the same durable store, after a simulated restart (scenario 3)", async () => {
+    const rawPosition = { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 };
+    const lifecycleStore = new InMemoryTradeLifecycleStore(); // stands in for Supabase durability across the "restart"
+
+    // --- Instance A (pre-restart) ---
+    const brokerA = makeEtoroLikeBroker([rawPosition]);
+    const clockA = new ManualSchedulerClock(NOW);
+    const auditTrailA = new InMemoryAuditTrail();
+    const lifecycleServiceA = new TradeLifecycleService({ store: lifecycleStore, auditTrail: auditTrailA, executionRunId: "run-a", now: () => clockA.now() });
+    const runtimeA = new TradingRuntime({
+      broker: brokerA as never,
+      marketDataProvider: new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW }),
+      strategy: STRATEGY,
+      instrument: "BTC",
+      amount: 10,
+      orderSizingMode: "NOTIONAL",
+      brokerProvider: "etoro-demo",
+      portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+      lifecycleService: lifecycleServiceA,
+      lifecycleStore,
+      auditTrail: auditTrailA,
+      marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
+      clock: clockA,
+      intervalMs: 10_000,
+      immediateFirstRun: true,
+      tradeCandidateRepository: new InMemoryTradeCandidateRepository(),
+      tradeCandidateExpiryMs: 20 * 60_000,
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0.75,
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
+    });
+    await runtimeA.start();
+    await clockA.advance(0);
+    const adoptedId = (await lifecycleStore.listOpen())[0]?.id;
+    expect(adoptedId).toBeDefined();
+    await runtimeA.stop();
+
+    // --- Instance B (post-restart): brand-new broker instance (own empty trackedPositions), SAME
+    // durable lifecycleStore (standing in for Supabase surviving the restart). ---
+    const brokerB = makeEtoroLikeBroker([rawPosition]);
+    const clockB = new ManualSchedulerClock(NOW);
+    const auditTrailB = new InMemoryAuditTrail();
+    const lifecycleServiceB = new TradeLifecycleService({ store: lifecycleStore, auditTrail: auditTrailB, executionRunId: "run-b", now: () => clockB.now() });
+    const tradeCandidateRepositoryB = new InMemoryTradeCandidateRepository();
+    const runtimeB = new TradingRuntime({
+      broker: brokerB as never,
+      marketDataProvider: new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW }),
+      strategy: STRATEGY,
+      instrument: "BTC",
+      amount: 10,
+      orderSizingMode: "NOTIONAL",
+      brokerProvider: "etoro-demo",
+      portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+      lifecycleService: lifecycleServiceB,
+      lifecycleStore,
+      auditTrail: auditTrailB,
+      marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
+      clock: clockB,
+      intervalMs: 10_000,
+      immediateFirstRun: true,
+      tradeCandidateRepository: tradeCandidateRepositoryB,
+      tradeCandidateExpiryMs: 20 * 60_000,
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0.75,
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
+    });
+    await runtimeB.start();
+    await clockB.advance(0);
+
+    const eventsB = (await auditTrailB.getEvents()).map((e) => e.eventType);
+    expect(eventsB).toContain("BROKER_POSITION_RECONCILED");
+    expect(eventsB).not.toContain("BROKER_POSITION_ORPHANED"); // NOT re-adopted as a new/second record
+
+    const stillOnlyOneRecord = await lifecycleStore.list();
+    expect(stillOnlyOneRecord).toHaveLength(1);
+    expect(stillOnlyOneRecord[0]!.id).toBe(adoptedId);
+
+    // No duplicate BUY candidate was ever proposed by the post-restart instance either.
+    expect((await tradeCandidateRepositoryB.list()).filter((c) => c.direction === "BUY")).toHaveLength(0);
+
+    await runtimeB.stop();
+  });
+
+  it("MANUAL mode never auto-approves a candidate, even when confidence would clear the AUTO_DEMO threshold (scenario 16)", async () => {
+    const broker = makeMockBroker([]);
+    const clock = new ManualSchedulerClock(NOW);
+    const auditTrail = new InMemoryAuditTrail();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const lifecycleService = new TradeLifecycleService({ store: lifecycleStore, auditTrail, executionRunId: "test-run", now: () => clock.now() });
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+
+    const runtime = new TradingRuntime({
+      broker,
+      marketDataProvider: new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW }),
+      strategy: STRATEGY,
+      instrument: "BTC",
+      amount: 10,
+      orderSizingMode: "UNITS",
+      brokerProvider: "etoro-demo",
+      portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+      lifecycleService,
+      lifecycleStore,
+      auditTrail,
+      marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
+      clock,
+      intervalMs: 10_000,
+      immediateFirstRun: true,
+      tradeCandidateRepository,
+      tradeCandidateExpiryMs: 20 * 60_000,
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0, // would auto-approve ANY confidence under AUTO_DEMO
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    const [candidate] = await tradeCandidateRepository.list({ status: "PENDING" });
+    expect(candidate).toBeDefined();
+    expect(candidate?.status).toBe("PENDING"); // never auto-approved under MANUAL
+    expect(await tradeCandidateRepository.list({ status: "APPROVED" })).toHaveLength(0);
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).not.toContain("TRADE_CANDIDATE_AUTO_APPROVED");
+
+    await runtime.stop();
+  });
+});
+
+// Restart-Resilient Autonomy Phase — kill switch hardening (safety-review pass). Covers the
+// required scenarios: blocks fresh BUY, blocks AUTO_DEMO auto-approval, blocks a previously
+// APPROVED BUY candidate's execution, and still permits an automatic (risk-reducing) close.
+describe("TradingRuntime — kill switch blocks all exposure-increasing activity", () => {
+  it("blocks a fresh BUY candidate from ever being created, emitting KILL_SWITCH_ENTRY_BLOCKED", async () => {
+    const { runtime, clock, tradeCandidateRepository, auditTrail } = makeRuntime({ killSwitchEnabled: true });
+    await runtime.start();
+    await clock.advance(0);
+
+    expect((await tradeCandidateRepository.list()).filter((c) => c.direction === "BUY")).toHaveLength(0);
+    const blocked = (await auditTrail.getEvents()).find((e) => e.eventType === "KILL_SWITCH_ENTRY_BLOCKED");
+    expect(blocked).toBeDefined();
+    expect(blocked?.details.context).toBe("fresh-candidate-creation");
+
+    await runtime.stop();
+  });
+
+  it("blocks AUTO_DEMO auto-approval — no candidate is ever created, so none is ever auto-approved", async () => {
+    const { runtime, clock, tradeCandidateRepository, auditTrail } = makeRuntime({
+      killSwitchEnabled: true,
+      approvalMode: "AUTO_DEMO",
+      autoDemoMinConfidence: 0, // would auto-approve ANY confidence if the kill switch didn't block it first
+    });
+    await runtime.start();
+    await clock.advance(0);
+
+    expect(await tradeCandidateRepository.list({ status: "APPROVED" })).toHaveLength(0);
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).not.toContain("TRADE_CANDIDATE_AUTO_APPROVED");
+    expect(events).toContain("KILL_SWITCH_ENTRY_BLOCKED");
+
+    await runtime.stop();
+  });
+
+  it("blocks execution of a previously-APPROVED BUY candidate — left APPROVED, untouched, for a later cycle", async () => {
+    const broker = makeMockBroker([]);
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+
+    // Instance A: kill switch off — creates and (a human) approves a BUY candidate, same as any
+    // ordinary MANUAL-mode cycle.
+    const instanceA = makeRuntime({ broker, tradeCandidateRepository, lifecycleStore, killSwitchEnabled: false });
+    await instanceA.runtime.start();
+    await instanceA.clock.advance(0);
+    const [pending] = await tradeCandidateRepository.list({ status: "PENDING" });
+    expect(pending).toBeDefined();
+    await approveTradeCandidate({
+      repository: tradeCandidateRepository,
+      auditTrail: instanceA.auditTrail,
+      executionRunId: "test-run",
+      candidateId: pending!.id,
+      approvedByUserId: "user-1",
+      now: instanceA.clock.now(),
+    });
+    await instanceA.runtime.stop();
+
+    // Instance B: same repository/store/broker, but the kill switch is now on (an operator flipped
+    // it, e.g. between restarts) — the already-APPROVED BUY candidate must not execute.
+    const instanceB = makeRuntime({ broker, tradeCandidateRepository, lifecycleStore, killSwitchEnabled: true });
+    await instanceB.runtime.start();
+    await instanceB.clock.advance(0);
+
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    const stillApproved = await tradeCandidateRepository.getById(pending!.id);
+    expect(stillApproved?.status).toBe("APPROVED");
+
+    const blocked = (await instanceB.auditTrail.getEvents()).find((e) => e.eventType === "KILL_SWITCH_ENTRY_BLOCKED");
+    expect(blocked).toBeDefined();
+    expect(blocked?.details.context).toBe("approved-candidate-execution");
+    expect(blocked?.details.candidateId).toBe(pending!.id);
+
+    await instanceB.runtime.stop();
+  });
+
+  it("still permits an automatic close — the kill switch forces risk-reducing exits, never blocks them", async () => {
+    const rawPosition = { positionID: 555, orderID: 999, instrumentID: 100000, isBuy: true, amount: 10, openRate: 100 };
+    const tracked = new Map<string, PaperPosition>();
+    tracked.set("fake-position-1", {
+      positionId: "fake-position-1",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      sourceType: "HERMES_APPROVED",
+      instrument: "BTC",
+      side: "BUY",
+      quantity: 10,
+      entryPrice: 100,
+      entryTimestamp: NOW.toISOString(),
+      entryOrderId: "999",
+      brokerPositionId: "555",
+    });
+    const closePosition = vi.fn(async (positionId: string, exitPrice: number, exitTimestamp: string, closeReason: string) => {
+      const position = tracked.get(positionId)!;
+      tracked.delete(positionId);
+      const trade: CompletedTrade = {
+        tradeId: `trade-${positionId}`,
+        positionId,
+        strategyId: position.strategyId,
+        strategyVersion: position.strategyVersion,
+        sourceType: position.sourceType,
+        instrument: position.instrument,
+        side: position.side,
+        quantity: position.quantity,
+        entryPrice: position.entryPrice,
+        entryTimestamp: position.entryTimestamp,
+        entryOrderId: position.entryOrderId,
+        exitPrice,
+        exitTimestamp,
+        exitOrderId: `close-${positionId}`,
+        realisedPnl: exitPrice - position.entryPrice,
+        closeReason,
+      };
+      return { trade, orderId: `close-${positionId}` };
+    });
+    const broker = {
+      getAccount: (): Account => ({ cashBalance: 1_000_000, startingCashBalance: 1_000_000 }),
+      getOpenPositions: (): PaperPosition[] => [...tracked.values()],
+      getCompletedTrades: (): CompletedTrade[] => [],
+      resolveInstrument: async (_term: string) => ({ instrumentId: 100000 }),
+      getRate: async (_instrument: string) => ({ bid: 100, ask: 100.05 }),
+      getRawPortfolio: async () => ({ clientPortfolio: { positions: [rawPosition], credit: 1_000_000 } }),
+      placeMarketOrder: vi.fn(),
+      closePosition,
+    };
+
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "UNITS",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      entryPrice: 100,
+      brokerPositionId: "555",
+      brokerOrderId: "999",
+    });
+
+    const { runtime, clock, auditTrail } = makeRuntime({ broker: broker as never, lifecycleStore, killSwitchEnabled: true });
+    await runtime.start();
+    await clock.advance(0);
+
+    expect(closePosition).toHaveBeenCalledOnce();
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("AUTOMATIC_EXIT_TRIGGERED");
+    expect(events).toContain("TRADE_CLOSED");
+    const triggered = (await auditTrail.getEvents()).find((e) => e.eventType === "AUTOMATIC_EXIT_TRIGGERED");
+    expect(triggered?.details.trigger).toBe("KILL_SWITCH");
+
+    const status = runtime.getStatus();
+    expect(status.lastResult?.exitTrigger).toBe("KILL_SWITCH");
+    expect(status.lastResult?.exitClosed).toBe(true);
+    expect(status.lastResult?.positionOpen).toBe(false);
+
+    // No new entry is opened this same cycle either — the fresh decision was evaluated against
+    // positionOpen: true (before this cycle's own exit fired, per this runtime's own "the NEXT
+    // cycle's reconciliation permits a new entry, never the same one" documented design), so no
+    // BUY candidate exists to create regardless of the kill switch.
+    expect(runtime.getStatus().lastResult?.candidateCreated).toBe(false);
+
+    await runtime.stop();
+  });
+});
+
+// Restart-Resilient Autonomy Phase — cycle-ordering hardening (safety-review pass). Covers the
+// required restart scenario: broker already has a position, an APPROVED BUY survived restart,
+// reconciliation detects the position, and no duplicate order is submitted.
+describe("TradingRuntime — reconciliation runs before approved-candidate execution", () => {
+  it("an APPROVED BUY that survived a restart is deferred (never executed) once reconciliation shows the broker already holds a position", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const brokerA = makeMockBroker([]);
+
+    // Instance A (pre-restart): creates and approves a BUY candidate — kill switch off, no broker
+    // position yet.
+    const instanceA = makeRuntime({ broker: brokerA, tradeCandidateRepository, lifecycleStore, killSwitchEnabled: false });
+    await instanceA.runtime.start();
+    await instanceA.clock.advance(0);
+    const [pending] = await tradeCandidateRepository.list({ status: "PENDING" });
+    expect(pending).toBeDefined();
+    await approveTradeCandidate({
+      repository: tradeCandidateRepository,
+      auditTrail: instanceA.auditTrail,
+      executionRunId: "test-run",
+      candidateId: pending!.id,
+      approvedByUserId: "user-1",
+      now: instanceA.clock.now(),
+    });
+    await instanceA.runtime.stop();
+
+    // Simulates a restart: a BRAND-NEW broker instance already shows a real, live BTC position
+    // (e.g. this candidate's own order actually went through against the real broker before the
+    // process crashed, or a human opened one directly) — reconciliation must detect this BEFORE
+    // the survived APPROVED candidate is ever allowed to execute.
+    const rawPosition = { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 };
+    const brokerB = makeEtoroLikeBroker([rawPosition]);
+    const instanceB = makeRuntime({
+      broker: brokerB as never,
+      tradeCandidateRepository,
+      lifecycleStore,
+      killSwitchEnabled: false,
+    });
+    await instanceB.runtime.start();
+    await instanceB.clock.advance(0);
+
+    // No duplicate order was ever submitted for the survived candidate.
+    expect(brokerB.placeMarketOrder).not.toHaveBeenCalled();
+    const stillApproved = await tradeCandidateRepository.getById(pending!.id);
+    expect(stillApproved?.status).toBe("APPROVED");
+
+    const events = (await instanceB.auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("BROKER_POSITION_ORPHANED"); // the real position is adopted...
+    expect(events).toContain("APPROVED_CANDIDATE_EXECUTION_DEFERRED"); // ...and the stale approval is deferred, not executed
+
+    const deferred = (await instanceB.auditTrail.getEvents()).find((e) => e.eventType === "APPROVED_CANDIDATE_EXECUTION_DEFERRED");
+    expect(deferred?.details.candidateId).toBe(pending!.id);
+
+    // Exactly one lifecycle record exists (the adopted broker position) — never a second one from
+    // the deferred candidate.
+    expect((await lifecycleStore.list()).length).toBe(1);
+
+    await instanceB.runtime.stop();
+  });
+});
+
+// Restart-Resilient Autonomy Phase — prevent re-execution after reconciled closure (deployment
+// safety review, required regression test): candidate remains APPROVED -> lifecycle opens -> broker
+// position closes before candidate expiry -> lifecycle becomes CLOSED_UNRECONCILED -> candidate must
+// not be picked up and executed again.
+describe("TradingRuntime — CLOSED_UNRECONCILED cannot permit candidate re-execution (regression)", () => {
+  it("a candidate stuck APPROVED behind a crash-orphaned OPEN record is repaired to EXECUTED the moment the position resolves to CLOSED_UNRECONCILED — never re-executed", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+
+    // Seeds the exact "crashed right after OPEN, before candidate -> EXECUTED" state directly,
+    // rather than simulating the crash procedurally — this test's own point is what happens AFTER
+    // that state already exists, not how it arose (crash-window tracing is covered by
+    // lifecycle-recovery.test.ts).
+    const candidate = await tradeCandidateRepository.create({
+      analysisRunId: undefined,
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      instrument: "BTC",
+      direction: "BUY",
+      confidence: 0.8,
+      entryPrice: 64_948.33,
+      stopLoss: 60_000,
+      takeProfit: 70_000,
+      riskReward: 2,
+      reasoning: ["seed"],
+      validationNotes: [],
+      expiresAt: "2026-01-02T00:00:00.000Z", // far in the future — never expires mid-test
+      execution: {
+        amount: 10,
+        sizingMode: "NOTIONAL",
+        marketContext: {
+          instrument: "BTC",
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          midPrice: 100.025,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          positionOpen: false,
+          strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+          recentCandles: [],
+          ema20: 110,
+          ema50: 100,
+          rsi14: 55,
+          atr14: 1.5,
+          volume: 120,
+          dailyHigh: 112,
+          dailyLow: 98,
+          volatility24h: 0.01,
+          marketSession: "Crypto Always Open",
+          trend: "Bullish",
+        },
+        marketDataSnapshot: {
+          instrument: "BTC",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          candles: [],
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          latestPrice: 100.025,
+          volume: 120,
+        },
+      },
+    });
+    await tradeCandidateRepository.transition(candidate.id, "PENDING", {
+      status: "APPROVED",
+      approvedAt: NOW.toISOString(),
+      approvedByUserId: "user-1",
+    });
+
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      candidateId: candidate.id,
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "NOTIONAL",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      entryPrice: 64_948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    // The broker's OWN raw portfolio already shows nothing for this instrument — the position
+    // closed (by whatever means) before this runtime ever got a chance to observe it as OPEN again.
+    const broker = makeEtoroLikeBroker([]);
+    const { runtime, clock, auditTrail } = makeRuntime({ broker: broker as never, tradeCandidateRepository, lifecycleStore });
+
+    await runtime.start();
+    await clock.advance(0); // cycle 1: discovers the mismatch, repairs the candidate, resolves the lifecycle
+
+    const lifecycleAfterCycle1 = await lifecycleStore.getById("lifecycle-1");
+    expect(lifecycleAfterCycle1?.status).toBe("CLOSED_UNRECONCILED");
+    const candidateAfterCycle1 = await tradeCandidateRepository.getById(candidate.id);
+    expect(candidateAfterCycle1?.status).toBe("EXECUTED"); // repaired — no longer APPROVED
+
+    const events1 = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events1).toContain("CANDIDATE_EXECUTION_RECONCILED");
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+
+    // A second cycle — the strategy+instrument slot is now free (CLOSED_UNRECONCILED is terminal
+    // and excluded from active uniqueness), and a fresh bullish decision would otherwise propose a
+    // BUY. The point: the OLD candidate (now EXECUTED, terminal) is never picked up again — it is
+    // not in the APPROVED list at all any more, so it cannot be re-executed.
+    await clock.advance(10_000);
+
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled(); // no duplicate order for the OLD candidate
+    expect((await tradeCandidateRepository.getById(candidate.id))?.status).toBe("EXECUTED"); // still terminal, untouched
+    expect((await tradeCandidateRepository.list({ status: "APPROVED" })).filter((c) => c.id === candidate.id)).toHaveLength(0);
+
+    await runtime.stop();
+  });
+});
+
+// Deployment safety review (final hardening pass, required regression test): a genuinely ambiguous
+// EXECUTION_RECONCILIATION_REQUIRED record for the same strategy+instrument must not send a
+// previously-APPROVED BUY candidate into a lifecycle uniqueness violation — it must instead be
+// deferred cleanly, exactly like a confirmed-open position.
+describe("TradingRuntime — EXECUTION_RECONCILIATION_REQUIRED defers approved candidates (regression)", () => {
+  it("defers an APPROVED BUY candidate via APPROVED_CANDIDATE_EXECUTION_DEFERRED, never a lifecycle uniqueness violation", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+
+    const candidate = await tradeCandidateRepository.create({
+      analysisRunId: undefined,
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      instrument: "BTC",
+      direction: "BUY",
+      confidence: 0.8,
+      entryPrice: 64_948.33,
+      stopLoss: 60_000,
+      takeProfit: 70_000,
+      riskReward: 2,
+      reasoning: ["seed"],
+      validationNotes: [],
+      expiresAt: "2026-01-02T00:00:00.000Z", // far in the future — never expires mid-test
+      execution: {
+        amount: 10,
+        sizingMode: "NOTIONAL",
+        marketContext: {
+          instrument: "BTC",
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          midPrice: 100.025,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          positionOpen: false,
+          strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+          recentCandles: [],
+          ema20: 110,
+          ema50: 100,
+          rsi14: 55,
+          atr14: 1.5,
+          volume: 120,
+          dailyHigh: 112,
+          dailyLow: 98,
+          volatility24h: 0.01,
+          marketSession: "Crypto Always Open",
+          trend: "Bullish",
+        },
+        marketDataSnapshot: {
+          instrument: "BTC",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          candles: [],
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          latestPrice: 100.025,
+          volume: 120,
+        },
+      },
+    });
+    await tradeCandidateRepository.transition(candidate.id, "PENDING", {
+      status: "APPROVED",
+      approvedAt: NOW.toISOString(),
+      approvedByUserId: "user-1",
+    });
+
+    // Simulates the exact crash-window state lifecycle-recovery.ts leaves behind: a genuinely
+    // ambiguous record, not yet correlated back to any candidate (candidateId omitted — this also
+    // proves candidate-lifecycle-repair.ts is never even reached for it this cycle).
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      candidateId: undefined,
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "NOTIONAL",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "EXECUTION_RECONCILIATION_REQUIRED",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    });
+
+    const broker = makeMockBroker([]);
+    const { runtime, clock, auditTrail } = makeRuntime({ broker, tradeCandidateRepository, lifecycleStore });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    // No crash, no uniqueness violation — the cycle completed successfully.
+    expect(runtime.getStatus().successfulRunCount).toBe(1);
+    expect(runtime.getStatus().failedRunCount).toBe(0);
+
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    const stillApproved = await tradeCandidateRepository.getById(candidate.id);
+    expect(stillApproved?.status).toBe("APPROVED");
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("APPROVED_CANDIDATE_EXECUTION_DEFERRED");
+    expect(events).not.toContain("DUPLICATE_LIFECYCLE_RECORD_DETECTED");
+    const deferred = (await auditTrail.getEvents()).find((e) => e.eventType === "APPROVED_CANDIDATE_EXECUTION_DEFERRED");
+    expect(deferred?.details.candidateId).toBe(candidate.id);
+
+    // The ambiguous record is left untouched this cycle — resolving it is lifecycle-recovery.ts's
+    // job (once it becomes stale enough), never reconciliation's or the approved-candidate loop's.
+    const stored = await lifecycleStore.getById("lifecycle-1");
+    expect(stored?.status).toBe("EXECUTION_RECONCILIATION_REQUIRED");
+    expect((await lifecycleStore.list()).length).toBe(1); // never a second record created
+
+    await runtime.stop();
   });
 });

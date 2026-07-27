@@ -82,3 +82,22 @@ export function brokersWithLiveRateSupport(): BrokerProvider[] {
     .filter((capabilities) => capabilities.canSupplyLiveRates)
     .map((capabilities) => capabilities.provider);
 }
+
+/** Restart-Resilient Autonomy Phase — AUTO_DEMO gate. A broker's capabilities "demonstrably prove"
+ * it is demo/paper/testnet only when EVERY runtime mode it could ever be selected under is one of
+ * those three — i.e. it declares no live-capable mode at all. Every broker in BROKER_CAPABILITIES
+ * today satisfies this trivially (there is no "live" RuntimeMode value anywhere in this codebase —
+ * see config.ts's own SUPPORTED_RUNTIME_MODES doc comment), but this is still checked explicitly,
+ * against the broker's own declared data, never assumed — a future broker capability that ever
+ * added a live-capable mode would immediately and correctly fail this check without any change
+ * needed here. Takes a plain `BrokerCapabilities` (not a `BrokerProvider` lookup) specifically so
+ * tests can exercise a synthetic, hypothetical "live-capable" broker without one needing to exist in
+ * BROKER_CAPABILITIES for real. */
+const DEMO_LIKE_RUNTIME_MODES: readonly RuntimeMode[] = ["demo", "paper", "testnet"];
+
+export function isAutoDemoEligible(capabilities: BrokerCapabilities): boolean {
+  return (
+    capabilities.supportedRuntimeModes.length > 0 &&
+    capabilities.supportedRuntimeModes.every((mode) => (DEMO_LIKE_RUNTIME_MODES as readonly string[]).includes(mode))
+  );
+}

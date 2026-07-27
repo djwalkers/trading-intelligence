@@ -84,6 +84,15 @@ export type MarketHoursPolicyType = (typeof SUPPORTED_MARKET_HOURS_POLICIES)[num
 export const SUPPORTED_RUNTIME_MODES = ["paper", "demo", "testnet"] as const;
 export type RuntimeMode = (typeof SUPPORTED_RUNTIME_MODES)[number];
 
+// Restart-Resilient Autonomy Phase. "AUTO_LIVE" exists as a type member (matching the shape the
+// mission itself specifies) but is deliberately rejected unconditionally at config-build time below
+// — see the ConfigError thrown right after this is parsed. There is no environment, flag, or
+// combination of settings anywhere in this codebase that can make AUTO_LIVE actually take effect;
+// it remains a reserved, structurally-present-but-functionally-disabled value until live trading is
+// separately implemented and reviewed.
+export const SUPPORTED_APPROVAL_MODES = ["MANUAL", "AUTO_DEMO", "AUTO_LIVE"] as const;
+export type ExecutionApprovalMode = (typeof SUPPORTED_APPROVAL_MODES)[number];
+
 const PRIVATE_KEY_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
@@ -247,6 +256,30 @@ export interface HermesExecutionConfig {
   hyperliquid: HyperliquidTestnetConfig;
   trading212: Trading212DemoConfig;
   etoro: EtoroDemoConfig;
+  /** Restart-Resilient Autonomy Phase. See ExecutionApprovalMode's own doc comment; defaults to
+   * "MANUAL" (today's existing, unchanged workflow). */
+  approvalMode: ExecutionApprovalMode;
+  /** Only consulted when approvalMode is "AUTO_DEMO" — the minimum MarketDecision.confidence a
+   * fresh BUY/SELL decision must have before it is auto-approved (never auto-executed directly;
+   * still goes through the exact same TradeCandidate persistence + execution path a human approval
+   * would). Defaults to 0.75. */
+  autoDemoMinConfidence: number;
+  /** Emergency manual kill switch (Phase 3 exit trigger) — when true, every reconciled open position
+   * is closed on the next cycle regardless of any other exit condition, and no new entry candidate
+   * is ever created while it remains true. Defaults to false. Deliberately env-driven (not a runtime
+   * API/toggle) so it can never be flipped by anything other than an operator editing configuration. */
+  killSwitchEnabled: boolean;
+  /** Optional maximum holding duration (ms) exit trigger — undefined means "no ceiling configured"
+   * (today's existing behaviour: a position is held indefinitely absent another exit trigger). */
+  maxHoldingDurationMs: number | undefined;
+  /** Restart-Resilient Autonomy Phase — crash-window recovery (deployment safety review). How long
+   * (ms) a lifecycle record may sit at DECISION_CREATED/APPROVED/EXECUTION_SUBMITTED/
+   * EXECUTION_RECONCILIATION_REQUIRED, measured from its own updatedAt, before the recovery sweep
+   * (runtime/lifecycle-recovery.ts) acts on it. Defaults to 5 minutes — comfortably longer than any
+   * single cycle's own broker round-trips (HTTP timeouts default to 10s; the scheduler interval
+   * defaults to 60s), so a record genuinely still mid-execution is never mistaken for abandoned,
+   * while still recovering promptly after a real crash. */
+  recoveryThresholdMs: number;
 }
 
 interface RawHermesExecutionEnv {
@@ -292,6 +325,11 @@ interface RawHermesExecutionEnv {
   ETORO_DEMO_TEST_INSTRUMENT: string | undefined;
   ETORO_DEMO_TEST_AMOUNT: string | undefined;
   ETORO_HTTP_TIMEOUT_MS: string | undefined;
+  HERMES_APPROVAL_MODE: string | undefined;
+  HERMES_AUTO_DEMO_MIN_CONFIDENCE: string | undefined;
+  HERMES_KILL_SWITCH_ENABLED: string | undefined;
+  HERMES_MAX_HOLDING_DURATION_MS: string | undefined;
+  HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: string | undefined;
 }
 
 const DEFAULT_PAPER_STARTING_CASH = 10_000;
@@ -340,7 +378,11 @@ const SYMBOL_PATTERN = /^[A-Z0-9._-]+$/;
 // Prototype V1 — Reliability Fix.
 const DEFAULT_ETORO_HTTP_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+const DEFAULT_LIFECYCLE_RECOVERY_THRESHOLD_MS = 5 * 60_000;
 const MIN_HTTP_TIMEOUT_MS = 1_000; // a floor, not a recommendation — see the field's own doc comment
+
+// Restart-Resilient Autonomy Phase.
+const DEFAULT_AUTO_DEMO_MIN_CONFIDENCE = 0.75;
 
 // Phase 2A — Real Historical Candles for Live Market Data.
 const DEFAULT_MARKET_TIMEFRAME: MarketTimeframe = "1h";
@@ -395,6 +437,11 @@ export function buildHermesExecutionConfig(
     ETORO_DEMO_TEST_INSTRUMENT: process.env.ETORO_DEMO_TEST_INSTRUMENT,
     ETORO_DEMO_TEST_AMOUNT: process.env.ETORO_DEMO_TEST_AMOUNT,
     ETORO_HTTP_TIMEOUT_MS: process.env.ETORO_HTTP_TIMEOUT_MS,
+    HERMES_APPROVAL_MODE: process.env.HERMES_APPROVAL_MODE,
+    HERMES_AUTO_DEMO_MIN_CONFIDENCE: process.env.HERMES_AUTO_DEMO_MIN_CONFIDENCE,
+    HERMES_KILL_SWITCH_ENABLED: process.env.HERMES_KILL_SWITCH_ENABLED,
+    HERMES_MAX_HOLDING_DURATION_MS: process.env.HERMES_MAX_HOLDING_DURATION_MS,
+    HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: process.env.HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS,
   },
 ): HermesExecutionConfig {
   const registryPath = env.HERMES_STRATEGY_REGISTRY_PATH
@@ -674,6 +721,47 @@ export function buildHermesExecutionConfig(
     }
   }
 
+  // Restart-Resilient Autonomy Phase. Same fail-closed convention as brokerProvider/marketDataProvider
+  // above: an unrecognised value throws immediately via parseEnum. AUTO_LIVE is a structurally valid
+  // enum member (matching ExecutionApprovalMode's own type) but is explicitly, unconditionally
+  // rejected right below — there is no environment or code path that can ever make it take effect.
+  const approvalMode = parseEnum(env.HERMES_APPROVAL_MODE, SUPPORTED_APPROVAL_MODES, "MANUAL");
+  if (approvalMode === "AUTO_LIVE") {
+    throw new ConfigError(
+      "HERMES_APPROVAL_MODE=AUTO_LIVE is not supported — live trading is not implemented anywhere in " +
+        "this codebase. Only MANUAL (the default) and AUTO_DEMO are currently valid.",
+    );
+  }
+
+  let autoDemoMinConfidence = DEFAULT_AUTO_DEMO_MIN_CONFIDENCE;
+  if (env.HERMES_AUTO_DEMO_MIN_CONFIDENCE !== undefined && env.HERMES_AUTO_DEMO_MIN_CONFIDENCE !== "") {
+    const parsed = Number(env.HERMES_AUTO_DEMO_MIN_CONFIDENCE);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+      throw new ConfigError(
+        `HERMES_AUTO_DEMO_MIN_CONFIDENCE must be a number between 0 and 1, received "${env.HERMES_AUTO_DEMO_MIN_CONFIDENCE}".`,
+      );
+    }
+    autoDemoMinConfidence = parsed;
+  }
+
+  const killSwitchEnabled = parseBoolean(env.HERMES_KILL_SWITCH_ENABLED, false);
+
+  let maxHoldingDurationMs: number | undefined;
+  if (env.HERMES_MAX_HOLDING_DURATION_MS !== undefined && env.HERMES_MAX_HOLDING_DURATION_MS !== "") {
+    maxHoldingDurationMs = parseInteger(env.HERMES_MAX_HOLDING_DURATION_MS, 0, { min: 1 });
+  }
+
+  // Deployment safety review (final hardening pass): a floor of 1ms let this be misconfigured to an
+  // effectively-zero threshold, causing lifecycle-recovery.ts to treat every pre-OPEN record as
+  // stale on the very next cycle — far too aggressive for a value meant to bound "how long a crash
+  // window may plausibly still be in flight." 60 seconds is the practical minimum for a single
+  // broker round-trip plus scheduler jitter; the 5-minute default is unchanged.
+  const recoveryThresholdMs = parseInteger(
+    env.HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS,
+    DEFAULT_LIFECYCLE_RECOVERY_THRESHOLD_MS,
+    { min: 60_000 },
+  );
+
   return {
     registryPath,
     executionMode,
@@ -731,6 +819,11 @@ export function buildHermesExecutionConfig(
       testAmount: etoroTestAmount,
       httpTimeoutMs: etoroHttpTimeoutMs,
     },
+    approvalMode,
+    autoDemoMinConfidence,
+    killSwitchEnabled,
+    maxHoldingDurationMs,
+    recoveryThresholdMs,
   };
 }
 

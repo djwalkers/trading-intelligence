@@ -2,7 +2,7 @@ import { logger } from "@/lib/logger/logger";
 import { buildMarketDecisionContext } from "../build-market-decision-context";
 import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, InternalStrategy, OrderSizingMode } from "../types";
-import type { BrokerProvider, MarketDataProviderType, RuntimeMode } from "../config";
+import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
 import { MarketDecisionEngine } from "../market-decision-engine";
 import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
@@ -14,18 +14,26 @@ import type { MarketDecisionContext } from "../market-decision-engine";
 import { buildAnalysisRecord } from "../analysis/build-analysis-record";
 import { categorizeAnalysisPersistenceError, type AnalysisRepository } from "../analysis/analysis-repository";
 import {
+  autoApproveTradeCandidate,
   createTradeCandidateForDecision,
   executeApprovedTradeCandidate,
   sweepExpiredCandidates,
 } from "../trade-approval/trade-candidate-service";
+import { checkForDuplicateEntry } from "../trade-approval/duplicate-prevention";
+import { repairCandidateForConfirmedLifecycle } from "../trade-approval/candidate-lifecycle-repair";
 import type { TradeCandidateRepository } from "../trade-approval/trade-candidate-repository";
 import type { TradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
 import { recordTradePerformanceForExecutedCandidate } from "../trade-performance/trade-performance-service";
 import type { TradePerformanceRepository } from "../trade-performance/trade-performance-repository";
+import { reconcileBrokerPosition } from "./position-reconciliation";
+import { recoverStaleLifecycleRecords } from "./lifecycle-recovery";
+import { evaluateExitTrigger, executeAutomaticExit } from "./exit-monitor";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
 import { assertValidRuntimeTransition, type TradingErrorSummary, type TradingRuntimeState, type TradingRuntimeStatus } from "./types";
+import { loadEnabledStrategies } from "../strategy-loader";
+import type { RegistryClient } from "../registry-client";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. AnalysisIntegrationDeps is
 // entirely optional and additive: when `deps.analysis` is undefined (the default for every
@@ -81,8 +89,19 @@ export interface TradingRuntimeDeps {
    * creates (see runCycleBody's own createTradeCandidateForDecision call) and forwarded to
    * PortfolioRiskEngine for every candidate it later executes. */
   orderSizingMode: OrderSizingMode;
+  /** Restart-Resilient Autonomy Phase. This broker's own provider name (e.g. "etoro-demo") —
+   * frozen onto every TradeLifecycleRecord this runtime creates/adopts. */
+  brokerProvider: string;
   portfolioRiskConfig: PortfolioRiskConfig;
   lifecycleService: TradeLifecycleService;
+  /** Restart-Resilient Autonomy Phase. The SAME store instance `lifecycleService` was constructed
+   * with, exposed directly here — required (not optional) since position-reconciliation.ts and
+   * duplicate-prevention.ts both need direct, service-transition-bypassing access (adopting an
+   * orphaned position inserts a record already at status OPEN, which TradeLifecycleService's own
+   * API has no path for — see position-reconciliation.ts's own doc comment). Mirrors
+   * RuntimeDependencies' own established "lifecycleStore alongside lifecycleService" precedent
+   * (runtime-config/runtime-dependency-factory.ts). */
+  lifecycleStore: TradeLifecycleStore;
   auditTrail: AuditTrail;
   marketHoursPolicy: MarketHoursPolicy;
   clock: SchedulerClock;
@@ -115,6 +134,38 @@ export interface TradingRuntimeDeps {
    * TradeLifecycleService itself doesn't expose a pass-through for" precedent (runtime-dependency-
    * factory.ts). Never written to by this runtime — only ever read from. */
   tradePerformance?: { lifecycleStore: TradeLifecycleStore; repository: TradePerformanceRepository };
+  /** Restart-Resilient Autonomy Phase — Phase 5 (AUTO_DEMO). Defaults' worth of behaviour lives in
+   * config.ts, not here — this runtime simply acts on whatever it's given, never re-deriving or
+   * defaulting it itself. "MANUAL" preserves this runtime's pre-existing behaviour exactly (every
+   * fresh BUY decision only ever creates a PENDING candidate). */
+  approvalMode: ExecutionApprovalMode;
+  /** Only consulted when approvalMode is "AUTO_DEMO". */
+  autoDemoMinConfidence: number;
+  /** Restart-Resilient Autonomy Phase — Phase 3 (emergency kill switch), hardened by a later safety
+   * review: when true, every reconciled open position is closed on this cycle regardless of any
+   * other exit condition, AND no exposure-increasing entry activity happens at all — no fresh BUY
+   * candidate is created, no candidate is AUTO_DEMO auto-approved, and no previously-APPROVED BUY
+   * candidate is executed (see runCycleBody's own doc comment for exactly where each of these three
+   * gates lives). Risk-reducing exits and closing SELL actions are never blocked by this flag. */
+  killSwitchEnabled: boolean;
+  /** Restart-Resilient Autonomy Phase — Phase 3 (optional max-holding-duration exit trigger).
+   * Undefined means "no ceiling configured" (this runtime's pre-existing behaviour: a position is
+   * held indefinitely absent another exit trigger). */
+  maxHoldingDurationMs?: number;
+  /** Restart-Resilient Autonomy Phase — Phase 3 (strategy-disabled exit trigger). Optional: when
+   * provided, re-checked fresh every cycle (never cached) to see whether `strategy` is still among
+   * the currently enabled set — undefined skips this specific check entirely (treated as "still
+   * enabled"), preserving every existing caller's behaviour that doesn't wire this up. */
+  registryClient?: RegistryClient;
+  /** Only consulted alongside `registryClient` above, mirroring HermesExecutionConfig's own
+   * demoExecutionModeEnabled semantics for the SAME strategy-loading call. */
+  demoExecutionModeEnabled?: boolean;
+  /** Restart-Resilient Autonomy Phase — crash-window recovery (deployment safety review). How long
+   * (ms), measured from a lifecycle record's own updatedAt, it may sit at DECISION_CREATED/
+   * APPROVED/EXECUTION_SUBMITTED/EXECUTION_RECONCILIATION_REQUIRED before the recovery sweep
+   * (runtime/lifecycle-recovery.ts, run at the top of every cycle — see runCycleBody) acts on it.
+   * See config.ts's own HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS for the production default. */
+  recoveryThresholdMs: number;
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -326,22 +377,46 @@ export class TradingRuntime {
   }
 
   /**
-   * Phase 3.5 — Trade Review & Approval. New flow: Analyse -> Decision -> Trade Candidate ->
-   * Persist -> Review UI -> Approved? -> Broker. Every cycle now does two, deliberately ordered,
-   * things:
+   * Restart-Resilient Autonomy Phase, reordered by a later safety review (the original sequence ran
+   * approved-candidate execution BEFORE reconciliation, which meant a BUY candidate approved before
+   * a restart could re-execute before this cycle ever asked the broker whether a position already
+   * existed — see position-reconciliation.ts's own top-of-file comment for the restart scenario
+   * this closes). Every cycle now does, in this order:
    *
-   * 1. Execute-approved-work: expire any stale candidates, then execute (via the existing,
-   *    unmodified runMarketDecisionCycleWithLifecycle, called from executeApprovedTradeCandidate)
-   *    any candidate a human already approved in some prior cycle. This is the ONLY place this
-   *    runtime ever calls the broker.
-   * 2. Decide-and-propose: build this cycle's own fresh MarketDecisionContext, evaluate it via the
-   *    existing, unmodified MarketDecisionEngine, and — for BUY/SELL only — persist a new PENDING
-   *    TradeCandidate. Never calls the risk engine or the broker for this new decision; a HOLD
-   *    creates nothing.
-   *
-   * MarketDecisionEngine, PortfolioRiskEngine, the broker, and TradeLifecycleService are all
-   * exactly as unmodified as they were before this phase — only WHEN they run changed (gated
-   * behind step 1's human-approval check instead of running automatically inside step 2).
+   * 0. Recover (crash-window recovery, deployment safety review): before reconciliation even runs,
+   *    sweep any DECISION_CREATED/APPROVED/EXECUTION_SUBMITTED/EXECUTION_RECONCILIATION_REQUIRED
+   *    lifecycle record left behind by a crash mid-execution — see runtime/lifecycle-recovery.ts's
+   *    own top-of-file comment for exactly why this cannot be deferred to reconciliation itself.
+   *    Runs on the very first cycle after a restart too — there is no separate "startup-only" path.
+   * 1. Reconcile (Phase 1): ask the broker's own live portfolio, never trust its in-memory
+   *    trackedPositions map alone, for whether the configured instrument already has an open
+   *    position. `currentPositionOpen`/`currentRecord` below are this cycle's own single, mutable
+   *    view of that truth — updated in place as exits/approved-candidate execution act on it, so
+   *    every later step in the SAME cycle sees the latest state without a second broker round-trip.
+   *    Immediately after a successful reconciliation, repair any TradeCandidate whose own status
+   *    fell out of sync with a now-confirmed-OPEN lifecycle record (candidate-lifecycle-repair.ts) —
+   *    never calls the broker, never re-runs risk checks.
+   * 2. Fail closed: any broker/ambiguity/duplicate-record failure from step 1 skips every remaining
+   *    step this cycle entirely (already-approved execution work is simply retried next cycle).
+   * 3. Evaluate the fresh decision once (buildMarketDecisionContext + MarketDecisionEngine.evaluate)
+   *    — needed immediately below for automatic-exit's own opposing-signal check, and reused again
+   *    later for new-entry gating; never recomputed a second time mid-cycle.
+   * 4. Automatic exit (Phase 3): if reconciliation shows an open position, evaluate stop-loss/
+   *    take-profit/opposing-signal/strategy-disabled/max-holding/kill-switch against FRESH data and
+   *    close immediately if triggered — never gated behind human approval, regardless of
+   *    approvalMode (closing is always a risk-reduction action, never blocked by the kill switch).
+   * 5. Execute previously-approved candidates (via the existing, unmodified
+   *    executeApprovedTradeCandidate): a SELL/close candidate always proceeds (risk reduction); a
+   *    BUY candidate only proceeds when `currentPositionOpen` is false AND killSwitchEnabled is
+   *    false — otherwise it is deliberately left APPROVED, untouched, for a later cycle (see
+   *    KILL_SWITCH_ENTRY_BLOCKED/APPROVED_CANDIDATE_EXECUTION_DEFERRED below).
+   * 6. Decide-and-propose: only when `currentPositionOpen` is false and the kill switch is off, a
+   *    fresh BUY decision is turned into a new PENDING TradeCandidate unless an equivalent one
+   *    already exists (Phase 6), then auto-approved immediately when approvalMode is AUTO_DEMO and
+   *    confidence clears the configured threshold (Phase 5) — through the EXACT SAME approve/
+   *    execute path a human uses, never a shortcut around risk/portfolio/audit stages. Gating
+   *    candidate creation itself behind the kill switch transitively blocks auto-approval too — a
+   *    candidate that is never created can never be auto-approved.
    */
   private async runCycleBody(trigger: "scheduled" | "manual"): Promise<TradingCycleOutcome> {
     await this.recordAudit("TRADING_CYCLE_STARTED", { trigger });
@@ -349,6 +424,104 @@ export class TradingRuntime {
     const executionRunId = this.executionRunId ?? "trading-runtime-unstarted";
     try {
       const now = this.deps.clock.now();
+
+      // Restart-Resilient Autonomy Phase — crash-window recovery (deployment safety review).
+      // Strictly before reconciliation: a stale pre-OPEN record left by a crash must be resolved
+      // (abandoned, correlated to a real position, or flagged ambiguous) before reconciliation's own
+      // duplicate/orphan-adoption checks ever run against it — see lifecycle-recovery.ts's own
+      // top-of-file comment.
+      await recoverStaleLifecycleRecords({
+        broker: this.deps.broker,
+        instrument: this.deps.instrument,
+        strategy: this.deps.strategy,
+        brokerProvider: this.deps.brokerProvider,
+        lifecycleStore: this.deps.lifecycleStore,
+        tradeCandidateRepository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        now,
+        recoveryThresholdMs: this.deps.recoveryThresholdMs,
+      });
+
+      // Restart-Resilient Autonomy Phase — Phase 1, reordered ahead of approved-candidate
+      // execution. THE truth this cycle uses for whether the configured instrument already has an
+      // open position — never buildMarketDecisionContext's own broker.getOpenPositions()-derived
+      // positionOpen alone (see position-reconciliation.ts's own top-of-file comment for why that
+      // can be wrong after a restart).
+      const reconciliation = await reconcileBrokerPosition({
+        broker: this.deps.broker,
+        instrument: this.deps.instrument,
+        strategy: this.deps.strategy,
+        brokerProvider: this.deps.brokerProvider,
+        sizingMode: this.deps.orderSizingMode,
+        lifecycleStore: this.deps.lifecycleStore,
+        tradeCandidateRepository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        now,
+      });
+
+      if (!reconciliation.ok) {
+        // Fail closed: BROKER_RECONCILIATION_FAILED (or a more specific reconciliation-failure
+        // event) was already emitted by reconcileBrokerPosition itself. Nothing else this cycle —
+        // not exits, not approved-candidate execution, not a fresh entry — is safe to evaluate
+        // without knowing the broker's own true state.
+        await sweepExpiredCandidates({
+          repository: this.deps.tradeCandidateRepository,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          strategyId: this.deps.strategy.strategyId,
+          instrument: this.deps.instrument,
+          now,
+        });
+        this.successfulRunCount += 1;
+        this.lastResult = {
+          decision: "HOLD",
+          candidateCreated: false,
+          instrument: this.deps.instrument,
+          executedCandidateIds: [],
+          reconciliationFailed: true,
+        };
+        this.lastRunCompletedAt = this.deps.clock.now().toISOString();
+        await this.recordAudit("TRADING_CYCLE_COMPLETED", {
+          decision: "HOLD",
+          candidateCreated: false,
+          executedCandidateIds: [],
+          reconciliationFailed: true,
+          reason: reconciliation.reason,
+        });
+        return {
+          kind: "completed",
+          result: {
+            decision: { action: "HOLD", confidence: 0, reasoning: [reconciliation.reason] },
+            candidateId: undefined,
+            executedCandidateIds: [],
+          },
+        };
+      }
+
+      // This cycle's own single, mutable view of "is a broker position (or an unresolved local
+      // record standing in for one) currently active" — seeded from reconciliation, then kept
+      // current as exits/approved-candidate execution act on it below, so every later gate in this
+      // same cycle sees the latest state without re-querying the broker.
+      let currentPositionOpen = reconciliation.positionOpen;
+      let currentRecord = reconciliation.record;
+
+      // Restart-Resilient Autonomy Phase — candidate/lifecycle repair (deployment safety review).
+      // Whenever reconciliation confirms an OPEN record (a fresh match, a CLOSE_FAILED retry-reopen,
+      // or a record the recovery sweep above just correlated), repair its own originating
+      // TradeCandidate if it fell out of sync (still APPROVED, or FAILED despite a confirmed
+      // position) — see candidate-lifecycle-repair.ts's own doc comment. A no-op when `currentRecord`
+      // has no candidateId (an orphan-adopted position) or its candidate is already consistent.
+      if (currentRecord) {
+        await repairCandidateForConfirmedLifecycle({
+          lifecycleRecord: currentRecord,
+          tradeCandidateRepository: this.deps.tradeCandidateRepository,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          now,
+        });
+      }
 
       await sweepExpiredCandidates({
         repository: this.deps.tradeCandidateRepository,
@@ -359,6 +532,71 @@ export class TradingRuntime {
         now,
       });
 
+      const { snapshot, context: rawContext } = await buildMarketDecisionContext(
+        this.deps.marketDataProvider,
+        this.deps.broker,
+        this.deps.instrument,
+        this.deps.strategy,
+      );
+      // Overrides buildMarketDecisionContext's own broker.getOpenPositions()-derived positionOpen —
+      // reconciliation.positionOpen is the only value this runtime trusts (see above).
+      const context: MarketDecisionContext = { ...rawContext, positionOpen: currentPositionOpen };
+      const decision = MarketDecisionEngine.evaluate(context);
+
+      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Unconditional, exactly
+      // as before this phase — best-effort/never-throws (see persistAnalysis's own doc comment).
+      const analysisRunId = await this.persistAnalysis({
+        kind: "success",
+        trigger,
+        snapshot,
+        context,
+        result: { decision, executed: false } as TradeLifecycleCycleResult,
+        runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
+      });
+
+      let exitTrigger: string | undefined;
+      let exitClosed: boolean | undefined;
+
+      if (currentPositionOpen && currentRecord) {
+        // Restart-Resilient Autonomy Phase — Phase 3. Automatic exits never require human approval
+        // in demo mode — closing an already-open position is always a risk-reduction action, never
+        // gated by the kill switch (which forces this trigger, never blocks it).
+        const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
+        const trigger2 = evaluateExitTrigger({
+          record: currentRecord,
+          freshBid: context.bid,
+          freshDecision: decision,
+          killSwitchEnabled: this.deps.killSwitchEnabled,
+          maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
+          strategyStillEnabled,
+          now,
+        });
+
+        if (trigger2) {
+          exitTrigger = trigger2;
+          const exitResult = await executeAutomaticExit({
+            broker: this.deps.broker,
+            record: currentRecord,
+            trigger: trigger2,
+            lifecycleService: this.deps.lifecycleService,
+            auditTrail: this.deps.auditTrail,
+            executionRunId,
+            now,
+          });
+          exitClosed = exitResult.closed;
+          if (exitClosed) {
+            currentPositionOpen = false;
+            currentRecord = undefined;
+          }
+        }
+      }
+
+      // Restart-Resilient Autonomy Phase — reordered ahead of a fresh decision's own entry gating
+      // (see this method's own top-of-file comment for why this now runs after reconciliation/exits
+      // rather than before them). A SELL/close candidate always proceeds — closing is always a
+      // risk-reduction action. A BUY candidate proceeds only when no broker position or unresolved
+      // lifecycle is currently active AND the kill switch is off; otherwise it is deliberately left
+      // APPROVED, untouched, to be reconsidered next cycle.
       const approvedCandidates = await this.deps.tradeCandidateRepository.list({
         status: "APPROVED",
         strategyId: this.deps.strategy.strategyId,
@@ -366,6 +604,23 @@ export class TradingRuntime {
       });
       const executedCandidateIds: string[] = [];
       for (const candidate of approvedCandidates) {
+        if (candidate.direction === "BUY") {
+          if (this.deps.killSwitchEnabled) {
+            await this.recordAudit("KILL_SWITCH_ENTRY_BLOCKED", {
+              context: "approved-candidate-execution",
+              candidateId: candidate.id,
+            });
+            continue;
+          }
+          if (currentPositionOpen) {
+            await this.recordAudit("APPROVED_CANDIDATE_EXECUTION_DEFERRED", {
+              candidateId: candidate.id,
+              reason: "A broker position or unresolved lifecycle record is already active for this strategy+instrument.",
+            });
+            continue;
+          }
+        }
+
         const outcome = await executeApprovedTradeCandidate({
           repository: this.deps.tradeCandidateRepository,
           broker: this.deps.broker,
@@ -382,8 +637,18 @@ export class TradingRuntime {
           },
           candidate,
           now,
+          brokerProvider: this.deps.brokerProvider,
         });
-        if (outcome.outcome === "executed") executedCandidateIds.push(candidate.id);
+        if (outcome.outcome === "executed") {
+          executedCandidateIds.push(candidate.id);
+          // Keep this cycle's own position-state view current for any later iteration/step.
+          if (candidate.direction === "BUY") {
+            currentPositionOpen = true;
+          } else {
+            currentPositionOpen = false;
+            currentRecord = undefined;
+          }
+        }
       }
 
       // Phase 4 — Trade Performance Engine. Strictly after execution work above has already fully
@@ -394,40 +659,84 @@ export class TradingRuntime {
         await this.persistTradePerformance(candidateId);
       }
 
-      const { snapshot, context } = await buildMarketDecisionContext(
-        this.deps.marketDataProvider,
-        this.deps.broker,
-        this.deps.instrument,
-        this.deps.strategy,
-      );
-      const decision = MarketDecisionEngine.evaluate(context);
+      let candidate: Awaited<ReturnType<typeof createTradeCandidateForDecision>>;
+      let duplicateEntrySuppressed = false;
+      let autoApproved = false;
 
-      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Persisted before the
-      // candidate below so a successful write's row id can be cross-referenced on the candidate as
-      // analysisRunId — best-effort/never-throws exactly as before (see persistAnalysis's own doc
-      // comment); a disabled or failed write simply means analysisRunId stays undefined.
-      const analysisRunId = await this.persistAnalysis({
-        kind: "success",
-        trigger,
-        snapshot,
-        context,
-        result: { decision, executed: false } as TradeLifecycleCycleResult,
-        runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
-      });
+      // Fresh entries are only ever considered when no position/unresolved lifecycle is currently
+      // active AND the kill switch is off — even immediately after an exit fired above, this same
+      // cycle never opens a new one; the NEXT cycle's own reconciliation will correctly see the
+      // position closed and permit an entry then.
+      if (decision.action === "BUY" && !currentPositionOpen) {
+        if (this.deps.killSwitchEnabled) {
+          await this.recordAudit("KILL_SWITCH_ENTRY_BLOCKED", { context: "fresh-candidate-creation" });
+        } else {
+          const duplicateCheck = await checkForDuplicateEntry({
+            tradeCandidateRepository: this.deps.tradeCandidateRepository,
+            lifecycleStore: this.deps.lifecycleStore,
+            strategyId: this.deps.strategy.strategyId,
+            instrument: this.deps.instrument,
+          });
 
-      const candidate = await createTradeCandidateForDecision({
-        repository: this.deps.tradeCandidateRepository,
-        auditTrail: this.deps.auditTrail,
-        executionRunId,
-        decision,
-        context,
-        marketDataSnapshot: snapshot,
-        amount: this.deps.amount,
-        sizingMode: this.deps.orderSizingMode,
-        analysisRunId,
-        now,
-        expiryMs: this.deps.tradeCandidateExpiryMs,
-      });
+          if (duplicateCheck.duplicate) {
+            duplicateEntrySuppressed = true;
+            await this.recordAudit("DUPLICATE_ENTRY_SUPPRESSED", { reason: duplicateCheck.reason });
+          } else {
+            candidate = await createTradeCandidateForDecision({
+              repository: this.deps.tradeCandidateRepository,
+              auditTrail: this.deps.auditTrail,
+              executionRunId,
+              decision,
+              context,
+              marketDataSnapshot: snapshot,
+              amount: this.deps.amount,
+              sizingMode: this.deps.orderSizingMode,
+              analysisRunId,
+              now,
+              expiryMs: this.deps.tradeCandidateExpiryMs,
+            });
+
+            // Restart-Resilient Autonomy Phase — Phase 5 (AUTO_DEMO). The candidate is ALREADY
+            // durably persisted as PENDING above before this ever runs — never the other way
+            // around. Never reached while the kill switch is on: the outer guard above already
+            // skips candidate creation entirely in that case, which transitively blocks
+            // auto-approval too (a candidate that was never created can never be auto-approved).
+            if (candidate && this.deps.approvalMode === "AUTO_DEMO" && candidate.confidence >= this.deps.autoDemoMinConfidence) {
+              const approvalOutcome = await autoApproveTradeCandidate({
+                repository: this.deps.tradeCandidateRepository,
+                auditTrail: this.deps.auditTrail,
+                executionRunId,
+                candidateId: candidate.id,
+                now,
+              });
+              autoApproved = approvalOutcome.outcome === "approved";
+            }
+          }
+        }
+      } else if (decision.action === "SELL" && currentPositionOpen) {
+        // Restart-Resilient Autonomy Phase — fallback preserving pre-existing behaviour for any
+        // broker/record combination Phase 3's automatic exit monitor could not act on this cycle:
+        // no reconciled TradeLifecycleRecord was available to evaluate at all (every broker besides
+        // eToro today — LocalPaperBroker/Trading212/Hyperliquid, and any test double built only
+        // against the plain PaperBroker interface), or an automatic close was attempted and failed
+        // (`exitClosed === false`, a fallback safety net for human review rather than leaving the
+        // position silently unmanaged). Never reached once nothing is left open (an automatic exit
+        // or an approved-candidate SELL already closed it this same cycle) — no candidate is
+        // created for a position that no longer exists.
+        candidate = await createTradeCandidateForDecision({
+          repository: this.deps.tradeCandidateRepository,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          decision,
+          context,
+          marketDataSnapshot: snapshot,
+          amount: this.deps.amount,
+          sizingMode: this.deps.orderSizingMode,
+          analysisRunId,
+          now,
+          expiryMs: this.deps.tradeCandidateExpiryMs,
+        });
+      }
 
       this.successfulRunCount += 1;
       this.lastResult = {
@@ -436,12 +745,22 @@ export class TradingRuntime {
         candidateId: candidate?.id,
         instrument: this.deps.instrument,
         executedCandidateIds,
+        positionOpen: currentPositionOpen,
+        exitTrigger,
+        exitClosed,
+        duplicateEntrySuppressed,
+        autoApproved,
       };
       this.lastRunCompletedAt = this.deps.clock.now().toISOString();
       await this.recordAudit("TRADING_CYCLE_COMPLETED", {
         decision: decision.action,
         candidateCreated: candidate !== undefined,
         executedCandidateIds,
+        positionOpen: currentPositionOpen,
+        exitTrigger,
+        exitClosed,
+        duplicateEntrySuppressed,
+        autoApproved,
       });
 
       return {
@@ -488,6 +807,36 @@ export class TradingRuntime {
    * cross-reference only; see trade-approval/types.ts's own doc comment on why a candidate's
    * durability never depends on this succeeding.
    */
+  /**
+   * Restart-Resilient Autonomy Phase — Phase 3 (strategy-disabled exit trigger). A fresh re-check
+   * against the strategy registry every cycle (never cached from startup) — `this.deps.strategy`
+   * itself is captured once, at construction, and never mutated, so relying on its own `.enabled`
+   * field alone would never notice a strategy disabled mid-run. A no-op (returns true) when
+   * `registryClient` isn't configured — every existing caller that doesn't wire this up keeps its
+   * exact current behaviour. A registry read failure fails OPEN for this specific check only
+   * (conservatively assumes still-enabled) rather than force-closing a position on a transient
+   * local filesystem error — every other exit trigger (stop-loss, take-profit, kill switch) remains
+   * fully active regardless.
+   */
+  private async isStrategyStillEnabled(executionRunId: string): Promise<boolean> {
+    if (!this.deps.registryClient) return true;
+    try {
+      const summary = await loadEnabledStrategies({
+        registryClient: this.deps.registryClient,
+        demoExecutionModeEnabled: this.deps.demoExecutionModeEnabled ?? false,
+        executionRunId,
+      });
+      return summary.strategies.some((s) => s.strategyId === this.deps.strategy.strategyId);
+    } catch (error) {
+      logger.error("Failed to re-check strategy enablement during exit monitoring — assuming still enabled", {
+        component: "hermes-execution",
+        strategyId: this.deps.strategy.strategyId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return true;
+    }
+  }
+
   private async persistAnalysis(
     outcome:
       | {
@@ -592,13 +941,35 @@ export class TradingRuntime {
     }
   }
 
+  /**
+   * Restart-Resilient Autonomy Phase — audit-durability hardening. JsonFileAuditTrail.record() can
+   * now throw on a genuine persistence failure (write failures must be observable — see that
+   * class's own doc comment) — deliberately caught and logged here, never left to propagate,
+   * because runCycleBody/attemptCycle's own documented contract ("runCycleBody never rejects" — see
+   * activeCyclePromise's own comment) depends on routine audit calls never crashing the scheduler
+   * loop. This is a DIFFERENT discipline from autoApproveTradeCandidate's own handling of its
+   * TRADE_CANDIDATE_AUTO_APPROVED write specifically: that one write is safety-critical enough that
+   * a durability failure must abort the approval (see that function's own doc comment) — every other
+   * audit event in this runtime is best-effort, matching persistAnalysis/persistTradePerformance's
+   * own "never propagate" convention.
+   */
   private async recordAudit(eventType: AuditEventType, details: Record<string, unknown>): Promise<void> {
-    await this.deps.auditTrail.record({
-      timestamp: this.deps.clock.now().toISOString(),
-      eventType,
-      executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-      instrument: this.deps.instrument,
-      details,
-    });
+    try {
+      await this.deps.auditTrail.record({
+        timestamp: this.deps.clock.now().toISOString(),
+        eventType,
+        executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
+        instrument: this.deps.instrument,
+        details,
+      });
+    } catch (error) {
+      logger.error("Failed to persist a trading-runtime audit event — the cycle's own outcome was unaffected", {
+        component: "hermes-execution",
+        executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
+        instrument: this.deps.instrument,
+        eventType,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }

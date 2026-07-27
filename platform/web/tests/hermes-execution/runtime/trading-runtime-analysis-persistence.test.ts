@@ -123,8 +123,9 @@ function makeRuntime(overrides: {
   const broker = makeMockBroker(overrides.openPositions ?? []);
   const clock = new ManualSchedulerClock(NOW);
   const auditTrail = new InMemoryAuditTrail();
+  const lifecycleStore = new InMemoryTradeLifecycleStore();
   const lifecycleService = new TradeLifecycleService({
-    store: new InMemoryTradeLifecycleStore(),
+    store: lifecycleStore,
     auditTrail,
     executionRunId: "test-run",
     now: () => clock.now(),
@@ -138,8 +139,10 @@ function makeRuntime(overrides: {
     instrument: "BTC",
     amount: 10,
     orderSizingMode: "UNITS",
+    brokerProvider: "etoro-demo",
     portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
     lifecycleService,
+    lifecycleStore,
     auditTrail,
     marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
     clock,
@@ -148,6 +151,10 @@ function makeRuntime(overrides: {
     analysis: overrides.analysis,
     tradeCandidateRepository: new InMemoryTradeCandidateRepository(),
     tradeCandidateExpiryMs: 20 * 60_000,
+    approvalMode: "MANUAL",
+    autoDemoMinConfidence: 0.75,
+    killSwitchEnabled: false,
+    recoveryThresholdMs: 5 * 60_000,
   });
 
   return { runtime, clock };
@@ -215,8 +222,9 @@ describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: neve
     const broker = makeMockBroker([]);
     const clock = new ManualSchedulerClock(NOW);
     const auditTrail = new InMemoryAuditTrail();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
     const lifecycleService = new TradeLifecycleService({
-      store: new InMemoryTradeLifecycleStore(),
+      store: lifecycleStore,
       auditTrail,
       executionRunId: "test-run",
       now: () => clock.now(),
@@ -228,8 +236,10 @@ describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: neve
       instrument: "BTC",
       amount: 10,
       orderSizingMode: "UNITS",
+      brokerProvider: "etoro-demo",
       portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
       lifecycleService,
+      lifecycleStore,
       auditTrail,
       marketHoursPolicy: new AlwaysOpenMarketHoursPolicy(),
       clock,
@@ -238,6 +248,10 @@ describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: neve
       analysis: makeAnalysisDeps(repository),
       tradeCandidateRepository,
       tradeCandidateExpiryMs: 20 * 60_000,
+      approvalMode: "MANUAL",
+      autoDemoMinConfidence: 0.75,
+      killSwitchEnabled: false,
+      recoveryThresholdMs: 5 * 60_000,
     });
     await runtime.start();
     const outcome = await runtime.runNow();

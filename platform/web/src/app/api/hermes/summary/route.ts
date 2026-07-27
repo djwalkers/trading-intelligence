@@ -7,6 +7,7 @@ import {
   deriveObservedRuntimeState,
   latestFailureOrWarning,
   listDecisions,
+  listUnreconciledClosures,
   sumRealisedPnlSinceLastStart,
 } from "@/lib/hermes-integration/audit-derivations";
 import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
@@ -75,6 +76,7 @@ export async function GET(request: NextRequest) {
     } | null = null;
     let latestDecision: ReturnType<typeof listDecisions>[number] | null = null;
     let recentFailure: ReturnType<typeof latestFailureOrWarning> = null;
+    let unreconciledClosures: ReturnType<typeof listUnreconciledClosures> = [];
 
     try {
       const auditLog = await readHermesRuntimeAuditLog();
@@ -99,6 +101,18 @@ export async function GET(request: NextRequest) {
         recentFailure = latestFailureOrWarning(auditLog.events);
         if (recentFailure) {
           warnings.push(`Most recent failure (${recentFailure.eventType} at ${recentFailure.timestamp}): ${recentFailure.message}`);
+        }
+
+        // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment
+        // safety review). A position that closed with no confirmed exit price/P&L is exactly the
+        // kind of thing this summary must never omit — never folded into `recentFailure` (that field
+        // is scoped to a single most-recent event; every unreconciled closure stays visible here).
+        unreconciledClosures = listUnreconciledClosures(auditLog.events);
+        if (unreconciledClosures.length > 0) {
+          warnings.push(
+            `${unreconciledClosures.length} position(s) closed with unknown exit price/P&L (CLOSED_UNRECONCILED) — ` +
+              `see unreconciledClosures for details.`,
+          );
         }
       } else {
         warnings.push("Trading runtime audit log is unavailable — runtime/decision history could not be read.");
@@ -128,6 +142,7 @@ export async function GET(request: NextRequest) {
       openPositionCount,
       latestDecision,
       recentFailure,
+      unreconciledClosures,
       warnings,
     });
   });

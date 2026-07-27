@@ -7,11 +7,48 @@ import {
 } from "@/lib/hermes-execution/trade-performance/calculate-trade-performance";
 import type { TradeLifecycleRecord } from "@/lib/hermes-execution/trade-lifecycle/types";
 import type { TradeCandidate } from "@/lib/hermes-execution/trade-approval/types";
+import type { MarketDataSnapshot } from "@/lib/hermes-execution/market-data/market-data-provider";
+import type { MarketDecisionContext } from "@/lib/hermes-execution/market-decision-engine";
+
+const MARKET_DATA_SNAPSHOT: MarketDataSnapshot = {
+  instrument: "BTC",
+  timestamp: "2026-01-01T00:00:00.000Z",
+  candles: [],
+  bid: 100,
+  ask: 100.05,
+  spread: 0.05,
+  latestPrice: 100.025,
+  volume: 120,
+};
+
+const INTELLIGENCE_SUMMARY: MarketDecisionContext = {
+  instrument: "BTC",
+  bid: 100,
+  ask: 100.05,
+  spread: 0.05,
+  midPrice: 100.025,
+  timestamp: "2026-01-01T00:00:00.000Z",
+  positionOpen: false,
+  strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+  recentCandles: [],
+  ema20: 110,
+  ema50: 100,
+  rsi14: 55,
+  atr14: 1.5,
+  volume: 120,
+  dailyHigh: 112,
+  dailyLow: 98,
+  volatility24h: 0.01,
+  marketSession: "Crypto Always Open",
+  trend: "Bullish",
+};
 
 function makeClosedRecord(overrides: Partial<TradeLifecycleRecord> = {}): TradeLifecycleRecord {
   return {
     id: "trade-lifecycle-1",
     strategyId: "DEMO-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
     symbol: "BTC",
     side: "BUY",
     quantity: 10,
@@ -19,37 +56,8 @@ function makeClosedRecord(overrides: Partial<TradeLifecycleRecord> = {}): TradeL
     decision: "BUY",
     confidence: 0.75,
     decisionReasons: ["EMA20 above EMA50"],
-    marketDataSnapshot: {
-      instrument: "BTC",
-      timestamp: "2026-01-01T00:00:00.000Z",
-      candles: [],
-      bid: 100,
-      ask: 100.05,
-      spread: 0.05,
-      latestPrice: 100.025,
-      volume: 120,
-    },
-    intelligenceSummary: {
-      instrument: "BTC",
-      bid: 100,
-      ask: 100.05,
-      spread: 0.05,
-      midPrice: 100.025,
-      timestamp: "2026-01-01T00:00:00.000Z",
-      positionOpen: false,
-      strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
-      recentCandles: [],
-      ema20: 110,
-      ema50: 100,
-      rsi14: 55,
-      atr14: 1.5,
-      volume: 120,
-      dailyHigh: 112,
-      dailyLow: 98,
-      volatility24h: 0.01,
-      marketSession: "Crypto Always Open",
-      trend: "Bullish",
-    },
+    marketDataSnapshot: MARKET_DATA_SNAPSHOT,
+    intelligenceSummary: INTELLIGENCE_SUMMARY,
     status: "CLOSED",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T01:00:00.000Z",
@@ -90,8 +98,8 @@ function makeOpeningCandidate(overrides: Partial<TradeCandidate> = {}): TradeCan
     execution: {
       amount: 10,
       sizingMode: "UNITS",
-      marketContext: makeClosedRecord().intelligenceSummary,
-      marketDataSnapshot: makeClosedRecord().marketDataSnapshot,
+      marketContext: INTELLIGENCE_SUMMARY,
+      marketDataSnapshot: MARKET_DATA_SNAPSHOT,
     },
     ...overrides,
   };

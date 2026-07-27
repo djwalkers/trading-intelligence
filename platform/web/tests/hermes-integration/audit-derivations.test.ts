@@ -3,6 +3,7 @@ import {
   deriveObservedRuntimeState,
   latestFailureOrWarning,
   listDecisions,
+  listUnreconciledClosures,
   sumRealisedPnlSinceLastStart,
 } from "@/lib/hermes-integration/audit-derivations";
 import type { AuditEvent, AuditEventType } from "@/lib/hermes-execution/types";
@@ -239,5 +240,63 @@ describe("listDecisions", () => {
       }),
     );
     expect(listDecisions(events, { limit: 2 })).toHaveLength(2);
+  });
+});
+
+// Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
+// review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics").
+describe("listUnreconciledClosures", () => {
+  it("returns an empty list when no BROKER_RECONCILIATION_MISMATCH event exists", () => {
+    expect(listUnreconciledClosures([])).toEqual([]);
+  });
+
+  it("extracts only the 'reconciled-closed-unreconciled' resolution, not 'failed-closed'", () => {
+    const events = [
+      event("BROKER_RECONCILIATION_MISMATCH", {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        instrument: "BTC",
+        strategyId: "DEMO-0001",
+        details: { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" },
+      }),
+      event("BROKER_RECONCILIATION_MISMATCH", {
+        timestamp: "2026-01-01T01:00:00.000Z",
+        instrument: "ETH",
+        details: { resolution: "failed-closed", lifecycleRecordId: "lifecycle-2" },
+      }),
+    ];
+    const result = listUnreconciledClosures(events);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      timestamp: "2026-01-01T00:00:00.000Z",
+      instrument: "BTC",
+      strategyId: "DEMO-0001",
+      lifecycleRecordId: "lifecycle-1",
+    });
+  });
+
+  it("never resets across a runtime restart — not scoped to 'since last start', unlike other derivations", () => {
+    const events = [
+      event("BROKER_RECONCILIATION_MISMATCH", {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        instrument: "BTC",
+        details: { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" },
+      }),
+      event("TRADING_RUNTIME_STARTED", { timestamp: "2026-01-02T00:00:00.000Z" }),
+    ];
+    expect(listUnreconciledClosures(events)).toHaveLength(1);
+  });
+
+  it("returns multiple closures in file order", () => {
+    const events = [
+      event("BROKER_RECONCILIATION_MISMATCH", {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        details: { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" },
+      }),
+      event("BROKER_RECONCILIATION_MISMATCH", {
+        timestamp: "2026-01-02T00:00:00.000Z",
+        details: { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-2" },
+      }),
+    ];
+    expect(listUnreconciledClosures(events).map((c) => c.lifecycleRecordId)).toEqual(["lifecycle-1", "lifecycle-2"]);
   });
 });

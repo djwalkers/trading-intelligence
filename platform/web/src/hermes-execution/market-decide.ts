@@ -226,6 +226,7 @@ export async function main(): Promise<void> {
     marketContext: firstContext,
     amount: config.etoro.testAmount,
     orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
+    brokerProvider: "etoro-demo",
     // brokerAvailable: true — the connect() + resolveInstrument() calls above already succeeded,
     // so the broker is known-reachable at this point in the cycle. dailyTradeCount: this run's own
     // completed-trade count so far — this demo CLI has no persistent cross-run trade counter.
@@ -267,6 +268,7 @@ export async function main(): Promise<void> {
       marketContext: secondContext,
       amount: config.etoro.testAmount,
       orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
+      brokerProvider: "etoro-demo",
       portfolioRisk: {
         config: PORTFOLIO_RISK_CONFIG,
         dailyTradeCount: broker.getCompletedTrades().length,
