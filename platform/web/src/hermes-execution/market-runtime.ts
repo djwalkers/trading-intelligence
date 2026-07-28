@@ -3,11 +3,13 @@ import { HERMES_RUNTIME_AUDIT_LOG_PATH } from "@/lib/hermes-execution/audit-log-
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-clock";
 import { TradingRuntime, type AnalysisIntegrationDeps } from "@/lib/hermes-execution/runtime/trading-runtime";
-import { buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
+import { buildHermesRuntimeWiring, buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
 import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
 import { TelegramAlertingAuditTrail, type AlertSender } from "@/lib/hermes-execution/telegram/telegram-alerting-audit-trail";
 import { TelegramBot } from "@/lib/hermes-execution/telegram/telegram-bot";
 import { HttpTelegramTransport } from "@/lib/hermes-execution/telegram/telegram-transport";
+import { HermesGatewayAlertSender } from "@/lib/hermes-execution/telegram/hermes-gateway-alert-sender";
+import { ChildProcessHermesCliRunner } from "@/lib/hermes-execution/hermes-agent/hermes-cli-runner";
 import type { AuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { buildAnalysisPersistenceConfig } from "@/lib/hermes-execution/analysis/analysis-persistence-config";
@@ -163,14 +165,29 @@ export async function main(): Promise<void> {
   let auditTrail: AuditTrail = baseAuditTrail;
   let telegramTransport: HttpTelegramTransport | undefined;
   if (config.telegram.enabled) {
-    // config.ts fails closed at config-build time whenever telegram.enabled is true — botToken and
-    // allowedChatId are therefore always present here.
+    // config.ts fails closed at config-build time whenever telegram.enabled is true — botToken is
+    // therefore always present here. Still needed for the interactive command bot below (/status
+    // /positions /trades ...), which is a genuinely different, two-way capability that requires the
+    // real Telegram Bot API's own long-polling — untouched by the gateway change right below.
     const botToken = config.telegram.botToken as string;
-    const allowedChatId = config.telegram.allowedChatId as string;
     telegramTransport = new HttpTelegramTransport(botToken);
-    const alertSender: AlertSender = { sendAlert: (text) => telegramTransport!.sendMessage(allowedChatId, text) };
+
+    // Prototype 1.0 — Hermes Telegram gateway bridge. Outbound EVENT alerts (trade opened/closed,
+    // automatic exits, Hermes proposals, ...) are routed through the already-proven, already-
+    // configured Hermes Agent gateway (`hermes send`) — never a second, direct Telegram Bot API
+    // call for this path (see hermes-gateway-alert-sender.ts's own doc comment). Reuses
+    // config.hermesAgent's own cliPath/telegramTarget/telegramSendTimeoutMs — this app holds no
+    // separate gateway credential of its own.
+    const alertSender: AlertSender = new HermesGatewayAlertSender(
+      {
+        cliPath: config.hermesAgent.cliPath,
+        telegramTarget: config.hermesAgent.telegramTarget,
+        sendTimeoutMs: config.hermesAgent.telegramSendTimeoutMs,
+      },
+      new ChildProcessHermesCliRunner(),
+    );
     auditTrail = new TelegramAlertingAuditTrail(baseAuditTrail, alertSender);
-    console.log("Telegram alerts enabled.");
+    console.log(`Telegram alerts enabled — outbound notifications routed through the Hermes gateway (target: ${config.hermesAgent.telegramTarget}).`);
   }
 
   // Restart-Resilient Autonomy Phase — Phase 2. Required, not optional — see
@@ -214,6 +231,22 @@ export async function main(): Promise<void> {
   console.log("------------------------------------------------------");
   console.log(JSON.stringify(summary, null, 2));
 
+  // Prototype 1.0 — official Hermes Agent multi-instrument wiring. Shapes exactly the
+  // TradingRuntimeDeps.instrument/instruments/universeScan fields for whichever path the SELECTED
+  // strategy actually takes — see buildHermesRuntimeWiring's own doc comment. Startup visibility
+  // here is deliberately explicit about decision provider/instrument universe/CLI path, never a
+  // credential: `summary.decisionProvider`/`summary.universeScanEnabled` already redact everything
+  // that needs redacting (see startup-summary.ts).
+  const hermesWiring = buildHermesRuntimeWiring(deps);
+  console.log(`Decision provider: ${summary.decisionProvider}`);
+  console.log(
+    hermesWiring.universeScan
+      ? `Multi-instrument Hermes universe scanning ENABLED — instrument universe: ${hermesWiring.instruments!.join(", ")} ` +
+          `(Hermes CLI: ${summary.hermesCliPath}).`
+      : `Multi-instrument Hermes universe scanning disabled — running the single-instrument path for ${hermesWiring.instrument} ` +
+          `(configured instrument universe ${JSON.stringify(summary.instrumentUniverse)} is only used by the official Hermes Agent strategy).`,
+  );
+
   // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Optional — see
   // buildAnalysisIntegrationDeps's own doc comment for exactly when this is undefined.
   const analysis = buildAnalysisIntegrationDeps(config);
@@ -251,6 +284,7 @@ export async function main(): Promise<void> {
   const registryClient = config.registryPath ? new FileSystemRegistryClient(config.registryPath) : undefined;
 
   console.log(`Approval mode: ${config.approvalMode}`);
+  console.log(`Kill switch: ${config.killSwitchEnabled ? "ENABLED" : "disabled"}`);
   if (config.killSwitchEnabled) {
     console.log("KILL SWITCH ENABLED — every reconciled open position will be closed automatically this run.");
   }
@@ -287,7 +321,9 @@ export async function main(): Promise<void> {
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
     strategy: deps.strategy,
-    instrument: deps.symbol,
+    instrument: hermesWiring.instrument,
+    instruments: hermesWiring.instruments,
+    universeScan: hermesWiring.universeScan,
     amount: deps.quantity,
     orderSizingMode: deps.orderSizingMode,
     brokerProvider: config.brokerProvider,

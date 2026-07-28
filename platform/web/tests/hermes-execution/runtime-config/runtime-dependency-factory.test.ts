@@ -1,13 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
+import { buildHermesRuntimeWiring, buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
 import { buildHermesExecutionConfig } from "@/lib/hermes-execution/config";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import { LocalPaperBroker } from "@/lib/hermes-execution/paper-broker";
 import { MockMarketDataProvider } from "@/lib/hermes-execution/market-data/mock-market-data-provider";
 import { AlwaysOpenMarketHoursPolicy } from "@/lib/hermes-execution/runtime/market-hours-policy";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
+import { HermesAgentStrategy } from "@/lib/hermes-execution/hermes-agent/hermes-agent-strategy";
+import { hermesAgentStrategy as sharedHermesAgentStrategy } from "@/lib/hermes-execution/strategies/default-strategy-registry";
+import { InMemoryStrategyRegistry } from "@/lib/hermes-execution/strategies/strategy-registry";
+import { ChildProcessHermesCliRunner } from "@/lib/hermes-execution/hermes-agent/hermes-cli-runner";
 
 // Every test in this file exercises only BROKER_PROVIDER=local — zero network I/O
 // (LocalPaperBroker touches only the local filesystem via JsonFilePaperBrokerStore, cleaned up
@@ -16,6 +20,7 @@ import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-
 
 const FIXTURES_DIR = path.join(process.cwd(), "tests", "hermes-execution", "fixtures");
 const VALID_REGISTRY = path.join(FIXTURES_DIR, "registry-valid");
+const EMPTY_REGISTRY = path.join(FIXTURES_DIR, "registry-empty-but-connected");
 
 const EMPTY = {
   HERMES_STRATEGY_REGISTRY_PATH: undefined,
@@ -222,6 +227,213 @@ describe("buildRuntimeDependencies — unknown strategy", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.problems.some((p) => p.field === "strategyId")).toBe(true);
+  });
+});
+
+// Prototype 1.0 — official Hermes Agent multi-instrument wiring. Proves the factory's own
+// HERMES-AGENT-specific resolution/fail-closed logic in runtime-dependency-factory.ts — never the
+// real Hermes CLI, broker network, Telegram, or Supabase (BROKER_PROVIDER stays "local" throughout,
+// and constructing a ChildProcessHermesCliRunner never spawns anything by itself — only calling
+// .run() would, which none of these tests do).
+describe("buildRuntimeDependencies — Hermes Agent multi-instrument bundle", () => {
+  it("wires the hermes bundle with the default six-instrument universe when HERMES-AGENT is selected", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY });
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dependencies.strategy.strategyId).toBe("HERMES-AGENT");
+    expect(result.dependencies.hermes).toBeDefined();
+    expect(result.dependencies.hermes?.instrumentUniverse).toEqual(["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"]);
+    expect(result.dependencies.hermes?.hermesCliRunner).toBeInstanceOf(ChildProcessHermesCliRunner);
+  });
+
+  it("passes the EXACT shared HermesAgentStrategy singleton MarketDecisionEngine itself resolves — never a separate new instance", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY });
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dependencies.hermes?.strategyInstance).toBe(sharedHermesAgentStrategy);
+  });
+
+  it("leaves `hermes` undefined for DEMO-0001 — the existing single-instrument path is untouched", async () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY,
+      HERMES_STRATEGY_ID: "DEMO-0001",
+      DEMO_EXECUTION_MODE: "true",
+    });
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dependencies.strategy.strategyId).toBe("DEMO-0001");
+    expect(result.dependencies.hermes).toBeUndefined();
+  });
+
+  it("leaves `hermes` undefined for a real registry (HERMES_APPROVED) strategy too", async () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_STRATEGY_REGISTRY_PATH: VALID_REGISTRY,
+      HERMES_STRATEGY_ID: "STRAT-0001",
+    });
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dependencies.hermes).toBeUndefined();
+  });
+
+  it("fails startup closed when the registered strategy under HERMES-AGENT is not actually a HermesAgentStrategy", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY });
+    // A registry deliberately mis-registered with an incompatible Strategy implementation under
+    // the official Hermes Agent's own id — proves the factory verifies the ACTUAL registered
+    // instance rather than merely trusting the strategyId string.
+    const incompatibleRegistry = new InMemoryStrategyRegistry();
+    const { Demo0001Strategy } = await import("@/lib/hermes-execution/strategies/demo-0001-strategy");
+    const incompatible = new Demo0001Strategy();
+    Object.defineProperty(incompatible, "id", { value: "HERMES-AGENT" });
+    incompatibleRegistry.register(incompatible);
+
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+      strategyRegistryOverride: incompatibleRegistry,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.some((p) => p.field === "hermesAgentStrategy")).toBe(true);
+  });
+
+  it("fails startup closed when HERMES-AGENT is selected but the registry has no entry at all for it", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY });
+    const emptyRegistry = new InMemoryStrategyRegistry();
+
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+      strategyRegistryOverride: emptyRegistry,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.some((p) => p.field === "hermesAgentStrategy")).toBe(true);
+  });
+
+  it("fails startup closed when the configured instrument universe is empty", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: EMPTY_REGISTRY });
+    // buildHermesExecutionConfig itself always falls back to the default six-instrument universe
+    // for an empty/unset HERMES_INSTRUMENT_UNIVERSE — an empty universe is unreachable via the real
+    // builder, so this hand-constructs a HermesExecutionConfig-shaped object bypassing it, the same
+    // pattern startup-summary.test.ts's own "areBrokerCredentialsConfigured: false" test uses.
+    const tamperedConfig = { ...config, hermesAgent: { ...config.hermesAgent, instrumentUniverse: [] } };
+
+    const result = await buildRuntimeDependencies({
+      config: tamperedConfig,
+      auditTrail: new InMemoryAuditTrail(),
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.some((p) => p.field === "hermesAgent.instrumentUniverse")).toBe(true);
+  });
+});
+
+// Prototype 1.0 — official Hermes Agent multi-instrument wiring. buildHermesRuntimeWiring is a
+// PURE function (no I/O) — these tests construct a plain RuntimeDependencies-shaped fixture
+// directly rather than going through the whole factory, so they can cheaply cover every branch.
+describe("buildHermesRuntimeWiring — Hermes multi-instrument mode", () => {
+  const PORTFOLIO_RISK = { portfolioMaxOpenPositions: 5, maxDailyTrades: 20, maxPortfolioExposure: 1_000_000 };
+  const marketHoursPolicy = new AlwaysOpenMarketHoursPolicy();
+
+  function makeHermesDependencies(instrumentUniverse: string[]) {
+    return {
+      strategy: { strategyId: "HERMES-AGENT" } as never,
+      broker: {} as never,
+      marketDataProvider: {} as never,
+      marketHoursPolicy,
+      lifecycleService: {} as never,
+      lifecycleStore: {} as never,
+      symbol: "BTC",
+      quantity: 10,
+      orderSizingMode: "UNITS" as const,
+      portfolioRiskConfig: PORTFOLIO_RISK,
+      hermes: {
+        strategyInstance: sharedHermesAgentStrategy,
+        instrumentUniverse,
+        hermesAdapterConfig: { cliPath: "/home/andy/.local/bin/hermes", decisionTimeoutMs: 60_000, maxStdoutBytes: 65_536 },
+        hermesCliRunner: new ChildProcessHermesCliRunner(),
+        maxProposalsPerScan: 2,
+      },
+    };
+  }
+
+  it("wires all six configured instruments, with the first as the primary instrument", () => {
+    const dependencies = makeHermesDependencies(["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"]);
+    const wiring = buildHermesRuntimeWiring(dependencies);
+    expect(wiring.instruments).toEqual(["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"]);
+    expect(wiring.instrument).toBe("BTC");
+  });
+
+  it("passes exactly one universeScan dependency bundle, never more than one", () => {
+    const dependencies = makeHermesDependencies(["BTC", "ETH"]);
+    const wiring = buildHermesRuntimeWiring(dependencies);
+    expect(wiring.universeScan).toBeDefined();
+    expect(Object.keys(wiring)).toEqual(["instrument", "instruments", "universeScan"]);
+    expect(Array.isArray(wiring.universeScan)).toBe(false);
+  });
+
+  it("the scanner receives the exact same HermesAgentStrategy object the decision engine resolves", () => {
+    const dependencies = makeHermesDependencies(["BTC", "ETH"]);
+    const wiring = buildHermesRuntimeWiring(dependencies);
+    expect(wiring.universeScan?.hermesAgentStrategy).toBe(sharedHermesAgentStrategy);
+    expect(wiring.universeScan?.hermesAgentStrategy).toBe(dependencies.hermes.strategyInstance);
+  });
+
+  it("reuses the caller's own broker/lifecycle store/market-hours policy — never constructs a second one", () => {
+    const dependencies = makeHermesDependencies(["BTC", "ETH"]);
+    const wiring = buildHermesRuntimeWiring(dependencies);
+    // buildHermesRuntimeWiring's own return shape has no broker/repository/lifecycle-store field at
+    // all — it only ever shapes instrument/instruments/universeScan, structurally guaranteeing it
+    // cannot introduce a second one. The one MarketHoursPolicy it does touch is reused as-is.
+    expect(wiring.universeScan?.equityMarketHoursPolicy).toBe(dependencies.marketHoursPolicy);
+    expect(wiring.universeScan?.maxOpenPositions).toBe(dependencies.portfolioRiskConfig.portfolioMaxOpenPositions);
+  });
+
+  it("returns instruments/universeScan both undefined, and the configured symbol as instrument, when `hermes` is absent (DEMO-0001)", () => {
+    const dependencies = { ...makeHermesDependencies(["BTC", "ETH"]), hermes: undefined };
+    const wiring = buildHermesRuntimeWiring(dependencies);
+    expect(wiring.instruments).toBeUndefined();
+    expect(wiring.universeScan).toBeUndefined();
+    expect(wiring.instrument).toBe("BTC");
   });
 });
 

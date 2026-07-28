@@ -99,6 +99,9 @@ describe("buildRedactedStartupSummary — shape", () => {
       marketHoursPolicy: "always-open",
       marketHoursTimezone: "America/New_York",
       telegramConfigured: false,
+      instrumentUniverse: ["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"],
+      universeScanEnabled: false,
+      hermesCliPath: "/home/andy/.local/bin/hermes",
     });
   });
 
@@ -157,6 +160,34 @@ describe("buildRedactedStartupSummary — decisionProvider", () => {
     const config = buildHermesExecutionConfig(EMPTY);
     const summary = buildRedactedStartupSummary(config, STRATEGY);
     expect(summary.decisionProvider).toBe("OTHER");
+  });
+});
+
+// Prototype 1.0 — official Hermes Agent multi-instrument wiring. market-runtime.ts's own decision
+// to configure TradingRuntimeDeps.instruments/universeScan hinges entirely on which strategy is
+// selected — these tests prove the redacted startup summary accurately reports that same mode,
+// distinctly from decisionProvider (which only ever describes the strategy, never the scan mode).
+describe("buildRedactedStartupSummary — Hermes multi-instrument mode visibility", () => {
+  it("reports universeScanEnabled: true and the configured instrument universe for the official Hermes Agent strategy", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_INSTRUMENT_UNIVERSE: "BTC,ETH,SOL" });
+    const summary = buildRedactedStartupSummary(config, getHermesAgentInternalStrategy());
+    expect(summary.universeScanEnabled).toBe(true);
+    expect(summary.instrumentUniverse).toEqual(["BTC", "ETH", "SOL"]);
+    expect(summary.hermesCliPath).toBe("/home/andy/.local/bin/hermes");
+  });
+
+  it("reports universeScanEnabled: false for DEMO-0001, even though instrumentUniverse/hermesCliPath remain visible (plain configuration, not credentials)", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_INSTRUMENT_UNIVERSE: "BTC,ETH,SOL" });
+    const demoStrategy = getDemoStrategy(true);
+    const summary = buildRedactedStartupSummary(config, demoStrategy!);
+    expect(summary.universeScanEnabled).toBe(false);
+    expect(summary.instrumentUniverse).toEqual(["BTC", "ETH", "SOL"]);
+  });
+
+  it("reports universeScanEnabled: false for any other (non-Hermes-Agent) strategy", () => {
+    const config = buildHermesExecutionConfig(EMPTY);
+    const summary = buildRedactedStartupSummary(config, STRATEGY);
+    expect(summary.universeScanEnabled).toBe(false);
   });
 });
 

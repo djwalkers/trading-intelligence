@@ -15,6 +15,12 @@ import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
 import type { Candle, InternalStrategy, OrderSizingMode } from "../types";
 import { BROKER_CAPABILITIES } from "./broker-capabilities";
 import { validateStartup, type StartupValidationProblem } from "./startup-validation";
+import { HERMES_AGENT_STRATEGY_ID, HermesAgentStrategy } from "../hermes-agent/hermes-agent-strategy";
+import { defaultStrategyRegistry } from "../strategies/default-strategy-registry";
+import type { StrategyRegistry } from "../strategies/strategy-registry";
+import { ChildProcessHermesCliRunner, type HermesCliRunner } from "../hermes-agent/hermes-cli-runner";
+import type { HermesAgentAdapterConfig } from "../hermes-agent/hermes-agent-adapter";
+import type { TradingRuntimeUniverseScanDeps } from "../runtime/trading-runtime";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. THE single dependency-construction layer —
 // used by both market:runtime and (via an override, see BuildRuntimeDependenciesOptions below)
@@ -39,6 +45,25 @@ interface RateSourceBroker {
   getHistoricalCandles(instrument: string, timeframe: string, count: number): Promise<Candle[]>;
 }
 
+/** Prototype 1.0 — official Hermes Agent multi-instrument wiring. Only the pieces market-runtime.ts
+ * cannot already assemble itself from `config`/other RuntimeDependencies fields — `maxOpenPositions`
+ * (portfolio-wide) and `maxOpenPositionsPerInstrument` are deliberately NOT here: they belong to
+ * the caller's own portfolio-risk configuration and a fixed mission-level invariant respectively,
+ * not to this factory (see market-runtime.ts's own TradingRuntimeUniverseScanDeps assembly). */
+export interface HermesMultiInstrumentDependencies {
+  /** THE exact shared HermesAgentStrategy singleton instance MarketDecisionEngine's own default
+   * registry (defaultStrategyRegistry, strategies/default-strategy-registry.ts) resolves for
+   * HERMES_AGENT_STRATEGY_ID — verified here (via defaultStrategyRegistry.require + an instanceof
+   * check), never merely assumed from the module import graph alone. Passing this exact object as
+   * TradingRuntimeUniverseScanDeps.hermesAgentStrategy is what guarantees the universe scanner's own
+   * setScanProposals() calls land on the SAME instance MarketDecisionEngine.evaluate() reads from. */
+  strategyInstance: HermesAgentStrategy;
+  instrumentUniverse: string[];
+  hermesAdapterConfig: HermesAgentAdapterConfig;
+  hermesCliRunner: HermesCliRunner;
+  maxProposalsPerScan: number;
+}
+
 export interface RuntimeDependencies {
   strategy: InternalStrategy;
   broker: PaperBroker;
@@ -58,6 +83,14 @@ export interface RuntimeDependencies {
    * instead of re-deriving it from `brokerProvider` itself. */
   orderSizingMode: OrderSizingMode;
   portfolioRiskConfig: PortfolioRiskConfig;
+  /** Prototype 1.0 — official Hermes Agent multi-instrument wiring. Present if and only if the
+   * selected strategy (`strategy.strategyId`) is the official Hermes Agent — undefined for every
+   * other strategy (e.g. DEMO-0001), which preserves the existing single-instrument runtime path
+   * exactly (market-runtime.ts only configures TradingRuntimeDeps.instruments/universeScan when
+   * this is present). Startup fails closed (see buildRuntimeDependencies below) rather than leaving
+   * this undefined by accident whenever HERMES-AGENT is selected but something about the Hermes
+   * wiring cannot be safely constructed. */
+  hermes?: HermesMultiInstrumentDependencies;
 }
 
 export type BuildRuntimeDependenciesResult =
@@ -87,6 +120,12 @@ export interface BuildRuntimeDependenciesOptions {
    * runtime) passes a SupabaseTradeLifecycleStore here instead — see that file's own doc comment on
    * why it fails closed rather than silently falling back to memory when Supabase isn't configured. */
   lifecycleStoreOverride?: TradeLifecycleStore;
+  /** Prototype 1.0 — official Hermes Agent multi-instrument wiring. Test-only escape hatch —
+   * defaults to the real `defaultStrategyRegistry` (strategies/default-strategy-registry.ts), the
+   * SAME registry MarketDecisionEngine.evaluate() itself resolves against by default. Production
+   * code never passes this; tests use it to exercise the "registered strategy is not actually a
+   * HermesAgentStrategy" fail-closed path without needing to modify the real shared registry. */
+  strategyRegistryOverride?: StrategyRegistry;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -188,6 +227,81 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
     executionRunId: options.executionRunId,
   });
 
+  // Prototype 1.0 — official Hermes Agent multi-instrument wiring. Only ever attempted when the
+  // official Hermes Agent is the SELECTED strategy — every other strategy (e.g. DEMO-0001) leaves
+  // `hermes` undefined, preserving the existing single-instrument path exactly. Fails startup
+  // closed (never silently falls back to single-instrument mode) on any of: the registered
+  // instance under HERMES_AGENT_STRATEGY_ID not actually being a HermesAgentStrategy, an empty
+  // configured instrument universe, or an unexpected construction failure.
+  let hermes: HermesMultiInstrumentDependencies | undefined;
+  if (validation.strategy.strategyId === HERMES_AGENT_STRATEGY_ID) {
+    const strategyRegistry = options.strategyRegistryOverride ?? defaultStrategyRegistry;
+    let resolvedInstance;
+    try {
+      resolvedInstance = strategyRegistry.require(HERMES_AGENT_STRATEGY_ID);
+    } catch (error) {
+      return {
+        ok: false,
+        problems: [
+          {
+            field: "hermesAgentStrategy",
+            message:
+              `The official Hermes Agent strategy ("${HERMES_AGENT_STRATEGY_ID}") is selected but could not be ` +
+              `resolved from the default strategy registry: ${toErrorMessage(error)}`,
+          },
+        ],
+      };
+    }
+
+    if (!(resolvedInstance instanceof HermesAgentStrategy)) {
+      return {
+        ok: false,
+        problems: [
+          {
+            field: "hermesAgentStrategy",
+            message:
+              `The official Hermes Agent strategy ("${HERMES_AGENT_STRATEGY_ID}") is selected, but the strategy ` +
+              `registered under that id is not a HermesAgentStrategy instance (found: ${resolvedInstance.constructor.name}). ` +
+              "Refusing to start the multi-instrument universe scan against an incompatible strategy implementation.",
+          },
+        ],
+      };
+    }
+
+    if (config.hermesAgent.instrumentUniverse.length === 0) {
+      return {
+        ok: false,
+        problems: [
+          {
+            field: "hermesAgent.instrumentUniverse",
+            message:
+              "HERMES_INSTRUMENT_UNIVERSE resolved to an empty instrument list — the official Hermes Agent " +
+              "strategy requires at least one configured instrument to scan.",
+          },
+        ],
+      };
+    }
+
+    try {
+      hermes = {
+        strategyInstance: resolvedInstance,
+        instrumentUniverse: config.hermesAgent.instrumentUniverse,
+        hermesAdapterConfig: {
+          cliPath: config.hermesAgent.cliPath,
+          decisionTimeoutMs: config.hermesAgent.decisionTimeoutMs,
+          maxStdoutBytes: config.hermesAgent.maxStdoutBytes,
+        },
+        hermesCliRunner: new ChildProcessHermesCliRunner(),
+        maxProposalsPerScan: config.hermesAgent.maxProposalsPerScan,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        problems: [{ field: "hermesAgent", message: `Failed to construct Hermes Agent adapter dependencies: ${toErrorMessage(error)}` }],
+      };
+    }
+  }
+
   return {
     ok: true,
     dependencies: {
@@ -196,11 +310,63 @@ export async function buildRuntimeDependencies(options: BuildRuntimeDependencies
       marketDataProvider,
       marketHoursPolicy,
       lifecycleService,
+      hermes,
       lifecycleStore,
       symbol: config.runtimeTrading.symbol,
       quantity: config.runtimeTrading.quantity,
       orderSizingMode: capabilities.orderSizingMode,
       portfolioRiskConfig: options.portfolioRiskConfig,
+    },
+  };
+}
+
+/** Prototype 1.0 — official Hermes Agent multi-instrument wiring. Mission-level invariant, not a
+ * configurable value: no instrument may ever carry more than one open position at a time (see
+ * universe-scanner.ts's own selection logic, which enforces this identically). Portfolio-wide
+ * capacity remains the caller's own `portfolioRiskConfig.portfolioMaxOpenPositions`, reused
+ * as-is below — never a second, independently-configured ceiling. */
+const MAX_OPEN_POSITIONS_PER_INSTRUMENT = 1;
+
+export interface ResolvedHermesRuntimeWiring {
+  /** The "primary" instrument — TradingRuntimeDeps.instrument's own value. Always
+   * `dependencies.hermes.instrumentUniverse[0]` when Hermes multi-instrument mode is active (so the
+   * documented "instrument should equal instruments[0]" invariant — see trading-runtime.ts's own
+   * TradingRuntimeDeps.instruments doc comment — is guaranteed by construction, never merely hoped
+   * for), else `dependencies.symbol` unchanged. */
+  instrument: string;
+  /** TradingRuntimeDeps.instruments — undefined for the pre-existing single-instrument path. */
+  instruments: string[] | undefined;
+  /** TradingRuntimeDeps.universeScan — undefined for the pre-existing single-instrument path.
+   * Reuses `dependencies.marketHoursPolicy` (the SAME instance TradingRuntimeDeps.marketHoursPolicy
+   * receives) as the equity market-hours policy — never a second, separately-constructed policy. */
+  universeScan: TradingRuntimeUniverseScanDeps | undefined;
+}
+
+/**
+ * Pure — takes the already-resolved RuntimeDependencies bundle (broker, market data provider,
+ * lifecycle store, audit trail are all reused from it, never duplicated here) and shapes exactly
+ * the three TradingRuntimeDeps fields that differ between the single-instrument and Hermes
+ * multi-instrument paths. `dependencies.hermes` alone decides which path this returns — no other
+ * input, no I/O, no strategy re-selection. Called once by market-runtime.ts, immediately before
+ * constructing TradingRuntime.
+ */
+export function buildHermesRuntimeWiring(dependencies: RuntimeDependencies): ResolvedHermesRuntimeWiring {
+  const { hermes } = dependencies;
+  if (!hermes) {
+    return { instrument: dependencies.symbol, instruments: undefined, universeScan: undefined };
+  }
+
+  return {
+    instrument: hermes.instrumentUniverse[0]!,
+    instruments: hermes.instrumentUniverse,
+    universeScan: {
+      hermesAgentStrategy: hermes.strategyInstance,
+      hermesAdapterConfig: hermes.hermesAdapterConfig,
+      hermesCliRunner: hermes.hermesCliRunner,
+      maxProposalsPerScan: hermes.maxProposalsPerScan,
+      maxOpenPositions: dependencies.portfolioRiskConfig.portfolioMaxOpenPositions,
+      maxOpenPositionsPerInstrument: MAX_OPEN_POSITIONS_PER_INSTRUMENT,
+      equityMarketHoursPolicy: dependencies.marketHoursPolicy,
     },
   };
 }

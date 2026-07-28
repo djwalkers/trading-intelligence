@@ -48,6 +48,17 @@ export interface RedactedStartupSummary {
   /** Presence-only, same convention as brokerCredentialsConfigured — never the bot token or chat id
    * themselves (see config.ts's own TelegramConfig doc comment for why neither is ever printed). */
   telegramConfigured: boolean;
+  /** Prototype 1.0 — official Hermes Agent multi-instrument wiring. The configured multi-instrument
+   * universe (config.hermesAgent.instrumentUniverse) — always present regardless of which strategy
+   * is currently selected, since this is plain configuration, never a credential. */
+  instrumentUniverse: string[];
+  /** True exactly when `strategyId` is the official Hermes Agent's own id — the same condition
+   * market-runtime.ts uses to decide whether TradingRuntimeDeps.instruments/universeScan get
+   * configured at all. False for every other strategy (e.g. DEMO-0001), which never invokes the
+   * Hermes CLI and runs the pre-existing single-instrument path unchanged. */
+  universeScanEnabled: boolean;
+  /** The configured Hermes Agent CLI binary path — a filesystem path, never a credential. */
+  hermesCliPath: string;
 }
 
 /** Presence-only check against the already-parsed config (never re-reads raw process.env) — "are
@@ -88,5 +99,8 @@ export function buildRedactedStartupSummary(config: HermesExecutionConfig, strat
     marketHoursPolicy: config.scheduler.marketHoursPolicy,
     marketHoursTimezone: config.scheduler.sessionTimezone,
     telegramConfigured: config.telegram.enabled,
+    instrumentUniverse: config.hermesAgent.instrumentUniverse,
+    universeScanEnabled: strategy.strategyId === HERMES_AGENT_STRATEGY_ID,
+    hermesCliPath: config.hermesAgent.cliPath,
   };
 }
