@@ -82,8 +82,10 @@ export async function runMarketDecisionCycleWithLifecycle(
   }
 
   // Pure, side-effect-free — see this file's top-of-file comment for why calling it here (ahead of
-  // the runner's own internal, identical call) is safe.
-  const decision = MarketDecisionEngine.evaluate(marketContext);
+  // the runner's own internal, identical call) is safe. Still true after Strategy.evaluate()
+  // became async (Prototype 1.0): no broker state can change between this await and the runner's
+  // own moments later — nothing else in this function is scheduled in between.
+  const decision = await MarketDecisionEngine.evaluate(marketContext);
 
   if (decision.action === "HOLD") {
     return await runMarketDecisionCycle(input);

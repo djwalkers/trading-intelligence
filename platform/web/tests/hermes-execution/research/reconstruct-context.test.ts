@@ -71,7 +71,7 @@ describe("reconstructContext", () => {
     expect(() => reconstructContext(run, { strategyId: "DEMO-0001", strategyVersion: 1, positionOpen: false })).toThrow();
   });
 
-  it("produces IDENTICAL decisions to the original, fully-built context — proving the approximated fields (recentCandles/volume/dailyHigh/dailyLow/volatility24h) never affect Demo0001Strategy's own decision logic", () => {
+  it("produces IDENTICAL decisions to the original, fully-built context — proving the approximated fields (recentCandles/volume/dailyHigh/dailyLow/volatility24h) never affect Demo0001Strategy's own decision logic", async () => {
     const strategy = new Demo0001Strategy();
     const run = makeAnalysisRun();
 
@@ -99,14 +99,14 @@ describe("reconstructContext", () => {
       trend: "Bullish",
     };
 
-    const reconstructedDecision = strategy.evaluate(reconstructed);
-    const originalDecision = strategy.evaluate(original);
+    const reconstructedDecision = await strategy.evaluate(reconstructed);
+    const originalDecision = await strategy.evaluate(original);
 
     expect(reconstructedDecision.action).toBe(originalDecision.action);
     expect(reconstructedDecision.confidence).toBe(originalDecision.confidence);
     expect(reconstructedDecision.entryCriteriaMet).toBe(originalDecision.entryCriteriaMet);
 
     // Also matches the live, unmodified MarketDecisionEngine's own delegated evaluation.
-    expect(MarketDecisionEngine.evaluate(reconstructed).action).toBe(reconstructedDecision.action);
+    expect((await MarketDecisionEngine.evaluate(reconstructed)).action).toBe(reconstructedDecision.action);
   });
 });

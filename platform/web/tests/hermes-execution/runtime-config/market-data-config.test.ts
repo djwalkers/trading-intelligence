@@ -51,6 +51,13 @@ const EMPTY = {
   HERMES_KILL_SWITCH_ENABLED: undefined,
   HERMES_MAX_HOLDING_DURATION_MS: undefined,
   HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: undefined,
+  HERMES_AGENT_CLI_PATH: undefined,
+  HERMES_AGENT_DECISION_TIMEOUT_MS: undefined,
+  HERMES_AGENT_MAX_STDOUT_BYTES: undefined,
+  HERMES_INSTRUMENT_UNIVERSE: undefined,
+  HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
+  HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
+  HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
 };
 
 describe("buildHermesExecutionConfig — marketData defaults", () => {

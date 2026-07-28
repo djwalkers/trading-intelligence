@@ -15,7 +15,12 @@ export interface AlertSender {
   sendAlert(text: string): Promise<void>;
 }
 
-function formatAlert(event: AuditEvent): string | undefined {
+// Prototype 1.0 — official Hermes Agent decision integration. Every alert this pipeline ever sends
+// concerns a demo/virtual eToro account only (AUTO_LIVE is structurally impossible — see
+// config.ts) — formatAlert's own exported wrapper below appends a single, consistent "[DEMO]"
+// label to every message exactly once, rather than each case restating it, so this can never drift
+// case-by-case.
+function formatAlertCore(event: AuditEvent): string | undefined {
   const details = event.details;
   switch (event.eventType) {
     case "TRADING_RUNTIME_STARTED":
@@ -44,20 +49,59 @@ function formatAlert(event: AuditEvent): string | undefined {
     case "TRADING_CYCLE_FAILED":
       return `Runtime error: cycle failed — ${details.message}.`;
     // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
-    // review). Alerted ONLY on the specific resolution that means a position genuinely entered
-    // CLOSED_UNRECONCILED — the OTHER resolution this same event type carries ("failed-closed", a
-    // reconciliation failure) is already covered by TRADING_CYCLE_FAILED-style alerting via its own
-    // path, so this stays scoped to exactly the "durable alert whenever a lifecycle enters
-    // CLOSED_UNRECONCILED" requirement, never double-alerting the other case.
+    // review). "reconciled-closed-unreconciled" means a position genuinely entered
+    // CLOSED_UNRECONCILED; "failed-closed" (Prototype 1.0 addition) is the general reconciliation
+    // warning for every other fail-closed outcome this same event type carries — two distinct
+    // messages for two distinct operator-visible situations, never conflated.
     case "BROKER_RECONCILIATION_MISMATCH":
-      if (details.resolution !== "reconciled-closed-unreconciled") return undefined;
+      if (details.resolution === "reconciled-closed-unreconciled") {
+        return (
+          `Position closed with UNKNOWN exit price/P&L (CLOSED_UNRECONCILED): ${event.instrument} ` +
+          `(lifecycle record ${details.lifecycleRecordId}). See /reconciliation for details.`
+        );
+      }
+      if (details.resolution === "failed-closed") {
+        return `Reconciliation warning: ${event.instrument} — ${details.reason ?? "could not safely reconcile this cycle"}.`;
+      }
+      return undefined;
+    // Prototype 1.0 — official Hermes Agent decision integration.
+    case "DUPLICATE_ENTRY_SUPPRESSED":
+      return `Duplicate suppressed: ${event.instrument} — ${details.reason ?? "an equivalent entry is already in flight"}.`;
+    case "KILL_SWITCH_ENTRY_BLOCKED":
+      return `Kill switch active: entry blocked${event.instrument ? ` for ${event.instrument}` : ""}.`;
+    case "TRADE_CANDIDATE_CREATED":
+      return `Candidate pending manual approval: ${event.instrument} ${details.direction ?? ""} (confidence ${details.confidence}).`;
+    case "TRADE_CANDIDATE_AUTO_APPROVED":
+      return `Candidate auto-approved (AUTO_DEMO): ${event.instrument}.`;
+    case "AUTOMATIC_EXIT_TRIGGERED": {
+      const trigger = details.trigger;
+      if (trigger === "STOP_LOSS") return `Stop-loss triggered: ${event.instrument}.`;
+      if (trigger === "TAKE_PROFIT") return `Take-profit triggered: ${event.instrument}.`;
+      if (trigger === "KILL_SWITCH") return `Kill switch: closing open position on ${event.instrument}.`;
+      return `Automatic exit triggered (${trigger}): ${event.instrument}.`;
+    }
+    case "UNIVERSE_SCAN_COMPLETED":
       return (
-        `Position closed with UNKNOWN exit price/P&L (CLOSED_UNRECONCILED): ${event.instrument} ` +
-        `(lifecycle record ${details.lifecycleRecordId}). See /reconciliation for details.`
+        `Scan complete: ${details.eligibleInstrumentCount ?? "?"} eligible instrument(s), ` +
+        `${details.selectedProposalCount ?? 0} proposal(s) selected.`
+      );
+    case "HERMES_PROPOSAL_SELECTED":
+      return `Hermes opportunity selected: ${event.instrument} ${details.action} (confidence ${details.confidence}).`;
+    case "HERMES_RESPONSE_REJECTED":
+      return `Hermes proposal rejected as invalid — ${details.reason ?? "failed validation"}.`;
+    case "DAILY_PORTFOLIO_SUMMARY":
+      return (
+        `Daily summary: ${details.tradeCount ?? 0} trade(s), realised P/L ${details.realisedPnl ?? 0}, ` +
+        `${details.openPositionCount ?? 0} open position(s).`
       );
     default:
       return undefined;
   }
+}
+
+function formatAlert(event: AuditEvent): string | undefined {
+  const message = formatAlertCore(event);
+  return message === undefined ? undefined : `${message} [DEMO]`;
 }
 
 /** Wraps `inner` (any existing AuditTrail) and dispatches one Telegram message per alert-worthy
@@ -66,6 +110,20 @@ function formatAlert(event: AuditEvent): string | undefined {
  * AuditEventType from Missions 6/7). A Telegram delivery failure never breaks or delays the
  * underlying audit recording: `inner.record()` is always awaited and always completes first: only
  * the alert dispatch itself is best-effort. */
+// Prototype 1.0 — Telegram observability. Field names checked in priority order — whichever
+// durable identifier the ORIGINAL event already carries (never invented) — so a failed
+// notification can be traced back to the trade/candidate/lifecycle record it concerned, without
+// this module needing to know every event type's own details shape in advance.
+const DURABLE_ID_FIELDS = ["candidateId", "lifecycleRecordId", "tradeLifecycleId", "brokerOrderId"] as const;
+
+function findDurableEventId(details: Record<string, unknown>): string | undefined {
+  for (const field of DURABLE_ID_FIELDS) {
+    const value = details[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
 export class TelegramAlertingAuditTrail implements AuditTrail {
   constructor(
     private readonly inner: AuditTrail,
@@ -78,9 +136,31 @@ export class TelegramAlertingAuditTrail implements AuditTrail {
     if (message === undefined) return;
     try {
       await this.alertSender.sendAlert(message);
-    } catch {
-      // Best-effort only — if Telegram itself is unreachable, there is no channel left to alert
-      // about that failure; the event is still safely recorded in `inner` regardless.
+    } catch (error) {
+      // Prototype 1.0 — Telegram observability. Delivery is always best-effort — a failure must
+      // never throw into the caller (broker execution may have already succeeded) — but it must
+      // not be swallowed invisibly either. Records a redacted failure fact (never the credential-
+      // shaped internals of `error`, never the message text itself — only its own error `.message`,
+      // which HermesGatewayAlertSender/TelegramBot both construct as a clear, bounded, own string,
+      // never raw stderr or a raw transport error) referencing the ORIGINAL event's own durable
+      // identifier where one exists. Wrapped in its own try/catch so a broken audit trail can
+      // never surface here either.
+      try {
+        await this.inner.record({
+          timestamp: event.timestamp,
+          eventType: "TELEGRAM_NOTIFICATION_FAILED",
+          executionRunId: event.executionRunId,
+          strategyId: event.strategyId,
+          instrument: event.instrument,
+          details: {
+            originalEventType: event.eventType,
+            durableEventId: findDurableEventId(event.details),
+            reason: error instanceof Error ? error.message : "unknown delivery failure",
+          },
+        });
+      } catch {
+        // Best-effort observability only — never lets a broken audit trail surface here.
+      }
     }
   }
 

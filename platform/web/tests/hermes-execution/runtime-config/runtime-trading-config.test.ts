@@ -49,16 +49,23 @@ const EMPTY = {
   HERMES_KILL_SWITCH_ENABLED: undefined,
   HERMES_MAX_HOLDING_DURATION_MS: undefined,
   HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: undefined,
+  HERMES_AGENT_CLI_PATH: undefined,
+  HERMES_AGENT_DECISION_TIMEOUT_MS: undefined,
+  HERMES_AGENT_MAX_STDOUT_BYTES: undefined,
+  HERMES_INSTRUMENT_UNIVERSE: undefined,
+  HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
+  HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
+  HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
 };
 
 describe("buildHermesExecutionConfig — runtimeTrading defaults", () => {
-  it("defaults to symbol BTC, quantity 10, no max quantity, no strategyId, and mode paper", () => {
+  it("defaults to symbol BTC, quantity 10, no max quantity, HERMES-AGENT as the explicit strategyId, and mode paper", () => {
     const config = buildHermesExecutionConfig(EMPTY);
     expect(config.runtimeTrading).toEqual({
       symbol: "BTC",
       quantity: 10,
       maxQuantity: undefined,
-      strategyId: undefined,
+      strategyId: "HERMES-AGENT",
       mode: "paper",
     });
   });
@@ -147,8 +154,11 @@ describe("buildHermesExecutionConfig — max quantity safety ceiling", () => {
 });
 
 describe("buildHermesExecutionConfig — strategyId", () => {
-  it("is undefined by default (preserves existing auto-select behaviour)", () => {
-    expect(buildHermesExecutionConfig(EMPTY).runtimeTrading.strategyId).toBeUndefined();
+  // Prototype 1.0 — official Hermes Agent decision integration. Explicit selection, not "first
+  // HERMES_APPROVED strategy wins": unset now resolves to the official Hermes Agent's own
+  // strategyId, never undefined.
+  it("defaults to HERMES-AGENT (the official Hermes Agent) when unset — explicit, not ordering-based", () => {
+    expect(buildHermesExecutionConfig(EMPTY).runtimeTrading.strategyId).toBe("HERMES-AGENT");
   });
 
   it("passes through a configured strategy id verbatim (trimmed)", () => {

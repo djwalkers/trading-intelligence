@@ -90,7 +90,9 @@ export class ResearchVariantStrategy implements Strategy {
     return [...entry.reasons, `No entry signal under strategy ${strategyRef(context.strategy)}`];
   }
 
-  evaluate(context: MarketDecisionContext): Decision {
+  // Prototype 1.0 — official Hermes Agent decision integration. `async` only to satisfy Strategy's
+  // now-asynchronous evaluate() contract — nothing here is awaited.
+  async evaluate(context: MarketDecisionContext): Promise<Decision> {
     const { instrument, positionOpen, ema20, ema50, rsi14, volume, dailyHigh, dailyLow } = context;
 
     if (positionOpen) {

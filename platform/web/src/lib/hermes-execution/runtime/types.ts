@@ -79,6 +79,14 @@ export interface TradingCycleResultSummary {
   duplicateEntrySuppressed?: boolean;
   /** Set only when AUTO_DEMO auto-approved the candidate this cycle created. */
   autoApproved?: boolean;
+  /** Prototype 1.0 — official Hermes Agent decision integration. Present only when this runtime is
+   * configured with more than one instrument (TradingRuntimeDeps.instruments) — the full
+   * per-instrument breakdown for this cycle, keyed by instrument. Every top-level field above
+   * always mirrors the FIRST configured instrument's own outcome (for backward compatibility with
+   * every existing single-instrument caller, byte-for-byte); a multi-instrument caller should read
+   * this field for the other instruments' own outcomes rather than assuming the top-level fields
+   * describe the whole universe. */
+  perInstrument?: Record<string, Omit<TradingCycleResultSummary, "perInstrument">>;
 }
 
 export interface TradingErrorSummary {

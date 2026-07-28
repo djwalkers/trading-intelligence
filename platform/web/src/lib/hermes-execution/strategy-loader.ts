@@ -1,6 +1,7 @@
 import type { RegistryClient } from "./registry-client";
 import { mapRegistryStrategyToInternal } from "./internal-strategy-mapper";
 import { getDemoStrategy } from "./demo-strategy";
+import { getHermesAgentInternalStrategy } from "./hermes-agent/hermes-agent-strategy";
 import type { AuditEvent, InternalStrategy } from "./types";
 
 export interface StrategyRejectionRecord {
@@ -42,6 +43,27 @@ export async function loadEnabledStrategies(
   const events: AuditEvent[] = [];
   const rejections: StrategyRejectionRecord[] = [];
   const strategies: InternalStrategy[] = [];
+
+  // Prototype 1.0 — official Hermes Agent decision integration. Always loaded, unconditionally
+  // (no demo-mode-style gate) — this is what makes HermesAgentStrategy the Prototype 1.0 decision
+  // authority: pushed first, and marked sourceType "HERMES_APPROVED", so selectStrategy's own
+  // pre-existing "prefer the first HERMES_APPROVED strategy" default (runtime-config/
+  // strategy-selection.ts, unchanged) picks it automatically whenever HERMES_STRATEGY_ID is unset.
+  // DEMO-0001 remains available purely as an explicit development fixture: set
+  // HERMES_STRATEGY_ID=DEMO-0001 (with DEMO_EXECUTION_MODE=true) to select it instead — the exact
+  // existing override mechanism, untouched.
+  const hermesAgentStrategy = getHermesAgentInternalStrategy();
+  strategies.push(hermesAgentStrategy);
+  events.push({
+    timestamp: now(),
+    eventType: "STRATEGY_LOADED",
+    executionRunId,
+    strategyId: hermesAgentStrategy.strategyId,
+    strategyVersion: hermesAgentStrategy.version,
+    sourceType: "HERMES_APPROVED",
+    instrument: hermesAgentStrategy.instrument,
+    details: {},
+  });
 
   const registryConnected = await registryClient.isConnected();
   const { strategies: rawStrategies, rejected: registryRejections } =

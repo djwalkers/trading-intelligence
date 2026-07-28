@@ -68,9 +68,9 @@ describe("computeTradeLevels", () => {
 describe("buildTradeCandidateInput", () => {
   const now = new Date("2026-01-01T00:00:00.000Z");
 
-  it("builds a candidate input from a BUY decision, carrying reasoning/confidence/expiry through", () => {
+  it("builds a candidate input from a BUY decision, carrying reasoning/confidence/expiry through", async () => {
     const context = makeContext();
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
     expect(decision.action).toBe("BUY");
 
     const input = buildTradeCandidateInput({
@@ -94,9 +94,9 @@ describe("buildTradeCandidateInput", () => {
     expect(input.execution).toEqual({ marketContext: context, marketDataSnapshot: SNAPSHOT, amount: 10, sizingMode: "UNITS" });
   });
 
-  it("carries validationNotes through, defaulting to an empty array when the decision has none", () => {
+  it("carries validationNotes through, defaulting to an empty array when the decision has none", async () => {
     const context = makeContext();
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
     const input = buildTradeCandidateInput({
       decision,
       context,

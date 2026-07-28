@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
 import { buildHermesExecutionConfig } from "@/lib/hermes-execution/config";
+import { getHermesAgentInternalStrategy } from "@/lib/hermes-execution/hermes-agent/hermes-agent-strategy";
+import { getDemoStrategy } from "@/lib/hermes-execution/demo-strategy";
 import type { InternalStrategy } from "@/lib/hermes-execution/types";
 
 const EMPTY = {
@@ -51,6 +53,13 @@ const EMPTY = {
   HERMES_KILL_SWITCH_ENABLED: undefined,
   HERMES_MAX_HOLDING_DURATION_MS: undefined,
   HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: undefined,
+  HERMES_AGENT_CLI_PATH: undefined,
+  HERMES_AGENT_DECISION_TIMEOUT_MS: undefined,
+  HERMES_AGENT_MAX_STDOUT_BYTES: undefined,
+  HERMES_INSTRUMENT_UNIVERSE: undefined,
+  HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
+  HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
+  HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
 };
 
 const SECRET_PRIVATE_KEY = `0x${"1".repeat(64)}`;
@@ -80,6 +89,7 @@ describe("buildRedactedStartupSummary — shape", () => {
       strategyId: "STRAT-0001",
       strategyVersion: 3,
       strategySourceType: "HERMES_APPROVED",
+      decisionProvider: "OTHER",
       symbol: "BTC",
       quantity: 10,
       maxQuantity: undefined,
@@ -125,6 +135,28 @@ describe("buildRedactedStartupSummary — shape", () => {
     });
     const summary = buildRedactedStartupSummary(config, STRATEGY);
     expect(summary.telegramConfigured).toBe(true);
+  });
+});
+
+describe("buildRedactedStartupSummary — decisionProvider", () => {
+  it("reports OFFICIAL_HERMES_AGENT for the official Hermes Agent strategy", () => {
+    const config = buildHermesExecutionConfig(EMPTY);
+    const summary = buildRedactedStartupSummary(config, getHermesAgentInternalStrategy());
+    expect(summary.decisionProvider).toBe("OFFICIAL_HERMES_AGENT");
+    expect(summary.strategyId).toBe("HERMES-AGENT");
+  });
+
+  it("reports DEMO_FIXTURE for the DEMO-0001 fixture strategy", () => {
+    const config = buildHermesExecutionConfig(EMPTY);
+    const demoStrategy = getDemoStrategy(true);
+    const summary = buildRedactedStartupSummary(config, demoStrategy!);
+    expect(summary.decisionProvider).toBe("DEMO_FIXTURE");
+  });
+
+  it("reports OTHER for any other (e.g. real Hermes Strategy Registry) strategy", () => {
+    const config = buildHermesExecutionConfig(EMPTY);
+    const summary = buildRedactedStartupSummary(config, STRATEGY);
+    expect(summary.decisionProvider).toBe("OTHER");
   });
 });
 

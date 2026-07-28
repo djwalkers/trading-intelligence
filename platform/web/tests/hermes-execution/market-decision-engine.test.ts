@@ -8,6 +8,11 @@ import type { Decision, Strategy } from "@/lib/hermes-execution/strategies/strat
 // strategies/demo-0001-strategy.ts rather than in the engine itself — since that logic moved
 // verbatim (see that file's own doc comment), these tests unchanged and still passing is itself
 // the proof that "DEMO-0001 produces the same decisions as before for identical inputs".
+//
+// Prototype 1.0 — official Hermes Agent decision integration. MarketDecisionEngine.evaluate() (and
+// Strategy.evaluate()) became async — the one minimal, mechanical signature change this
+// integration makes (see strategy.ts's own doc comment) — every call site below is awaited
+// accordingly; no decision logic changed.
 
 function makeContext(overrides: Partial<MarketDecisionContext> = {}): MarketDecisionContext {
   return {
@@ -35,15 +40,15 @@ function makeContext(overrides: Partial<MarketDecisionContext> = {}): MarketDeci
 }
 
 describe("MarketDecisionEngine.evaluate — bullish context (BUY)", () => {
-  it("returns BUY when EMA20 > EMA50, RSI is healthy, trend is Bullish, and no position is open", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext());
+  it("returns BUY when EMA20 > EMA50, RSI is healthy, trend is Bullish, and no position is open", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext());
     expect(decision.action).toBe("BUY");
     expect(decision.confidence).toBeGreaterThan(0);
     expect(decision.confidence).toBeLessThanOrEqual(1);
   });
 
-  it("includes the expected structured reasoning bullets", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext());
+  it("includes the expected structured reasoning bullets", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext());
     expect(Array.isArray(decision.reasoning)).toBe(true);
     expect(decision.reasoning.some((r) => /EMA20 above EMA50/i.test(r))).toBe(true);
     expect(decision.reasoning.some((r) => /RSI healthy/i.test(r))).toBe(true);
@@ -51,40 +56,40 @@ describe("MarketDecisionEngine.evaluate — bullish context (BUY)", () => {
     expect(decision.reasoning.some((r) => /No existing position/i.test(r))).toBe(true);
   });
 
-  it("gives higher confidence the closer RSI is to the centre of the entry band", () => {
-    const centred = MarketDecisionEngine.evaluate(makeContext({ rsi14: 55 }));
-    const edge = MarketDecisionEngine.evaluate(makeContext({ rsi14: 46 }));
+  it("gives higher confidence the closer RSI is to the centre of the entry band", async () => {
+    const centred = await MarketDecisionEngine.evaluate(makeContext({ rsi14: 55 }));
+    const edge = await MarketDecisionEngine.evaluate(makeContext({ rsi14: 46 }));
     expect(centred.confidence).toBeGreaterThan(edge.confidence);
   });
 });
 
 describe("MarketDecisionEngine.evaluate — high RSI (overbought, outside entry band)", () => {
-  it("does not BUY when RSI is above 65, even with a Bullish trend and no position", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext({ rsi14: 80 }));
+  it("does not BUY when RSI is above 65, even with a Bullish trend and no position", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext({ rsi14: 80 }));
     expect(decision.action).toBe("HOLD");
     expect(decision.reasoning.some((r) => /outside the 45-65 entry band/i.test(r))).toBe(true);
   });
 });
 
 describe("MarketDecisionEngine.evaluate — low RSI (oversold, outside entry band)", () => {
-  it("does not BUY when RSI is below 45, even with a Bullish trend and no position", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext({ rsi14: 20 }));
+  it("does not BUY when RSI is below 45, even with a Bullish trend and no position", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext({ rsi14: 20 }));
     expect(decision.action).toBe("HOLD");
     expect(decision.reasoning.some((r) => /outside the 45-65 entry band/i.test(r))).toBe(true);
   });
 });
 
 describe("MarketDecisionEngine.evaluate — sideways market (HOLD)", () => {
-  it("does not BUY when the trend is Sideways, even with healthy RSI and no position", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext({ trend: "Sideways", ema20: 100.02, ema50: 100 }));
+  it("does not BUY when the trend is Sideways, even with healthy RSI and no position", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext({ trend: "Sideways", ema20: 100.02, ema50: 100 }));
     expect(decision.action).toBe("HOLD");
     expect(decision.reasoning.some((r) => /not Bullish/i.test(r))).toBe(true);
   });
 });
 
 describe("MarketDecisionEngine.evaluate — bearish context (SELL)", () => {
-  it("returns SELL when a position is open and the trend has turned Bearish", () => {
-    const decision = MarketDecisionEngine.evaluate(
+  it("returns SELL when a position is open and the trend has turned Bearish", async () => {
+    const decision = await MarketDecisionEngine.evaluate(
       makeContext({ positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 }),
     );
     expect(decision.action).toBe("SELL");
@@ -93,28 +98,28 @@ describe("MarketDecisionEngine.evaluate — bearish context (SELL)", () => {
     expect(decision.reasoning.some((r) => /Bearish/i.test(r))).toBe(true);
   });
 
-  it("never returns BUY when a position is already open, regardless of trend", () => {
-    const bullishWithPosition = MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
+  it("never returns BUY when a position is already open, regardless of trend", async () => {
+    const bullishWithPosition = await MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
     expect(bullishWithPosition.action).not.toBe("BUY");
   });
 });
 
 describe("MarketDecisionEngine.evaluate — existing position, non-Bearish trend (HOLD, not SELL)", () => {
-  it("holds an open position when the trend is still Bullish rather than closing it", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
+  it("holds an open position when the trend is still Bullish rather than closing it", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
     expect(decision.action).toBe("HOLD");
     expect(decision.reasoning.some((r) => /Position already open/i.test(r))).toBe(true);
     expect(decision.reasoning.some((r) => /not Bearish/i.test(r))).toBe(true);
   });
 
-  it("holds an open position when the trend is Sideways rather than closing it", () => {
-    const decision = MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Sideways" }));
+  it("holds an open position when the trend is Sideways rather than closing it", async () => {
+    const decision = await MarketDecisionEngine.evaluate(makeContext({ positionOpen: true, trend: "Sideways" }));
     expect(decision.action).toBe("HOLD");
   });
 });
 
 describe("MarketDecisionEngine.evaluate — confidence and reasoning are always present", () => {
-  it("returns a numeric confidence and a non-empty reasoning array for every branch", () => {
+  it("returns a numeric confidence and a non-empty reasoning array for every branch", async () => {
     const scenarios: Partial<MarketDecisionContext>[] = [
       {}, // BUY
       { positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 }, // SELL
@@ -122,7 +127,7 @@ describe("MarketDecisionEngine.evaluate — confidence and reasoning are always 
       { positionOpen: true, trend: "Bullish" }, // HOLD (holding a position)
     ];
     for (const overrides of scenarios) {
-      const decision = MarketDecisionEngine.evaluate(makeContext(overrides));
+      const decision = await MarketDecisionEngine.evaluate(makeContext(overrides));
       expect(typeof decision.confidence).toBe("number");
       expect(Number.isFinite(decision.confidence)).toBe(true);
       expect(decision.confidence).toBeGreaterThanOrEqual(0);
@@ -133,8 +138,8 @@ describe("MarketDecisionEngine.evaluate — confidence and reasoning are always 
     }
   });
 
-  it("references the strategy's identity in the reasoning, distinguishing DEMO_ONLY from HERMES_APPROVED", () => {
-    const decision = MarketDecisionEngine.evaluate(
+  it("references the strategy's identity in the reasoning, distinguishing DEMO_ONLY from HERMES_APPROVED", async () => {
+    const decision = await MarketDecisionEngine.evaluate(
       makeContext({ strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "DEMO_ONLY" } }),
     );
     expect(decision.reasoning.some((r) => r.includes("DEMO-0001") && r.includes("DEMO_ONLY"))).toBe(true);
@@ -142,13 +147,13 @@ describe("MarketDecisionEngine.evaluate — confidence and reasoning are always 
 });
 
 describe("MarketDecisionEngine.evaluate — strategy registry delegation", () => {
-  it("throws UnknownStrategyError when context.strategy.strategyId has no registered strategy (unknown strategy IDs are handled gracefully, not silently substituted)", () => {
-    expect(() => MarketDecisionEngine.evaluate(makeContext({ strategy: { strategyId: "NO-SUCH-STRATEGY", version: 1, sourceType: "HERMES_APPROVED" } }))).toThrow(
-      UnknownStrategyError,
-    );
+  it("rejects with UnknownStrategyError when context.strategy.strategyId has no registered strategy (unknown strategy IDs are handled gracefully, not silently substituted)", async () => {
+    await expect(
+      MarketDecisionEngine.evaluate(makeContext({ strategy: { strategyId: "NO-SUCH-STRATEGY", version: 1, sourceType: "HERMES_APPROVED" } })),
+    ).rejects.toThrow(UnknownStrategyError);
   });
 
-  it("switching the registered strategy for a strategyId changes the decision without any change to MarketDecisionEngine itself (requirement 5)", () => {
+  it("switching the registered strategy for a strategyId changes the decision without any change to MarketDecisionEngine itself (requirement 5)", async () => {
     const alwaysBuy: Strategy = {
       id: "STRATEGY-B",
       version: 1,
@@ -158,7 +163,7 @@ describe("MarketDecisionEngine.evaluate — strategy registry delegation", () =>
       calculateEntryConfidence: () => 0.9,
       calculateExitConfidence: () => 0.9,
       explainHold: () => ["never holds"],
-      evaluate: (): Decision => ({
+      evaluate: async (): Promise<Decision> => ({
         action: "BUY",
         confidence: 0.9,
         reasoning: ["Strategy B always buys"],
@@ -172,7 +177,7 @@ describe("MarketDecisionEngine.evaluate — strategy registry delegation", () =>
 
     // Identical context to a scenario DEMO-0001 would HOLD on (Sideways trend) — Strategy B still BUYs.
     const context = makeContext({ strategy: { strategyId: "STRATEGY-B", version: 1, sourceType: "HERMES_APPROVED" }, trend: "Sideways" });
-    const decision = MarketDecisionEngine.evaluate(context, customRegistry);
+    const decision = await MarketDecisionEngine.evaluate(context, customRegistry);
     expect(decision.action).toBe("BUY");
     expect(decision.reasoning).toEqual(["Strategy B always buys"]);
   });

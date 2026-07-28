@@ -1,5 +1,6 @@
 import type { BrokerProvider, HermesExecutionConfig, MarketDataProviderType, MarketHoursPolicyType, RuntimeMode } from "../config";
 import type { InternalStrategy, StrategySourceType } from "../types";
+import { HERMES_AGENT_STRATEGY_ID } from "../hermes-agent/hermes-agent-strategy";
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. A plain, flat, JSON-serialisable object —
 // deliberately field-by-field constructed (never `{...config}` or any other wholesale spread of a
@@ -8,6 +9,19 @@ import type { InternalStrategy, StrategySourceType } from "../types";
 // to Telegram and VPS diagnostics" — this shape is the contract those future consumers rely on;
 // keep additions here as deliberate as the choice to omit apiKey/userKey/apiSecret/privateKey/
 // accountAddress/token below.
+
+/** Prototype 1.0 — official Hermes Agent decision integration. An explicit, typed label for WHICH
+ * decision authority this runtime cycle actually uses — never left to be inferred by a reader from
+ * `strategyId`/`strategySourceType` alone, since `sourceType: "HERMES_APPROVED"` on its own has
+ * historically meant "promoted through Hermes Lab governance," not "the live Hermes Agent is
+ * deciding" (see market-decision-engine.ts's own doc comment on that exact ambiguity). */
+export type DecisionProvider = "OFFICIAL_HERMES_AGENT" | "DEMO_FIXTURE" | "OTHER";
+
+function resolveDecisionProvider(strategy: InternalStrategy): DecisionProvider {
+  if (strategy.strategyId === HERMES_AGENT_STRATEGY_ID) return "OFFICIAL_HERMES_AGENT";
+  if (strategy.sourceType === "DEMO_ONLY") return "DEMO_FIXTURE";
+  return "OTHER";
+}
 
 export interface RedactedStartupSummary {
   runtimeMode: RuntimeMode;
@@ -19,6 +33,10 @@ export interface RedactedStartupSummary {
   strategyId: string;
   strategyVersion: number;
   strategySourceType: StrategySourceType;
+  /** Prototype 1.0 — official Hermes Agent decision integration. Unambiguous: OFFICIAL_HERMES_AGENT
+   * only when strategyId is exactly HERMES_AGENT_STRATEGY_ID, DEMO_FIXTURE only for the DEMO_ONLY
+   * fixture, OTHER for anything else (e.g. a real Hermes Strategy Registry document). */
+  decisionProvider: DecisionProvider;
   symbol: string;
   quantity: number;
   maxQuantity: number | undefined;
@@ -60,6 +78,7 @@ export function buildRedactedStartupSummary(config: HermesExecutionConfig, strat
     strategyId: strategy.strategyId,
     strategyVersion: strategy.version,
     strategySourceType: strategy.sourceType,
+    decisionProvider: resolveDecisionProvider(strategy),
     symbol: config.runtimeTrading.symbol,
     quantity: config.runtimeTrading.quantity,
     maxQuantity: config.runtimeTrading.maxQuantity,

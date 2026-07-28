@@ -65,6 +65,13 @@ const EMPTY = {
   HERMES_KILL_SWITCH_ENABLED: undefined,
   HERMES_MAX_HOLDING_DURATION_MS: undefined,
   HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: undefined,
+  HERMES_AGENT_CLI_PATH: undefined,
+  HERMES_AGENT_DECISION_TIMEOUT_MS: undefined,
+  HERMES_AGENT_MAX_STDOUT_BYTES: undefined,
+  HERMES_INSTRUMENT_UNIVERSE: undefined,
+  HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
+  HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
+  HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
 };
 
 const PORTFOLIO_RISK_CONFIG: PortfolioRiskConfig = {
@@ -79,7 +86,13 @@ afterEach(async () => {
 
 describe("buildRuntimeDependencies — valid local/paper/mock construction", () => {
   it("wires real dependencies end to end with no network I/O", async () => {
-    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: VALID_REGISTRY });
+    // Prototype 1.0 — official Hermes Agent decision integration: HERMES_STRATEGY_ID is set
+    // explicitly here so this test continues to prove what it always has (a real,
+    // registry-loaded HERMES_APPROVED strategy document flows through the whole factory) — by
+    // default (HERMES_STRATEGY_ID unset), HermesAgentStrategy now wins instead (see
+    // strategy-loader.ts's own doc comment), which is exercised by config/strategy-loader tests
+    // specifically, not this end-to-end wiring test.
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: VALID_REGISTRY, HERMES_STRATEGY_ID: "STRAT-0001" });
     const auditTrail = new InMemoryAuditTrail();
 
     const result = await buildRuntimeDependencies({
@@ -98,6 +111,23 @@ describe("buildRuntimeDependencies — valid local/paper/mock construction", () 
     expect(result.dependencies.strategy.strategyId).toBe("STRAT-0001");
     expect(result.dependencies.symbol).toBe("BTC");
     expect(result.dependencies.quantity).toBe(10);
+  });
+
+  it("defaults to HermesAgentStrategy (HERMES-AGENT) as the decision authority when HERMES_STRATEGY_ID is unset — Prototype 1.0's own default", async () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_STRATEGY_REGISTRY_PATH: VALID_REGISTRY });
+    const auditTrail = new InMemoryAuditTrail();
+
+    const result = await buildRuntimeDependencies({
+      config,
+      auditTrail,
+      executionRunId: "test-run",
+      resetBrokerState: true,
+      portfolioRiskConfig: PORTFOLIO_RISK_CONFIG,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.dependencies.strategy.strategyId).toBe("HERMES-AGENT");
   });
 
   it("honours a configured symbol/quantity", async () => {

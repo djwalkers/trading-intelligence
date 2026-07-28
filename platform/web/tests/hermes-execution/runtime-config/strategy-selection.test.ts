@@ -73,3 +73,43 @@ describe("selectStrategy — disabled strategy", () => {
     if (!result.found) expect(result.reason).toMatch(/disabled/i);
   });
 });
+
+// Prototype 1.0 — official Hermes Agent decision integration. Explicit strategy selection: an
+// explicit strategyId (HERMES_AGENT_STRATEGY_ID, per config.ts's own new default) is an EXACT
+// match, never influenced by how many HERMES_APPROVED strategies are loaded or in what order —
+// this is what makes Prototype 1.0's decision authority independent of "first HERMES_APPROVED
+// wins" registry ordering.
+describe("selectStrategy — registry ordering cannot change an explicit selection", () => {
+  it("selects HERMES-AGENT regardless of how many other HERMES_APPROVED strategies are loaded, or in what order", () => {
+    const hermesAgent = makeStrategy({ strategyId: "HERMES-AGENT", sourceType: "HERMES_APPROVED" });
+    const realStrategyA = makeStrategy({ strategyId: "STRAT-0001", sourceType: "HERMES_APPROVED" });
+    const realStrategyB = makeStrategy({ strategyId: "STRAT-0002", sourceType: "HERMES_APPROVED" });
+
+    // hermesAgent listed LAST — if selection were still "first HERMES_APPROVED wins," this would
+    // incorrectly select STRAT-0001 instead.
+    const result = selectStrategy([realStrategyA, realStrategyB, hermesAgent], "HERMES-AGENT");
+    expect(result).toEqual({ found: true, strategy: hermesAgent });
+  });
+
+  it("selects HERMES-AGENT identically whether it is first, middle, or last in the loaded array", () => {
+    const hermesAgent = makeStrategy({ strategyId: "HERMES-AGENT", sourceType: "HERMES_APPROVED" });
+    const realStrategyA = makeStrategy({ strategyId: "STRAT-0001", sourceType: "HERMES_APPROVED" });
+    const realStrategyB = makeStrategy({ strategyId: "STRAT-0002", sourceType: "HERMES_APPROVED" });
+
+    const orderings = [
+      [hermesAgent, realStrategyA, realStrategyB],
+      [realStrategyA, hermesAgent, realStrategyB],
+      [realStrategyA, realStrategyB, hermesAgent],
+    ];
+    for (const ordering of orderings) {
+      expect(selectStrategy(ordering, "HERMES-AGENT")).toEqual({ found: true, strategy: hermesAgent });
+    }
+  });
+
+  it("selects DEMO-0001 by explicit id even when HERMES_APPROVED strategies are also loaded", () => {
+    const hermesAgent = makeStrategy({ strategyId: "HERMES-AGENT", sourceType: "HERMES_APPROVED" });
+    const demo = makeStrategy({ strategyId: "DEMO-0001", sourceType: "DEMO_ONLY" });
+    const result = selectStrategy([hermesAgent, demo], "DEMO-0001");
+    expect(result).toEqual({ found: true, strategy: demo });
+  });
+});

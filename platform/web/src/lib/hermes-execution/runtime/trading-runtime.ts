@@ -4,9 +4,10 @@ import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, InternalStrategy, OrderSizingMode } from "../types";
 import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, RuntimeMode } from "../config";
 import type { MarketDataProvider } from "../market-data/market-data-provider";
-import { MarketDecisionEngine } from "../market-decision-engine";
+import { MarketDecisionEngine, type MarketDecision } from "../market-decision-engine";
 import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
 import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
+import type { TradeLifecycleRecord } from "../trade-lifecycle/types";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
@@ -34,6 +35,11 @@ import { TradingScheduler } from "./trading-scheduler";
 import { assertValidRuntimeTransition, type TradingErrorSummary, type TradingRuntimeState, type TradingRuntimeStatus } from "./types";
 import { loadEnabledStrategies } from "../strategy-loader";
 import type { RegistryClient } from "../registry-client";
+import { runUniverseScan } from "./universe-scanner";
+import type { HermesAgentAdapterConfig } from "../hermes-agent/hermes-agent-adapter";
+import type { HermesCliRunner } from "../hermes-agent/hermes-cli-runner";
+import type { HermesAgentStrategy } from "../hermes-agent/hermes-agent-strategy";
+import type { TradingCycleResultSummary } from "./types";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. AnalysisIntegrationDeps is
 // entirely optional and additive: when `deps.analysis` is undefined (the default for every
@@ -68,12 +74,52 @@ export interface AnalysisIntegrationDeps {
 export type TradingCycleOutcome =
   | {
       kind: "completed";
-      result: { decision: ReturnType<typeof MarketDecisionEngine.evaluate>; candidateId: string | undefined; executedCandidateIds: string[] };
+      result: {
+        decision: Awaited<ReturnType<typeof MarketDecisionEngine.evaluate>>;
+        candidateId: string | undefined;
+        executedCandidateIds: string[];
+      };
     }
   | { kind: "failed"; error: unknown }
   | { kind: "skipped-paused" }
   | { kind: "skipped-overlap" }
   | { kind: "skipped-market-closed" };
+
+/** Prototype 1.0 — official Hermes Agent decision integration. runInstrumentCycle's own return
+ * shape — `summary` is exactly what becomes (part of) `lastResult`/the per-instrument audit
+ * details; `decision` is the full MarketDecision object callers of runNow()/attemptCycle() see via
+ * TradingCycleOutcome's own "completed.result.decision". `reconciliationFailureReason` is set only
+ * on the reconciliation-failure path — mirrors the pre-refactor code's own inline audit-only
+ * `reason` field (present in the TRADING_CYCLE_COMPLETED audit event, deliberately never part of
+ * `lastResult` itself — preserved exactly, including that asymmetry). */
+interface InstrumentCycleOutcome {
+  summary: TradingCycleResultSummary;
+  decision: Awaited<ReturnType<typeof MarketDecisionEngine.evaluate>>;
+  reconciliationFailureReason?: string;
+}
+
+/** Prototype 1.0 — runtime ordering hardening. The narrow, NEVER-persisted per-instrument state
+ * threaded from runInstrumentPhaseA to runInstrumentPhaseB — exists only for the lifetime of a
+ * single runCycleBody call, one instance per instrument, held in a plain local Record (never a
+ * class field, never written to any repository). `context`/`snapshot` are Phase A's own
+ * already-fetched market data, reused as-is in Phase B rather than re-fetched a second time. */
+interface InstrumentCycleState {
+  instrument: string;
+  /** false only when Phase A itself failed for this instrument (a thrown error, or a reconciliation
+   * result reporting `ok: false`) — Phase B then skips all real processing and reproduces the exact
+   * pre-split reconciliation-failure outcome shape, never touching the broker or a candidate. */
+  safeToContinue: boolean;
+  reconciliationFailureReason?: string;
+  currentPositionOpen: boolean;
+  currentRecord: TradeLifecycleRecord | undefined;
+  context: MarketDecisionContext | undefined;
+  snapshot: MarketDataSnapshot | undefined;
+  /** Set only when Phase A itself closed this position (kill switch/stop-loss/take-profit/
+   * strategy-disabled/max-holding) — carried through so Phase B's own summary still reports it even
+   * though Phase B's own opposing-signal check never runs once the position is already gone. */
+  phaseAExitTrigger?: string;
+  phaseAExitClosed?: boolean;
+}
 
 export interface TradingRuntimeDeps {
   broker: PaperBroker;
@@ -166,6 +212,37 @@ export interface TradingRuntimeDeps {
    * (runtime/lifecycle-recovery.ts, run at the top of every cycle — see runCycleBody) acts on it.
    * See config.ts's own HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS for the production default. */
   recoveryThresholdMs: number;
+  /** Prototype 1.0 — official Hermes Agent decision integration. When set, every instrument here
+   * receives the complete existing per-cycle lifecycle sequence (recovery, reconciliation,
+   * candidate repair, exit monitoring — stop-loss/take-profit/opposing-signal/max-holding/
+   * strategy-disabled/kill-switch — approved-candidate execution, duplicate suppression, and fresh
+   * candidate handling), looped once per instrument by runInstrumentCycle. Defaults to
+   * `[instrument]` when omitted, which preserves every existing single-instrument caller's
+   * behaviour byte-for-byte (the loop simply runs once, for `instrument`). When both are set,
+   * `instrument` should equal `instruments[0]` — it remains the value shown on cycle-level (not
+   * per-instrument) audit events, and is the "primary" instrument `lastResult`'s own top-level
+   * fields describe. */
+  instruments?: string[];
+  /** Prototype 1.0 — official Hermes Agent decision integration. When set, runCycleBody calls the
+   * Hermes-backed universe scanner exactly ONCE per cycle, before the per-instrument loop — never
+   * once per instrument (see runtime/universe-scanner.ts). Omitted entirely (the default) means no
+   * Hermes call ever happens and every instrument's own MarketDecisionEngine.evaluate() runs
+   * exactly as it always has (e.g. DEMO-0001's own deterministic ruleset, completely unaffected). */
+  universeScan?: TradingRuntimeUniverseScanDeps;
+}
+
+/** Prototype 1.0 — official Hermes Agent decision integration. Only the Hermes-specific pieces —
+ * everything else runUniverseScan needs (broker, marketDataProvider, tradeCandidateRepository,
+ * tradePerformance, auditTrail, strategy, orderSizingMode, instrumentUniverse) is already present
+ * elsewhere on TradingRuntimeDeps and is reused directly, never duplicated here. */
+export interface TradingRuntimeUniverseScanDeps {
+  hermesAgentStrategy: HermesAgentStrategy;
+  hermesAdapterConfig: HermesAgentAdapterConfig;
+  hermesCliRunner: HermesCliRunner;
+  maxProposalsPerScan: number;
+  maxOpenPositions: number;
+  maxOpenPositionsPerInstrument: number;
+  equityMarketHoursPolicy: MarketHoursPolicy;
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -197,6 +274,13 @@ export class TradingRuntime {
   private activeCyclePromise: Promise<void> | null = null;
 
   constructor(private readonly deps: TradingRuntimeDeps) {}
+
+  /** Prototype 1.0 — official Hermes Agent decision integration. The full set of instruments this
+   * runtime processes every cycle — `deps.instruments` when configured, else the single
+   * `deps.instrument` (preserving every existing caller's exact behaviour: a one-element loop). */
+  private get instrumentList(): string[] {
+    return this.deps.instruments ?? [this.deps.instrument];
+  }
 
   async start(): Promise<void> {
     assertValidRuntimeTransition(this.state, "RUNNING");
@@ -377,46 +461,30 @@ export class TradingRuntime {
   }
 
   /**
-   * Restart-Resilient Autonomy Phase, reordered by a later safety review (the original sequence ran
-   * approved-candidate execution BEFORE reconciliation, which meant a BUY candidate approved before
-   * a restart could re-execute before this cycle ever asked the broker whether a position already
-   * existed — see position-reconciliation.ts's own top-of-file comment for the restart scenario
-   * this closes). Every cycle now does, in this order:
+   * Prototype 1.0 — runtime ordering hardening. Every cycle now runs in three ordered stages, never
+   * two, so a slow, timed-out, or unavailable Hermes call can never delay any instrument's own
+   * exposure-reducing safety processing (see runInstrumentPhaseA's own doc comment for exactly why
+   * this is safe without duplicating any lifecycle/exit logic):
    *
-   * 0. Recover (crash-window recovery, deployment safety review): before reconciliation even runs,
-   *    sweep any DECISION_CREATED/APPROVED/EXECUTION_SUBMITTED/EXECUTION_RECONCILIATION_REQUIRED
-   *    lifecycle record left behind by a crash mid-execution — see runtime/lifecycle-recovery.ts's
-   *    own top-of-file comment for exactly why this cannot be deferred to reconciliation itself.
-   *    Runs on the very first cycle after a restart too — there is no separate "startup-only" path.
-   * 1. Reconcile (Phase 1): ask the broker's own live portfolio, never trust its in-memory
-   *    trackedPositions map alone, for whether the configured instrument already has an open
-   *    position. `currentPositionOpen`/`currentRecord` below are this cycle's own single, mutable
-   *    view of that truth — updated in place as exits/approved-candidate execution act on it, so
-   *    every later step in the SAME cycle sees the latest state without a second broker round-trip.
-   *    Immediately after a successful reconciliation, repair any TradeCandidate whose own status
-   *    fell out of sync with a now-confirmed-OPEN lifecycle record (candidate-lifecycle-repair.ts) —
-   *    never calls the broker, never re-runs risk checks.
-   * 2. Fail closed: any broker/ambiguity/duplicate-record failure from step 1 skips every remaining
-   *    step this cycle entirely (already-approved execution work is simply retried next cycle).
-   * 3. Evaluate the fresh decision once (buildMarketDecisionContext + MarketDecisionEngine.evaluate)
-   *    — needed immediately below for automatic-exit's own opposing-signal check, and reused again
-   *    later for new-entry gating; never recomputed a second time mid-cycle.
-   * 4. Automatic exit (Phase 3): if reconciliation shows an open position, evaluate stop-loss/
-   *    take-profit/opposing-signal/strategy-disabled/max-holding/kill-switch against FRESH data and
-   *    close immediately if triggered — never gated behind human approval, regardless of
-   *    approvalMode (closing is always a risk-reduction action, never blocked by the kill switch).
-   * 5. Execute previously-approved candidates (via the existing, unmodified
-   *    executeApprovedTradeCandidate): a SELL/close candidate always proceeds (risk reduction); a
-   *    BUY candidate only proceeds when `currentPositionOpen` is false AND killSwitchEnabled is
-   *    false — otherwise it is deliberately left APPROVED, untouched, for a later cycle (see
-   *    KILL_SWITCH_ENTRY_BLOCKED/APPROVED_CANDIDATE_EXECUTION_DEFERRED below).
-   * 6. Decide-and-propose: only when `currentPositionOpen` is false and the kill switch is off, a
-   *    fresh BUY decision is turned into a new PENDING TradeCandidate unless an equivalent one
-   *    already exists (Phase 6), then auto-approved immediately when approvalMode is AUTO_DEMO and
-   *    confidence clears the configured threshold (Phase 5) — through the EXACT SAME approve/
-   *    execute path a human uses, never a shortcut around risk/portfolio/audit stages. Gating
-   *    candidate creation itself behind the kill switch transitively blocks auto-approval too — a
-   *    candidate that is never created can never be auto-approved.
+   * Phase A (runInstrumentPhaseA, looped over every configured instrument, BEFORE any Hermes call):
+   * crash-window recovery, broker reconciliation, candidate repair, and every Hermes-INDEPENDENT
+   * exit trigger (kill switch, stop-loss, take-profit, strategy-disabled, max-holding). No broker
+   * ENTRY order is ever submitted here — only a risk-reducing close, via the existing, unmodified
+   * executeAutomaticExit.
+   *
+   * Hermes universe scan (runUniverseScanStep, exactly once, only after Phase A has run for every
+   * instrument): builds its own snapshot from the broker's now-current (post-Phase-A) open-position
+   * list. Never lets a scan failure abort the cycle — Phase A's own success is already unaffected by
+   * this call, having already completed before it ever starts.
+   *
+   * Phase B (runInstrumentPhaseB, looped over every configured instrument, after the Hermes scan):
+   * the real, Hermes-informed MarketDecisionEngine.evaluate(), the OPPOSING_SIGNAL exit check for any
+   * position Phase A left open, approved-candidate execution, and fresh-candidate creation.
+   *
+   * Failure isolation is preserved at both per-instrument loops, with the same single-instrument
+   * "rethrow to this method's own outer catch" semantics the pre-split single runInstrumentCycle
+   * always had (see each loop's own inline comment) — a multi-instrument failure in either phase is
+   * recorded and isolated, never propagated to another instrument or the other phase.
    */
   private async runCycleBody(trigger: "scheduled" | "manual"): Promise<TradingCycleOutcome> {
     await this.recordAudit("TRADING_CYCLE_STARTED", { trigger });
@@ -424,348 +492,106 @@ export class TradingRuntime {
     const executionRunId = this.executionRunId ?? "trading-runtime-unstarted";
     try {
       const now = this.deps.clock.now();
+      const instruments = this.instrumentList;
 
-      // Restart-Resilient Autonomy Phase — crash-window recovery (deployment safety review).
-      // Strictly before reconciliation: a stale pre-OPEN record left by a crash must be resolved
-      // (abandoned, correlated to a real position, or flagged ambiguous) before reconciliation's own
-      // duplicate/orphan-adoption checks ever run against it — see lifecycle-recovery.ts's own
-      // top-of-file comment.
-      await recoverStaleLifecycleRecords({
-        broker: this.deps.broker,
-        instrument: this.deps.instrument,
-        strategy: this.deps.strategy,
-        brokerProvider: this.deps.brokerProvider,
-        lifecycleStore: this.deps.lifecycleStore,
-        tradeCandidateRepository: this.deps.tradeCandidateRepository,
-        auditTrail: this.deps.auditTrail,
-        executionRunId,
-        now,
-        recoveryThresholdMs: this.deps.recoveryThresholdMs,
-      });
+      // Phase A — safety and existing exposure, for every instrument, strictly before any Hermes
+      // subprocess call this cycle.
+      const states: Record<string, InstrumentCycleState> = {};
+      for (const instrument of instruments) {
+        try {
+          states[instrument] = await this.runInstrumentPhaseA(instrument, now, executionRunId);
+        } catch (error) {
+          // Mirrors the identical single-instrument-vs-isolation semantics the Phase B loop below
+          // (and the pre-split runInstrumentCycle before it) has always used.
+          if (instruments.length === 1) throw error;
+          await this.recordAudit("TRADING_CYCLE_FAILED", { stage: "phase-a", message: toErrorMessage(error) }, instrument);
+          states[instrument] = {
+            instrument,
+            safeToContinue: false,
+            reconciliationFailureReason: toErrorMessage(error),
+            currentPositionOpen: false,
+            currentRecord: undefined,
+            context: undefined,
+            snapshot: undefined,
+          };
+        }
+      }
 
-      // Restart-Resilient Autonomy Phase — Phase 1, reordered ahead of approved-candidate
-      // execution. THE truth this cycle uses for whether the configured instrument already has an
-      // open position — never buildMarketDecisionContext's own broker.getOpenPositions()-derived
-      // positionOpen alone (see position-reconciliation.ts's own top-of-file comment for why that
-      // can be wrong after a restart).
-      const reconciliation = await reconcileBrokerPosition({
-        broker: this.deps.broker,
-        instrument: this.deps.instrument,
-        strategy: this.deps.strategy,
-        brokerProvider: this.deps.brokerProvider,
-        sizingMode: this.deps.orderSizingMode,
-        lifecycleStore: this.deps.lifecycleStore,
-        tradeCandidateRepository: this.deps.tradeCandidateRepository,
-        auditTrail: this.deps.auditTrail,
-        executionRunId,
-        now,
-      });
+      // Prototype 1.0 — official Hermes Agent decision integration. Exactly ONE Hermes call for
+      // the whole cycle (never once per instrument), and only now — after every instrument's own
+      // safety-critical Phase A has already fully run, regardless of whether Hermes is reachable at
+      // all this cycle — see runUniverseScanStep's own doc comment for why this never aborts the
+      // cycle even if it fails.
+      await this.runUniverseScanStep(now, executionRunId);
 
-      if (!reconciliation.ok) {
-        // Fail closed: BROKER_RECONCILIATION_FAILED (or a more specific reconciliation-failure
-        // event) was already emitted by reconcileBrokerPosition itself. Nothing else this cycle —
-        // not exits, not approved-candidate execution, not a fresh entry — is safe to evaluate
-        // without knowing the broker's own true state.
-        await sweepExpiredCandidates({
-          repository: this.deps.tradeCandidateRepository,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
-          strategyId: this.deps.strategy.strategyId,
-          instrument: this.deps.instrument,
-          now,
-        });
-        this.successfulRunCount += 1;
-        this.lastResult = {
-          decision: "HOLD",
-          candidateCreated: false,
-          instrument: this.deps.instrument,
-          executedCandidateIds: [],
-          reconciliationFailed: true,
+      const perInstrument: Record<string, TradingCycleResultSummary> = {};
+      let primaryOutcome: InstrumentCycleOutcome | undefined;
+
+      for (const instrument of instruments) {
+        try {
+          const outcome = await this.runInstrumentPhaseB(states[instrument]!, now, executionRunId, cycleStartedAtMs, trigger);
+          perInstrument[instrument] = outcome.summary;
+          if (!primaryOutcome) primaryOutcome = outcome;
+        } catch (error) {
+          // Preserves the EXACT existing single-instrument failure semantics: with only one
+          // instrument configured, rethrowing here is indistinguishable from the pre-refactor
+          // code's own uncaught exception reaching this method's outer catch below. Isolation
+          // (recording and continuing with the remaining instruments) only ever applies once more
+          // than one instrument is actually configured — the mission's own explicit requirement
+          // that one instrument's failure must never stop safe processing of the others.
+          if (instruments.length === 1) throw error;
+          await this.recordAudit("TRADING_CYCLE_FAILED", { stage: "phase-b", message: toErrorMessage(error) }, instrument);
+          perInstrument[instrument] = { decision: "HOLD", candidateCreated: false, instrument, executedCandidateIds: [], reconciliationFailed: true };
+        }
+      }
+
+      // Only reachable when every configured instrument failed (multi-instrument only — the
+      // single-instrument case above always either returns a real outcome or rethrows).
+      if (!primaryOutcome) {
+        const fallbackInstrument = instruments[0]!;
+        primaryOutcome = {
+          summary: perInstrument[fallbackInstrument]!,
+          decision: { action: "HOLD", confidence: 0, reasoning: ["Every configured instrument failed this cycle."] },
         };
-        this.lastRunCompletedAt = this.deps.clock.now().toISOString();
-        await this.recordAudit("TRADING_CYCLE_COMPLETED", {
-          decision: "HOLD",
-          candidateCreated: false,
-          executedCandidateIds: [],
-          reconciliationFailed: true,
-          reason: reconciliation.reason,
-        });
-        return {
-          kind: "completed",
-          result: {
-            decision: { action: "HOLD", confidence: 0, reasoning: [reconciliation.reason] },
-            candidateId: undefined,
-            executedCandidateIds: [],
-          },
-        };
-      }
-
-      // This cycle's own single, mutable view of "is a broker position (or an unresolved local
-      // record standing in for one) currently active" — seeded from reconciliation, then kept
-      // current as exits/approved-candidate execution act on it below, so every later gate in this
-      // same cycle sees the latest state without re-querying the broker.
-      let currentPositionOpen = reconciliation.positionOpen;
-      let currentRecord = reconciliation.record;
-
-      // Restart-Resilient Autonomy Phase — candidate/lifecycle repair (deployment safety review).
-      // Whenever reconciliation confirms an OPEN record (a fresh match, a CLOSE_FAILED retry-reopen,
-      // or a record the recovery sweep above just correlated), repair its own originating
-      // TradeCandidate if it fell out of sync (still APPROVED, or FAILED despite a confirmed
-      // position) — see candidate-lifecycle-repair.ts's own doc comment. A no-op when `currentRecord`
-      // has no candidateId (an orphan-adopted position) or its candidate is already consistent.
-      if (currentRecord) {
-        await repairCandidateForConfirmedLifecycle({
-          lifecycleRecord: currentRecord,
-          tradeCandidateRepository: this.deps.tradeCandidateRepository,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
-          now,
-        });
-      }
-
-      await sweepExpiredCandidates({
-        repository: this.deps.tradeCandidateRepository,
-        auditTrail: this.deps.auditTrail,
-        executionRunId,
-        strategyId: this.deps.strategy.strategyId,
-        instrument: this.deps.instrument,
-        now,
-      });
-
-      const { snapshot, context: rawContext } = await buildMarketDecisionContext(
-        this.deps.marketDataProvider,
-        this.deps.broker,
-        this.deps.instrument,
-        this.deps.strategy,
-      );
-      // Overrides buildMarketDecisionContext's own broker.getOpenPositions()-derived positionOpen —
-      // reconciliation.positionOpen is the only value this runtime trusts (see above).
-      const context: MarketDecisionContext = { ...rawContext, positionOpen: currentPositionOpen };
-      const decision = MarketDecisionEngine.evaluate(context);
-
-      // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Unconditional, exactly
-      // as before this phase — best-effort/never-throws (see persistAnalysis's own doc comment).
-      const analysisRunId = await this.persistAnalysis({
-        kind: "success",
-        trigger,
-        snapshot,
-        context,
-        result: { decision, executed: false } as TradeLifecycleCycleResult,
-        runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
-      });
-
-      let exitTrigger: string | undefined;
-      let exitClosed: boolean | undefined;
-
-      if (currentPositionOpen && currentRecord) {
-        // Restart-Resilient Autonomy Phase — Phase 3. Automatic exits never require human approval
-        // in demo mode — closing an already-open position is always a risk-reduction action, never
-        // gated by the kill switch (which forces this trigger, never blocks it).
-        const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
-        const trigger2 = evaluateExitTrigger({
-          record: currentRecord,
-          freshBid: context.bid,
-          freshDecision: decision,
-          killSwitchEnabled: this.deps.killSwitchEnabled,
-          maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
-          strategyStillEnabled,
-          now,
-        });
-
-        if (trigger2) {
-          exitTrigger = trigger2;
-          const exitResult = await executeAutomaticExit({
-            broker: this.deps.broker,
-            record: currentRecord,
-            trigger: trigger2,
-            lifecycleService: this.deps.lifecycleService,
-            auditTrail: this.deps.auditTrail,
-            executionRunId,
-            now,
-          });
-          exitClosed = exitResult.closed;
-          if (exitClosed) {
-            currentPositionOpen = false;
-            currentRecord = undefined;
-          }
-        }
-      }
-
-      // Restart-Resilient Autonomy Phase — reordered ahead of a fresh decision's own entry gating
-      // (see this method's own top-of-file comment for why this now runs after reconciliation/exits
-      // rather than before them). A SELL/close candidate always proceeds — closing is always a
-      // risk-reduction action. A BUY candidate proceeds only when no broker position or unresolved
-      // lifecycle is currently active AND the kill switch is off; otherwise it is deliberately left
-      // APPROVED, untouched, to be reconsidered next cycle.
-      const approvedCandidates = await this.deps.tradeCandidateRepository.list({
-        status: "APPROVED",
-        strategyId: this.deps.strategy.strategyId,
-        instrument: this.deps.instrument,
-      });
-      const executedCandidateIds: string[] = [];
-      for (const candidate of approvedCandidates) {
-        if (candidate.direction === "BUY") {
-          if (this.deps.killSwitchEnabled) {
-            await this.recordAudit("KILL_SWITCH_ENTRY_BLOCKED", {
-              context: "approved-candidate-execution",
-              candidateId: candidate.id,
-            });
-            continue;
-          }
-          if (currentPositionOpen) {
-            await this.recordAudit("APPROVED_CANDIDATE_EXECUTION_DEFERRED", {
-              candidateId: candidate.id,
-              reason: "A broker position or unresolved lifecycle record is already active for this strategy+instrument.",
-            });
-            continue;
-          }
-        }
-
-        const outcome = await executeApprovedTradeCandidate({
-          repository: this.deps.tradeCandidateRepository,
-          broker: this.deps.broker,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
-          lifecycleService: this.deps.lifecycleService,
-          portfolioRisk: {
-            config: this.deps.portfolioRiskConfig,
-            dailyTradeCount: this.deps.broker.getCompletedTrades().length,
-            // The broker was already connected before this runtime was constructed (the CLI's own
-            // responsibility, mirroring market-decide.ts's identical assumption) — true here
-            // reflects that, not a fresh connectivity probe every cycle.
-            brokerAvailable: true,
-          },
-          candidate,
-          now,
-          brokerProvider: this.deps.brokerProvider,
-        });
-        if (outcome.outcome === "executed") {
-          executedCandidateIds.push(candidate.id);
-          // Keep this cycle's own position-state view current for any later iteration/step.
-          if (candidate.direction === "BUY") {
-            currentPositionOpen = true;
-          } else {
-            currentPositionOpen = false;
-            currentRecord = undefined;
-          }
-        }
-      }
-
-      // Phase 4 — Trade Performance Engine. Strictly after execution work above has already fully
-      // completed — read-only against TradeCandidateRepository/TradeLifecycleStore (never writes
-      // to either), can never change which candidates were executed or how, and can never fail
-      // this cycle (see persistTradePerformance's own doc comment).
-      for (const candidateId of executedCandidateIds) {
-        await this.persistTradePerformance(candidateId);
-      }
-
-      let candidate: Awaited<ReturnType<typeof createTradeCandidateForDecision>>;
-      let duplicateEntrySuppressed = false;
-      let autoApproved = false;
-
-      // Fresh entries are only ever considered when no position/unresolved lifecycle is currently
-      // active AND the kill switch is off — even immediately after an exit fired above, this same
-      // cycle never opens a new one; the NEXT cycle's own reconciliation will correctly see the
-      // position closed and permit an entry then.
-      if (decision.action === "BUY" && !currentPositionOpen) {
-        if (this.deps.killSwitchEnabled) {
-          await this.recordAudit("KILL_SWITCH_ENTRY_BLOCKED", { context: "fresh-candidate-creation" });
-        } else {
-          const duplicateCheck = await checkForDuplicateEntry({
-            tradeCandidateRepository: this.deps.tradeCandidateRepository,
-            lifecycleStore: this.deps.lifecycleStore,
-            strategyId: this.deps.strategy.strategyId,
-            instrument: this.deps.instrument,
-          });
-
-          if (duplicateCheck.duplicate) {
-            duplicateEntrySuppressed = true;
-            await this.recordAudit("DUPLICATE_ENTRY_SUPPRESSED", { reason: duplicateCheck.reason });
-          } else {
-            candidate = await createTradeCandidateForDecision({
-              repository: this.deps.tradeCandidateRepository,
-              auditTrail: this.deps.auditTrail,
-              executionRunId,
-              decision,
-              context,
-              marketDataSnapshot: snapshot,
-              amount: this.deps.amount,
-              sizingMode: this.deps.orderSizingMode,
-              analysisRunId,
-              now,
-              expiryMs: this.deps.tradeCandidateExpiryMs,
-            });
-
-            // Restart-Resilient Autonomy Phase — Phase 5 (AUTO_DEMO). The candidate is ALREADY
-            // durably persisted as PENDING above before this ever runs — never the other way
-            // around. Never reached while the kill switch is on: the outer guard above already
-            // skips candidate creation entirely in that case, which transitively blocks
-            // auto-approval too (a candidate that was never created can never be auto-approved).
-            if (candidate && this.deps.approvalMode === "AUTO_DEMO" && candidate.confidence >= this.deps.autoDemoMinConfidence) {
-              const approvalOutcome = await autoApproveTradeCandidate({
-                repository: this.deps.tradeCandidateRepository,
-                auditTrail: this.deps.auditTrail,
-                executionRunId,
-                candidateId: candidate.id,
-                now,
-              });
-              autoApproved = approvalOutcome.outcome === "approved";
-            }
-          }
-        }
-      } else if (decision.action === "SELL" && currentPositionOpen) {
-        // Restart-Resilient Autonomy Phase — fallback preserving pre-existing behaviour for any
-        // broker/record combination Phase 3's automatic exit monitor could not act on this cycle:
-        // no reconciled TradeLifecycleRecord was available to evaluate at all (every broker besides
-        // eToro today — LocalPaperBroker/Trading212/Hyperliquid, and any test double built only
-        // against the plain PaperBroker interface), or an automatic close was attempted and failed
-        // (`exitClosed === false`, a fallback safety net for human review rather than leaving the
-        // position silently unmanaged). Never reached once nothing is left open (an automatic exit
-        // or an approved-candidate SELL already closed it this same cycle) — no candidate is
-        // created for a position that no longer exists.
-        candidate = await createTradeCandidateForDecision({
-          repository: this.deps.tradeCandidateRepository,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
-          decision,
-          context,
-          marketDataSnapshot: snapshot,
-          amount: this.deps.amount,
-          sizingMode: this.deps.orderSizingMode,
-          analysisRunId,
-          now,
-          expiryMs: this.deps.tradeCandidateExpiryMs,
-        });
       }
 
       this.successfulRunCount += 1;
       this.lastResult = {
-        decision: decision.action,
-        candidateCreated: candidate !== undefined,
-        candidateId: candidate?.id,
-        instrument: this.deps.instrument,
-        executedCandidateIds,
-        positionOpen: currentPositionOpen,
-        exitTrigger,
-        exitClosed,
-        duplicateEntrySuppressed,
-        autoApproved,
+        ...primaryOutcome.summary,
+        perInstrument: instruments.length > 1 ? perInstrument : undefined,
       };
       this.lastRunCompletedAt = this.deps.clock.now().toISOString();
-      await this.recordAudit("TRADING_CYCLE_COMPLETED", {
-        decision: decision.action,
-        candidateCreated: candidate !== undefined,
-        executedCandidateIds,
-        positionOpen: currentPositionOpen,
-        exitTrigger,
-        exitClosed,
-        duplicateEntrySuppressed,
-        autoApproved,
-      });
+      await this.recordAudit(
+        "TRADING_CYCLE_COMPLETED",
+        primaryOutcome.reconciliationFailureReason !== undefined
+          ? {
+              decision: primaryOutcome.summary.decision,
+              candidateCreated: primaryOutcome.summary.candidateCreated,
+              executedCandidateIds: primaryOutcome.summary.executedCandidateIds,
+              reconciliationFailed: true,
+              reason: primaryOutcome.reconciliationFailureReason,
+              perInstrument: instruments.length > 1 ? perInstrument : undefined,
+            }
+          : {
+              decision: primaryOutcome.summary.decision,
+              candidateCreated: primaryOutcome.summary.candidateCreated,
+              executedCandidateIds: primaryOutcome.summary.executedCandidateIds,
+              positionOpen: primaryOutcome.summary.positionOpen,
+              exitTrigger: primaryOutcome.summary.exitTrigger,
+              exitClosed: primaryOutcome.summary.exitClosed,
+              duplicateEntrySuppressed: primaryOutcome.summary.duplicateEntrySuppressed,
+              autoApproved: primaryOutcome.summary.autoApproved,
+              perInstrument: instruments.length > 1 ? perInstrument : undefined,
+            },
+      );
 
       return {
         kind: "completed",
-        result: { decision, candidateId: candidate?.id, executedCandidateIds },
+        result: {
+          decision: primaryOutcome.decision,
+          candidateId: primaryOutcome.summary.candidateId,
+          executedCandidateIds: primaryOutcome.summary.executedCandidateIds,
+        },
       };
     } catch (error) {
       this.failedRunCount += 1;
@@ -783,6 +609,456 @@ export class TradingRuntime {
 
       return { kind: "failed", error };
     }
+  }
+
+  /**
+   * Prototype 1.0 — official Hermes Agent decision integration. Calls the universe scanner
+   * (runtime/universe-scanner.ts) exactly once per cycle when `deps.universeScan` is configured —
+   * a no-op otherwise, preserving every non-Hermes caller's behaviour exactly (DEMO-0001 and any
+   * other registered Strategy never needed this step and still don't). Never lets a scan failure
+   * abort the cycle: the per-instrument maintenance loop that follows (recovery/reconciliation/
+   * exit-monitoring for already-open positions) must still run regardless of whether Hermes itself
+   * was reachable this cycle. On failure, the shared strategy's own proposal set is explicitly
+   * cleared so a stale selection from an earlier successful scan can never be acted on.
+   */
+  private async runUniverseScanStep(now: Date, executionRunId: string): Promise<void> {
+    const universeScan = this.deps.universeScan;
+    if (!universeScan) return;
+
+    try {
+      await runUniverseScan({
+        broker: this.deps.broker,
+        marketDataProvider: this.deps.marketDataProvider,
+        tradeCandidateRepository: this.deps.tradeCandidateRepository,
+        tradePerformance: this.deps.tradePerformance,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        strategy: this.deps.strategy,
+        hermesAgentStrategy: universeScan.hermesAgentStrategy,
+        hermesAdapterConfig: universeScan.hermesAdapterConfig,
+        hermesCliRunner: universeScan.hermesCliRunner,
+        instrumentUniverse: this.instrumentList,
+        maxProposalsPerScan: universeScan.maxProposalsPerScan,
+        maxOpenPositions: universeScan.maxOpenPositions,
+        maxOpenPositionsPerInstrument: universeScan.maxOpenPositionsPerInstrument,
+        orderSizingMode: this.deps.orderSizingMode,
+        equityMarketHoursPolicy: universeScan.equityMarketHoursPolicy,
+        now,
+      });
+    } catch (error) {
+      universeScan.hermesAgentStrategy.setScanProposals([]);
+      await this.recordAudit("TRADING_CYCLE_FAILED", { stage: "universe-scan", message: toErrorMessage(error) });
+    }
+  }
+
+  /**
+   * Prototype 1.0 — runtime ordering hardening. Phase A of the two-phase per-instrument split (see
+   * runCycleBody's own doc comment) — everything that must complete BEFORE any Hermes subprocess
+   * call this cycle: crash-window recovery, broker reconciliation (+ candidate repair on a
+   * confirmed record), and every Hermes-INDEPENDENT exit trigger. Reuses the exact same existing,
+   * frozen functions the pre-split runInstrumentCycle always has (recoverStaleLifecycleRecords,
+   * reconcileBrokerPosition, repairCandidateForConfirmedLifecycle, evaluateExitTrigger,
+   * executeAutomaticExit) — nothing here reimplements any of them.
+   *
+   * The neutral placeholder decision passed to evaluateExitTrigger below is safe because of
+   * exit-monitor.ts's own priority order: KILL_SWITCH, STOP_LOSS, TAKE_PROFIT, STRATEGY_DISABLED,
+   * and MAX_HOLDING_DURATION never read `freshDecision` at all — only the sixth and LOWEST-priority
+   * check, OPPOSING_SIGNAL, does, and a HOLD placeholder can never satisfy it. So this call
+   * evaluates all five Hermes-independent triggers exactly as a real decision would, while
+   * structurally deferring OPPOSING_SIGNAL to Phase B, where the real (Hermes-informed) decision is
+   * available. No broker ENTRY order is ever submitted here — only a risk-reducing close, via the
+   * existing, unmodified executeAutomaticExit.
+   */
+  private async runInstrumentPhaseA(instrument: string, now: Date, executionRunId: string): Promise<InstrumentCycleState> {
+    await recoverStaleLifecycleRecords({
+      broker: this.deps.broker,
+      instrument,
+      strategy: this.deps.strategy,
+      brokerProvider: this.deps.brokerProvider,
+      lifecycleStore: this.deps.lifecycleStore,
+      tradeCandidateRepository: this.deps.tradeCandidateRepository,
+      auditTrail: this.deps.auditTrail,
+      executionRunId,
+      now,
+      recoveryThresholdMs: this.deps.recoveryThresholdMs,
+    });
+
+    const reconciliation = await reconcileBrokerPosition({
+      broker: this.deps.broker,
+      instrument,
+      strategy: this.deps.strategy,
+      brokerProvider: this.deps.brokerProvider,
+      sizingMode: this.deps.orderSizingMode,
+      lifecycleStore: this.deps.lifecycleStore,
+      tradeCandidateRepository: this.deps.tradeCandidateRepository,
+      auditTrail: this.deps.auditTrail,
+      executionRunId,
+      now,
+    });
+
+    if (!reconciliation.ok) {
+      await sweepExpiredCandidates({
+        repository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        strategyId: this.deps.strategy.strategyId,
+        instrument,
+        now,
+      });
+      return {
+        instrument,
+        safeToContinue: false,
+        reconciliationFailureReason: reconciliation.reason,
+        currentPositionOpen: false,
+        currentRecord: undefined,
+        context: undefined,
+        snapshot: undefined,
+      };
+    }
+
+    let currentPositionOpen = reconciliation.positionOpen;
+    let currentRecord = reconciliation.record;
+
+    if (currentRecord) {
+      await repairCandidateForConfirmedLifecycle({
+        lifecycleRecord: currentRecord,
+        tradeCandidateRepository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        now,
+      });
+    }
+
+    await sweepExpiredCandidates({
+      repository: this.deps.tradeCandidateRepository,
+      auditTrail: this.deps.auditTrail,
+      executionRunId,
+      strategyId: this.deps.strategy.strategyId,
+      instrument,
+      now,
+    });
+
+    const { snapshot, context: rawContext } = await buildMarketDecisionContext(
+      this.deps.marketDataProvider,
+      this.deps.broker,
+      instrument,
+      this.deps.strategy,
+    );
+    // Overrides buildMarketDecisionContext's own broker.getOpenPositions()-derived positionOpen —
+    // reconciliation.positionOpen is the only value this runtime trusts (see above).
+    const context: MarketDecisionContext = { ...rawContext, positionOpen: currentPositionOpen };
+
+    let phaseAExitTrigger: string | undefined;
+    let phaseAExitClosed: boolean | undefined;
+
+    if (currentPositionOpen && currentRecord) {
+      // Restart-Resilient Autonomy Phase — Phase 3. Automatic exits never require human approval
+      // in demo mode — closing an already-open position is always a risk-reduction action, never
+      // gated by the kill switch (which forces this trigger, never blocks it).
+      const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
+      const placeholderDecision: MarketDecision = {
+        action: "HOLD",
+        confidence: 0,
+        reasoning: ["Phase A: pre-Hermes safety check — the opposing-signal trigger is evaluated separately in Phase B."],
+      };
+      const trigger = evaluateExitTrigger({
+        record: currentRecord,
+        freshBid: context.bid,
+        freshDecision: placeholderDecision,
+        killSwitchEnabled: this.deps.killSwitchEnabled,
+        maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
+        strategyStillEnabled,
+        now,
+      });
+
+      if (trigger) {
+        phaseAExitTrigger = trigger;
+        const exitResult = await executeAutomaticExit({
+          broker: this.deps.broker,
+          record: currentRecord,
+          trigger,
+          lifecycleService: this.deps.lifecycleService,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          now,
+        });
+        phaseAExitClosed = exitResult.closed;
+        if (phaseAExitClosed) {
+          currentPositionOpen = false;
+          currentRecord = undefined;
+        }
+      }
+    }
+
+    return {
+      instrument,
+      safeToContinue: true,
+      currentPositionOpen,
+      currentRecord,
+      context: { ...context, positionOpen: currentPositionOpen },
+      snapshot,
+      phaseAExitTrigger,
+      phaseAExitClosed,
+    };
+  }
+
+  /**
+   * Prototype 1.0 — runtime ordering hardening. Phase B of the two-phase per-instrument split (see
+   * runCycleBody's own doc comment) — everything that runs AFTER the one universe-wide Hermes scan:
+   * the real, Hermes-informed MarketDecisionEngine.evaluate(), the OPPOSING_SIGNAL exit check for
+   * any position Phase A left open, approved-candidate execution, and fresh-candidate creation.
+   * Reuses `state`'s own already-fetched context/snapshot from Phase A rather than re-fetching
+   * market data a second time this cycle. An instrument Phase A marked unsafe
+   * (`!state.safeToContinue`) is skipped entirely here, reproducing the exact pre-split
+   * reconciliation-failure outcome shape (same summary/decision fields, same
+   * `reconciliationFailureReason`) — never touching the broker or a candidate for it.
+   */
+  private async runInstrumentPhaseB(
+    state: InstrumentCycleState,
+    now: Date,
+    executionRunId: string,
+    cycleStartedAtMs: number,
+    trigger: "scheduled" | "manual",
+  ): Promise<InstrumentCycleOutcome> {
+    const { instrument } = state;
+
+    if (!state.safeToContinue) {
+      return {
+        summary: { decision: "HOLD", candidateCreated: false, instrument, executedCandidateIds: [], reconciliationFailed: true },
+        decision: {
+          action: "HOLD",
+          confidence: 0,
+          reasoning: [state.reconciliationFailureReason ?? "Phase A did not complete safely for this instrument this cycle."],
+        },
+        reconciliationFailureReason: state.reconciliationFailureReason,
+      };
+    }
+
+    let currentPositionOpen = state.currentPositionOpen;
+    let currentRecord = state.currentRecord;
+    const snapshot = state.snapshot!;
+    // Re-applies the latest positionOpen truth (which may have changed if Phase A closed this
+    // position) onto Phase A's own already-fetched context — never a second market-data fetch.
+    const context: MarketDecisionContext = { ...state.context!, positionOpen: currentPositionOpen };
+    const decision = await MarketDecisionEngine.evaluate(context);
+
+    // Phase 2B — Decision Intelligence: Historical Analysis Persistence. Unconditional, exactly
+    // as before this phase — best-effort/never-throws (see persistAnalysis's own doc comment).
+    const analysisRunId = await this.persistAnalysis({
+      kind: "success",
+      trigger,
+      snapshot,
+      context,
+      result: { decision, executed: false } as TradeLifecycleCycleResult,
+      runtimeDurationMs: this.deps.clock.now().getTime() - cycleStartedAtMs,
+    });
+
+    let exitTrigger: string | undefined = state.phaseAExitTrigger;
+    let exitClosed: boolean | undefined = state.phaseAExitClosed;
+
+    if (currentPositionOpen && currentRecord) {
+      // Phase A already ruled out KILL_SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/
+      // MAX_HOLDING_DURATION for this exact record/bid (identical inputs, re-evaluated here) — the
+      // only way this call's result can differ from Phase A's own is OPPOSING_SIGNAL, the one
+      // check that reads `freshDecision`, now the real, Hermes-informed decision rather than Phase
+      // A's neutral placeholder.
+      const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
+      const trigger2 = evaluateExitTrigger({
+        record: currentRecord,
+        freshBid: context.bid,
+        freshDecision: decision,
+        killSwitchEnabled: this.deps.killSwitchEnabled,
+        maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
+        strategyStillEnabled,
+        now,
+      });
+
+      if (trigger2) {
+        exitTrigger = trigger2;
+        const exitResult = await executeAutomaticExit({
+          broker: this.deps.broker,
+          record: currentRecord,
+          trigger: trigger2,
+          lifecycleService: this.deps.lifecycleService,
+          auditTrail: this.deps.auditTrail,
+          executionRunId,
+          now,
+        });
+        exitClosed = exitResult.closed;
+        if (exitClosed) {
+          currentPositionOpen = false;
+          currentRecord = undefined;
+        }
+      }
+    }
+
+    // Restart-Resilient Autonomy Phase — reordered ahead of a fresh decision's own entry gating
+    // (see this method's own top-of-file comment for why this now runs after reconciliation/exits
+    // rather than before them). A SELL/close candidate always proceeds — closing is always a
+    // risk-reduction action. A BUY candidate proceeds only when no broker position or unresolved
+    // lifecycle is currently active AND the kill switch is off; otherwise it is deliberately left
+    // APPROVED, untouched, to be reconsidered next cycle.
+    const approvedCandidates = await this.deps.tradeCandidateRepository.list({
+      status: "APPROVED",
+      strategyId: this.deps.strategy.strategyId,
+      instrument,
+    });
+    const executedCandidateIds: string[] = [];
+    for (const candidate of approvedCandidates) {
+      if (candidate.direction === "BUY") {
+        if (this.deps.killSwitchEnabled) {
+          await this.recordAudit(
+            "KILL_SWITCH_ENTRY_BLOCKED",
+            { context: "approved-candidate-execution", candidateId: candidate.id },
+            instrument,
+          );
+          continue;
+        }
+        if (currentPositionOpen) {
+          await this.recordAudit(
+            "APPROVED_CANDIDATE_EXECUTION_DEFERRED",
+            {
+              candidateId: candidate.id,
+              reason: "A broker position or unresolved lifecycle record is already active for this strategy+instrument.",
+            },
+            instrument,
+          );
+          continue;
+        }
+      }
+
+      const outcome = await executeApprovedTradeCandidate({
+        repository: this.deps.tradeCandidateRepository,
+        broker: this.deps.broker,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        lifecycleService: this.deps.lifecycleService,
+        portfolioRisk: {
+          config: this.deps.portfolioRiskConfig,
+          dailyTradeCount: this.deps.broker.getCompletedTrades().length,
+          // The broker was already connected before this runtime was constructed (the CLI's own
+          // responsibility, mirroring market-decide.ts's identical assumption) — true here
+          // reflects that, not a fresh connectivity probe every cycle.
+          brokerAvailable: true,
+        },
+        candidate,
+        now,
+        brokerProvider: this.deps.brokerProvider,
+      });
+      if (outcome.outcome === "executed") {
+        executedCandidateIds.push(candidate.id);
+        // Keep this cycle's own position-state view current for any later iteration/step.
+        if (candidate.direction === "BUY") {
+          currentPositionOpen = true;
+        } else {
+          currentPositionOpen = false;
+          currentRecord = undefined;
+        }
+      }
+    }
+
+    // Phase 4 — Trade Performance Engine. Strictly after execution work above has already fully
+    // completed — read-only against TradeCandidateRepository/TradeLifecycleStore (never writes
+    // to either), can never change which candidates were executed or how, and can never fail
+    // this cycle (see persistTradePerformance's own doc comment).
+    for (const candidateId of executedCandidateIds) {
+      await this.persistTradePerformance(candidateId, instrument);
+    }
+
+    let candidate: Awaited<ReturnType<typeof createTradeCandidateForDecision>>;
+    let duplicateEntrySuppressed = false;
+    let autoApproved = false;
+
+    // Fresh entries are only ever considered when no position/unresolved lifecycle is currently
+    // active AND the kill switch is off — even immediately after an exit fired above, this same
+    // cycle never opens a new one; the NEXT cycle's own reconciliation will correctly see the
+    // position closed and permit an entry then.
+    if (decision.action === "BUY" && !currentPositionOpen) {
+      if (this.deps.killSwitchEnabled) {
+        await this.recordAudit("KILL_SWITCH_ENTRY_BLOCKED", { context: "fresh-candidate-creation" }, instrument);
+      } else {
+        const duplicateCheck = await checkForDuplicateEntry({
+          tradeCandidateRepository: this.deps.tradeCandidateRepository,
+          lifecycleStore: this.deps.lifecycleStore,
+          strategyId: this.deps.strategy.strategyId,
+          instrument,
+        });
+
+        if (duplicateCheck.duplicate) {
+          duplicateEntrySuppressed = true;
+          await this.recordAudit("DUPLICATE_ENTRY_SUPPRESSED", { reason: duplicateCheck.reason }, instrument);
+        } else {
+          candidate = await createTradeCandidateForDecision({
+            repository: this.deps.tradeCandidateRepository,
+            auditTrail: this.deps.auditTrail,
+            executionRunId,
+            decision,
+            context,
+            marketDataSnapshot: snapshot,
+            amount: this.deps.amount,
+            sizingMode: this.deps.orderSizingMode,
+            analysisRunId,
+            now,
+            expiryMs: this.deps.tradeCandidateExpiryMs,
+          });
+
+          // Restart-Resilient Autonomy Phase — Phase 5 (AUTO_DEMO). The candidate is ALREADY
+          // durably persisted as PENDING above before this ever runs — never the other way
+          // around. Never reached while the kill switch is on: the outer guard above already
+          // skips candidate creation entirely in that case, which transitively blocks
+          // auto-approval too (a candidate that was never created can never be auto-approved).
+          if (candidate && this.deps.approvalMode === "AUTO_DEMO" && candidate.confidence >= this.deps.autoDemoMinConfidence) {
+            const approvalOutcome = await autoApproveTradeCandidate({
+              repository: this.deps.tradeCandidateRepository,
+              auditTrail: this.deps.auditTrail,
+              executionRunId,
+              candidateId: candidate.id,
+              now,
+            });
+            autoApproved = approvalOutcome.outcome === "approved";
+          }
+        }
+      }
+    } else if (decision.action === "SELL" && currentPositionOpen) {
+      // Restart-Resilient Autonomy Phase — fallback preserving pre-existing behaviour for any
+      // broker/record combination Phase 3's automatic exit monitor could not act on this cycle:
+      // no reconciled TradeLifecycleRecord was available to evaluate at all (every broker besides
+      // eToro today — LocalPaperBroker/Trading212/Hyperliquid, and any test double built only
+      // against the plain PaperBroker interface), or an automatic close was attempted and failed
+      // (`exitClosed === false`, a fallback safety net for human review rather than leaving the
+      // position silently unmanaged). Never reached once nothing is left open (an automatic exit
+      // or an approved-candidate SELL already closed it this same cycle) — no candidate is
+      // created for a position that no longer exists.
+      candidate = await createTradeCandidateForDecision({
+        repository: this.deps.tradeCandidateRepository,
+        auditTrail: this.deps.auditTrail,
+        executionRunId,
+        decision,
+        context,
+        marketDataSnapshot: snapshot,
+        amount: this.deps.amount,
+        sizingMode: this.deps.orderSizingMode,
+        analysisRunId,
+        now,
+        expiryMs: this.deps.tradeCandidateExpiryMs,
+      });
+    }
+
+    return {
+      summary: {
+        decision: decision.action,
+        candidateCreated: candidate !== undefined,
+        candidateId: candidate?.id,
+        instrument,
+        executedCandidateIds,
+        positionOpen: currentPositionOpen,
+        exitTrigger,
+        exitClosed,
+        duplicateEntrySuppressed,
+        autoApproved,
+      },
+      decision,
+    };
   }
 
   /**
@@ -864,7 +1140,15 @@ export class TradingRuntime {
               timeframe: analysis.timeframe,
               strategyId: this.deps.strategy.strategyId,
               strategyVersion: this.deps.strategy.version,
-              instrument: this.deps.instrument,
+              // Prototype 1.0 — multi-instrument correctness fix. The instrument this SPECIFIC
+              // analysis run concerns — read from the per-instrument context the caller already
+              // built for this cycle (outcome.context.instrument, set from runInstrumentPhaseB's
+              // own loop variable via buildMarketDecisionContext), never `this.deps.instrument`
+              // (the single, original configured instrument, which is only ever correct when
+              // exactly one instrument is configured — see this.deps.instruments's own doc
+              // comment). Ensures a BTC/ETH/SOL/AAPL/MSFT/NVDA cycle persists each instrument's own
+              // analysis row under its own symbol, never all mislabelled as `deps.instrument`.
+              instrument: outcome.context.instrument,
               snapshot: outcome.snapshot,
               context: outcome.context,
               result: outcome.result,
@@ -879,6 +1163,12 @@ export class TradingRuntime {
               timeframe: analysis.timeframe,
               strategyId: this.deps.strategy.strategyId,
               strategyVersion: this.deps.strategy.version,
+              // This "failure" branch is only ever reached from runCycleBody's own OUTER catch —
+              // a whole-cycle failure that occurred outside any specific instrument's own
+              // processing (e.g. before the per-instrument loops ever ran) — so there is no
+              // "current per-instrument" value to use here; `deps.instrument` (the same "primary
+              // instrument" recordAudit's own cycle-level events already show) is the correct,
+              // deliberate choice for this specific branch only.
               instrument: this.deps.instrument,
               error: outcome.error,
               runtimeDurationMs: outcome.runtimeDurationMs,
@@ -896,7 +1186,11 @@ export class TradingRuntime {
       logger.error("Failed to persist market analysis record — the trading cycle's own decision/execution outcome was unaffected", {
         component: "hermes-analysis-persistence",
         executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-        instrument: this.deps.instrument,
+        // Same per-instrument correctness fix as the buildAnalysisRecord call above — the success
+        // branch reports the actual instrument this run concerned, never the single configured
+        // `deps.instrument`, which the failure branch alone still legitimately uses (see that
+        // branch's own comment above).
+        instrument: outcome.kind === "success" ? outcome.context.instrument : this.deps.instrument,
         strategyId: this.deps.strategy.strategyId,
         errorCategory: categorizeAnalysisPersistenceError(error),
         persistenceEnabled: true,
@@ -918,7 +1212,7 @@ export class TradingRuntime {
    * approval outcome. Only ever calls existing, unmodified read methods on TradeCandidateRepository
    * (getById/list) and TradeLifecycleStore (getById) — never writes to either.
    */
-  private async persistTradePerformance(candidateId: string): Promise<void> {
+  private async persistTradePerformance(candidateId: string, instrument: string): Promise<void> {
     const tradePerformance = this.deps.tradePerformance;
     if (!tradePerformance) return;
 
@@ -933,7 +1227,12 @@ export class TradingRuntime {
       logger.error("Failed to record trade performance — the trading cycle's own execution outcome was unaffected", {
         component: "hermes-trade-performance",
         executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-        instrument: this.deps.instrument,
+        // Prototype 1.0 — multi-instrument correctness fix. The caller's own current per-instrument
+        // loop value, not `this.deps.instrument` — the underlying TradePerformance record itself was
+        // always correctly labelled (recordTradePerformanceForExecutedCandidate derives it from the
+        // candidate/lifecycle record, never from this runtime's deps), so only this diagnostic log
+        // line was ever at risk of mislabelling in multi-instrument mode.
+        instrument,
         strategyId: this.deps.strategy.strategyId,
         candidateId,
         reason: error instanceof Error ? error.message : String(error),
@@ -953,20 +1252,27 @@ export class TradingRuntime {
    * audit event in this runtime is best-effort, matching persistAnalysis/persistTradePerformance's
    * own "never propagate" convention.
    */
-  private async recordAudit(eventType: AuditEventType, details: Record<string, unknown>): Promise<void> {
+  /** Prototype 1.0 — official Hermes Agent decision integration. `instrumentOverride` lets a
+   * per-instrument event (inside runInstrumentCycle, looping over N instruments) record the
+   * SPECIFIC instrument it actually concerns, rather than always showing `deps.instrument` (the
+   * bug this override fixes: without it, every audit event for e.g. "ETH" would otherwise be
+   * mislabelled with whatever the single, original `deps.instrument` happened to be). Cycle-level
+   * events (STARTED/COMPLETED/etc.) never pass this, preserving their exact existing behaviour. */
+  private async recordAudit(eventType: AuditEventType, details: Record<string, unknown>, instrumentOverride?: string): Promise<void> {
+    const instrument = instrumentOverride ?? this.deps.instrument;
     try {
       await this.deps.auditTrail.record({
         timestamp: this.deps.clock.now().toISOString(),
         eventType,
         executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-        instrument: this.deps.instrument,
+        instrument,
         details,
       });
     } catch (error) {
       logger.error("Failed to persist a trading-runtime audit event — the cycle's own outcome was unaffected", {
         component: "hermes-execution",
         executionRunId: this.executionRunId ?? "trading-runtime-unstarted",
-        instrument: this.deps.instrument,
+        instrument,
         eventType,
         reason: error instanceof Error ? error.message : String(error),
       });

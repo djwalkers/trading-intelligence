@@ -16,7 +16,7 @@ function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
     calculateEntryConfidence: () => 0.5,
     calculateExitConfidence: () => 0.5,
     explainHold: () => [],
-    evaluate: (): Decision => ({
+    evaluate: async (): Promise<Decision> => ({
       action: "HOLD",
       confidence: 0.5,
       reasoning: [],

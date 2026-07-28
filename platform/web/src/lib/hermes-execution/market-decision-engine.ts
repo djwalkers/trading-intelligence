@@ -85,9 +85,13 @@ export const MarketDecisionEngine = {
    * Throws UnknownStrategyError (from strategies/strategy-registry.ts) if no strategy is registered
    * under that id — propagates to the caller exactly like any other cycle failure; see
    * strategy-registry.ts's own doc comment on why that is "graceful" here, not a raw crash.
+   *
+   * Prototype 1.0 — official Hermes Agent decision integration. Async (was synchronous) — the one
+   * minimal, mechanical signature change this integration makes; this function remains a pure
+   * dispatcher, with no rule logic of its own, regardless.
    */
-  evaluate(context: MarketDecisionContext, registry: StrategyRegistry = defaultStrategyRegistry): MarketDecision {
+  async evaluate(context: MarketDecisionContext, registry: StrategyRegistry = defaultStrategyRegistry): Promise<MarketDecision> {
     const strategy = registry.require(context.strategy.strategyId);
-    return strategy.evaluate(context);
+    return await strategy.evaluate(context);
   },
 };

@@ -77,7 +77,7 @@ export async function runMarketDecisionCycle(
   const timestamp = input.timestamp ?? marketContext.timestamp;
   const { instrument, strategy, ema20, ema50, rsi14, trend } = marketContext;
 
-  const decision = MarketDecisionEngine.evaluate(marketContext);
+  const decision = await MarketDecisionEngine.evaluate(marketContext);
 
   const emaRelationship = ema20 > ema50 ? "EMA20>EMA50" : ema20 < ema50 ? "EMA20<EMA50" : "EMA20=EMA50";
 

@@ -134,7 +134,7 @@ async function createBuyCandidate(
   contextOverrides: Partial<MarketDecisionContext> = {},
 ) {
   const context = makeMarketContext(contextOverrides);
-  const decision = MarketDecisionEngine.evaluate(context);
+  const decision = await MarketDecisionEngine.evaluate(context);
   const candidate = await createTradeCandidateForDecision({
     repository,
     auditTrail,
@@ -159,7 +159,7 @@ describe("createTradeCandidateForDecision", () => {
     const now = new Date("2026-01-01T00:00:00.000Z");
 
     const context = makeMarketContext();
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
     expect(decision.action).toBe("BUY");
 
     const candidate = await createTradeCandidateForDecision({
@@ -188,7 +188,7 @@ describe("createTradeCandidateForDecision", () => {
     const auditTrail = new InMemoryAuditTrail();
 
     const context = makeMarketContext({ trend: "Sideways", ema20: 100.02, ema50: 100 });
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
     expect(decision.action).toBe("HOLD");
 
     const candidate = await createTradeCandidateForDecision({
@@ -213,7 +213,7 @@ describe("createTradeCandidateForDecision", () => {
     const repository = new InMemoryTradeCandidateRepository();
     const auditTrail = new InMemoryAuditTrail();
     const context = makeMarketContext();
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
 
     const candidate = await createTradeCandidateForDecision({
       repository,
@@ -588,7 +588,7 @@ describe("executeApprovedTradeCandidate", () => {
     const now = new Date("2026-01-01T00:00:00.000Z");
 
     const context = makeMarketContext(); // ask 100.05, BUY decision
-    const decision = MarketDecisionEngine.evaluate(context);
+    const decision = await MarketDecisionEngine.evaluate(context);
     const candidate = await createTradeCandidateForDecision({
       repository,
       auditTrail,

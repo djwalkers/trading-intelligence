@@ -103,34 +103,34 @@ describe("Demo0001Strategy.calculateEntryConfidence / calculateExitConfidence", 
 describe("Demo0001Strategy.evaluate — equivalence with the pre-Phase-3 engine's own fixed ruleset", () => {
   const strategy = new Demo0001Strategy();
 
-  it("returns BUY with entryCriteriaMet true for a clean bullish setup", () => {
-    const decision = strategy.evaluate(makeContext());
+  it("returns BUY with entryCriteriaMet true for a clean bullish setup", async () => {
+    const decision = await strategy.evaluate(makeContext());
     expect(decision.action).toBe("BUY");
     expect(decision.entryCriteriaMet).toBe(true);
     expect(decision.exitCriteriaMet).toBe(false);
     expect(decision.reasoning.some((r) => /Entry authorised under strategy DEMO-0001/.test(r))).toBe(true);
   });
 
-  it("returns SELL with exitCriteriaMet true when a position is open and trend turns Bearish", () => {
-    const decision = strategy.evaluate(makeContext({ positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 }));
+  it("returns SELL with exitCriteriaMet true when a position is open and trend turns Bearish", async () => {
+    const decision = await strategy.evaluate(makeContext({ positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 }));
     expect(decision.action).toBe("SELL");
     expect(decision.exitCriteriaMet).toBe(true);
     expect(decision.entryCriteriaMet).toBe(false);
   });
 
-  it("returns HOLD and never BUY while a position is already open, regardless of trend", () => {
-    const decision = strategy.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
+  it("returns HOLD and never BUY while a position is already open, regardless of trend", async () => {
+    const decision = await strategy.evaluate(makeContext({ positionOpen: true, trend: "Bullish" }));
     expect(decision.action).toBe("HOLD");
     expect(decision.reasoning.some((r) => /Position already open/.test(r))).toBe(true);
   });
 
-  it("returns HOLD with entryCriteriaMet false when RSI is outside the entry band", () => {
-    const decision = strategy.evaluate(makeContext({ rsi14: 90 }));
+  it("returns HOLD with entryCriteriaMet false when RSI is outside the entry band", async () => {
+    const decision = await strategy.evaluate(makeContext({ rsi14: 90 }));
     expect(decision.action).toBe("HOLD");
     expect(decision.entryCriteriaMet).toBe(false);
   });
 
-  it("always returns a finite confidence in [0, 1] and a non-empty reasoning array", () => {
+  it("always returns a finite confidence in [0, 1] and a non-empty reasoning array", async () => {
     const scenarios: Partial<MarketDecisionContext>[] = [
       {},
       { positionOpen: true, trend: "Bearish", ema20: 90, ema50: 100 },
@@ -138,7 +138,7 @@ describe("Demo0001Strategy.evaluate — equivalence with the pre-Phase-3 engine'
       { positionOpen: true, trend: "Bullish" },
     ];
     for (const overrides of scenarios) {
-      const decision = strategy.evaluate(makeContext(overrides));
+      const decision = await strategy.evaluate(makeContext(overrides));
       expect(Number.isFinite(decision.confidence)).toBe(true);
       expect(decision.confidence).toBeGreaterThanOrEqual(0);
       expect(decision.confidence).toBeLessThanOrEqual(1);

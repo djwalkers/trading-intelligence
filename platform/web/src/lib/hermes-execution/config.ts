@@ -1,6 +1,7 @@
 import "server-only";
 import * as path from "node:path";
 import { parseBoolean, parseEnum, parseInteger, ConfigError } from "@/lib/config/env";
+import { HERMES_AGENT_STRATEGY_ID } from "./hermes-agent/hermes-agent-strategy";
 import {
   MIN_REQUIRED_CANDLES,
   SUPPORTED_MARKET_TIMEFRAMES,
@@ -201,11 +202,15 @@ export interface RuntimeTradingConfig {
    * ceiling of 0 (which would be rejected as invalid), matching this file's established
    * "undefined means not configured" convention throughout. */
   maxQuantity: number | undefined;
-  /** Undefined means "not configured" — the runtime falls back to today's existing behaviour
-   * (first HERMES_APPROVED strategy, else the DEMO_ONLY strategy) exactly as before this
-   * milestone. Set explicitly, an unknown or disabled strategy ID fails startup validation (see
-   * runtime-config/strategy-selection.ts) rather than silently falling back. */
-  strategyId: string | undefined;
+  /** Prototype 1.0 — official Hermes Agent decision integration. Always a real, named strategy id
+   * — never undefined. Defaults to HERMES_AGENT_STRATEGY_ID ("HERMES-AGENT") when
+   * HERMES_STRATEGY_ID is unset, making the official Hermes Agent the explicit, typed decision
+   * authority by construction rather than by "first HERMES_APPROVED strategy wins" ordering.
+   * DEMO-0001 remains selectable only via an explicit HERMES_STRATEGY_ID=DEMO-0001 override (with
+   * DEMO_EXECUTION_MODE=true). Any value — the default or an explicit override — that does not
+   * name a currently-loaded, enabled strategy fails startup validation closed (see
+   * runtime-config/strategy-selection.ts), never silently falling back to a different one. */
+  strategyId: string;
   mode: RuntimeMode;
 }
 
@@ -280,6 +285,42 @@ export interface HermesExecutionConfig {
    * defaults to 60s), so a record genuinely still mid-execution is never mistaken for abandoned,
    * while still recovering promptly after a real crash. */
   recoveryThresholdMs: number;
+  /** Prototype 1.0 — official Hermes Agent decision integration. Configuration for the Hermes CLI
+   * adapter and the multi-instrument universe scan — see hermes-agent/hermes-agent-adapter.ts and
+   * runtime/universe-scanner.ts. Never contains a credential; the CLI itself reads its own
+   * provider/API-key configuration from `~/.hermes/`, entirely outside this app's config. */
+  hermesAgent: HermesAgentConfig;
+}
+
+/** Prototype 1.0 — official Hermes Agent decision integration. */
+export interface HermesAgentConfig {
+  /** Absolute path to the installed Hermes Agent CLI binary. Defaults to the confirmed VPS
+   * installation path; never a bare command name (this app never relies on PATH resolution for a
+   * subprocess it spawns). */
+  cliPath: string;
+  /** Bounded wall-clock time (ms) the adapter waits for one `hermes -z` one-shot call before
+   * treating it as a timeout (a fail-closed HOLD result, never a hang). A real LLM round-trip is
+   * seconds, not milliseconds — the default gives real headroom over that without risking an
+   * indefinitely stuck scheduler cycle. */
+  decisionTimeoutMs: number;
+  /** Maximum bytes of stdout the adapter will buffer from one `hermes -z` call before aborting it
+   * as oversized — a defensive bound against a runaway or misbehaving process, never a limit
+   * expected to bind in normal operation (a JSON proposal list is a few hundred bytes). */
+  maxStdoutBytes: number;
+  /** The configured multi-instrument market universe — uppercase, deduplicated, in configured
+   * order. Defaults to the Prototype 1.0 universe (BTC, ETH, SOL, AAPL, MSFT, NVDA). */
+  instrumentUniverse: string[];
+  /** Maximum number of ranked proposals the universe scanner will select and turn into trade
+   * candidates per scan, regardless of how many eligible BUY/SELL proposals Hermes returns. */
+  maxProposalsPerScan: number;
+  /** The confirmed Hermes gateway messaging target this app's outbound notifications are sent to
+   * via `hermes send --to "<target>"` — never a bot token or chat id this app manages itself; the
+   * gateway's own already-configured credentials are what actually deliver the message. */
+  telegramTarget: string;
+  /** Bounded wall-clock time (ms) the Telegram bridge waits for one `hermes send` call before
+   * treating it as failed — a notification is best-effort and must never block or delay a trading
+   * cycle (see hermes-gateway-alert-sender.ts). */
+  telegramSendTimeoutMs: number;
 }
 
 interface RawHermesExecutionEnv {
@@ -330,6 +371,13 @@ interface RawHermesExecutionEnv {
   HERMES_KILL_SWITCH_ENABLED: string | undefined;
   HERMES_MAX_HOLDING_DURATION_MS: string | undefined;
   HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: string | undefined;
+  HERMES_AGENT_CLI_PATH: string | undefined;
+  HERMES_AGENT_DECISION_TIMEOUT_MS: string | undefined;
+  HERMES_AGENT_MAX_STDOUT_BYTES: string | undefined;
+  HERMES_INSTRUMENT_UNIVERSE: string | undefined;
+  HERMES_MAX_PROPOSALS_PER_SCAN: string | undefined;
+  HERMES_TELEGRAM_GATEWAY_TARGET: string | undefined;
+  HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: string | undefined;
 }
 
 const DEFAULT_PAPER_STARTING_CASH = 10_000;
@@ -380,6 +428,25 @@ const DEFAULT_ETORO_HTTP_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 const DEFAULT_LIFECYCLE_RECOVERY_THRESHOLD_MS = 5 * 60_000;
 const MIN_HTTP_TIMEOUT_MS = 1_000; // a floor, not a recommendation — see the field's own doc comment
+
+// Prototype 1.0 — official Hermes Agent decision integration. Confirmed live on the VPS: the
+// installed CLI path, and the gateway's own confirmed messaging target.
+const DEFAULT_HERMES_AGENT_CLI_PATH = "/home/andy/.local/bin/hermes";
+// A real one-shot LLM call through Nous Portal is seconds, not milliseconds; 60s gives genuine
+// headroom over that without letting a stuck/hung subprocess block a scheduler cycle indefinitely.
+const DEFAULT_HERMES_AGENT_DECISION_TIMEOUT_MS = 60_000;
+const MIN_HERMES_AGENT_DECISION_TIMEOUT_MS = 1_000;
+// A ranked-proposal JSON response (six instruments, bounded reasoning arrays) is a few hundred
+// bytes to a few KB — 64KB is generous headroom while still bounding a runaway/misbehaving process.
+const DEFAULT_HERMES_AGENT_MAX_STDOUT_BYTES = 65_536;
+const MIN_HERMES_AGENT_MAX_STDOUT_BYTES = 1_024;
+const DEFAULT_INSTRUMENT_UNIVERSE = ["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"];
+const DEFAULT_MAX_PROPOSALS_PER_SCAN = 2;
+const MIN_MAX_PROPOSALS_PER_SCAN = 1;
+// Confirmed live: the Hermes gateway's own configured messaging target for this operator.
+const DEFAULT_HERMES_TELEGRAM_GATEWAY_TARGET = "telegram:Andrew Walker";
+const DEFAULT_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS = 15_000;
+const MIN_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS = 1_000;
 
 // Restart-Resilient Autonomy Phase.
 const DEFAULT_AUTO_DEMO_MIN_CONFIDENCE = 0.75;
@@ -442,6 +509,13 @@ export function buildHermesExecutionConfig(
     HERMES_KILL_SWITCH_ENABLED: process.env.HERMES_KILL_SWITCH_ENABLED,
     HERMES_MAX_HOLDING_DURATION_MS: process.env.HERMES_MAX_HOLDING_DURATION_MS,
     HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: process.env.HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS,
+    HERMES_AGENT_CLI_PATH: process.env.HERMES_AGENT_CLI_PATH,
+    HERMES_AGENT_DECISION_TIMEOUT_MS: process.env.HERMES_AGENT_DECISION_TIMEOUT_MS,
+    HERMES_AGENT_MAX_STDOUT_BYTES: process.env.HERMES_AGENT_MAX_STDOUT_BYTES,
+    HERMES_INSTRUMENT_UNIVERSE: process.env.HERMES_INSTRUMENT_UNIVERSE,
+    HERMES_MAX_PROPOSALS_PER_SCAN: process.env.HERMES_MAX_PROPOSALS_PER_SCAN,
+    HERMES_TELEGRAM_GATEWAY_TARGET: process.env.HERMES_TELEGRAM_GATEWAY_TARGET,
+    HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: process.env.HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS,
   },
 ): HermesExecutionConfig {
   const registryPath = env.HERMES_STRATEGY_REGISTRY_PATH
@@ -584,11 +658,20 @@ export function buildHermesExecutionConfig(
     );
   }
 
-  // Presence/format only — whether this ID actually names a known, enabled strategy can only be
-  // checked once the registry has been read (see runtime-config/strategy-selection.ts); no single
-  // required format applies (a Hermes-approved id looks like "STRAT-0001", the demo strategy's id
-  // is "DEMO-0001" — this file does not police that shape).
-  const strategyId = env.HERMES_STRATEGY_ID?.trim() || undefined;
+  // Prototype 1.0 — official Hermes Agent decision integration. Explicit strategy selection: this
+  // now ALWAYS resolves to a real, named strategyId — never undefined — so
+  // runtime-config/strategy-selection.ts's exact-match branch is the only path Prototype 1.0's own
+  // runtime ever takes; its "prefer the first loaded HERMES_APPROVED strategy" fallback (for an
+  // undefined strategyId) is unreachable in normal operation and exists only as a defensive
+  // fallback for other, non-runtime callers of selectStrategy() that might not go through this
+  // config. Defaults to the official Hermes Agent (HERMES_AGENT_STRATEGY_ID) — DEMO-0001 remains
+  // selectable only by explicitly setting HERMES_STRATEGY_ID=DEMO-0001 (with
+  // DEMO_EXECUTION_MODE=true). Presence/format only here — whether this ID actually names a known,
+  // enabled strategy can only be checked once the registry has been read (see
+  // runtime-config/strategy-selection.ts); no single required format applies (a Hermes-approved id
+  // looks like "STRAT-0001", the demo strategy's id is "DEMO-0001" — this file does not police
+  // that shape).
+  const strategyId = env.HERMES_STRATEGY_ID?.trim() || HERMES_AGENT_STRATEGY_ID;
 
   const privateKey = env.HYPERLIQUID_TESTNET_PRIVATE_KEY || undefined;
   if (privateKey && !PRIVATE_KEY_PATTERN.test(privateKey)) {
@@ -762,6 +845,64 @@ export function buildHermesExecutionConfig(
     { min: 60_000 },
   );
 
+  // Prototype 1.0 — official Hermes Agent decision integration.
+  const hermesAgentCliPath = (env.HERMES_AGENT_CLI_PATH || DEFAULT_HERMES_AGENT_CLI_PATH).trim();
+  if (hermesAgentCliPath.length === 0) {
+    throw new ConfigError("HERMES_AGENT_CLI_PATH must not be empty (or whitespace-only) if set.");
+  }
+
+  const hermesAgentDecisionTimeoutMs = parseInteger(
+    env.HERMES_AGENT_DECISION_TIMEOUT_MS,
+    DEFAULT_HERMES_AGENT_DECISION_TIMEOUT_MS,
+    { min: MIN_HERMES_AGENT_DECISION_TIMEOUT_MS },
+  );
+
+  const hermesAgentMaxStdoutBytes = parseInteger(
+    env.HERMES_AGENT_MAX_STDOUT_BYTES,
+    DEFAULT_HERMES_AGENT_MAX_STDOUT_BYTES,
+    { min: MIN_HERMES_AGENT_MAX_STDOUT_BYTES },
+  );
+
+  // Comma-separated, uppercased, trimmed, deduplicated (first occurrence wins), same character
+  // grammar as HERMES_TRADING_SYMBOL above — an empty or whitespace-only entry is rejected rather
+  // than silently dropped, since a typo'd separator ("BTC,,ETH") should fail closed, not shrink
+  // the configured universe silently.
+  let instrumentUniverse: string[];
+  if (env.HERMES_INSTRUMENT_UNIVERSE !== undefined && env.HERMES_INSTRUMENT_UNIVERSE !== "") {
+    const rawEntries = env.HERMES_INSTRUMENT_UNIVERSE.split(",").map((entry) => entry.trim());
+    if (rawEntries.some((entry) => entry.length === 0)) {
+      throw new ConfigError(
+        `HERMES_INSTRUMENT_UNIVERSE "${env.HERMES_INSTRUMENT_UNIVERSE}" contains an empty entry — check for a stray or trailing comma.`,
+      );
+    }
+    const upper = rawEntries.map((entry) => entry.toUpperCase());
+    for (const entry of upper) {
+      if (!SYMBOL_PATTERN.test(entry)) {
+        throw new ConfigError(
+          `HERMES_INSTRUMENT_UNIVERSE entry "${entry}" contains unsupported characters — expected letters, digits, ".", "_", or "-" only.`,
+        );
+      }
+    }
+    instrumentUniverse = [...new Set(upper)];
+  } else {
+    instrumentUniverse = [...DEFAULT_INSTRUMENT_UNIVERSE];
+  }
+
+  const maxProposalsPerScan = parseInteger(env.HERMES_MAX_PROPOSALS_PER_SCAN, DEFAULT_MAX_PROPOSALS_PER_SCAN, {
+    min: MIN_MAX_PROPOSALS_PER_SCAN,
+  });
+
+  const hermesTelegramGatewayTarget = (env.HERMES_TELEGRAM_GATEWAY_TARGET || DEFAULT_HERMES_TELEGRAM_GATEWAY_TARGET).trim();
+  if (hermesTelegramGatewayTarget.length === 0) {
+    throw new ConfigError("HERMES_TELEGRAM_GATEWAY_TARGET must not be empty (or whitespace-only) if set.");
+  }
+
+  const hermesTelegramGatewaySendTimeoutMs = parseInteger(
+    env.HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS,
+    DEFAULT_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS,
+    { min: MIN_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS },
+  );
+
   return {
     registryPath,
     executionMode,
@@ -824,6 +965,15 @@ export function buildHermesExecutionConfig(
     killSwitchEnabled,
     maxHoldingDurationMs,
     recoveryThresholdMs,
+    hermesAgent: {
+      cliPath: hermesAgentCliPath,
+      decisionTimeoutMs: hermesAgentDecisionTimeoutMs,
+      maxStdoutBytes: hermesAgentMaxStdoutBytes,
+      instrumentUniverse,
+      maxProposalsPerScan,
+      telegramTarget: hermesTelegramGatewayTarget,
+      telegramSendTimeoutMs: hermesTelegramGatewaySendTimeoutMs,
+    },
   };
 }
 

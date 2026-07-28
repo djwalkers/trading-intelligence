@@ -75,7 +75,7 @@ export async function runStrategyResearch(input: RunStrategyResearchInput): Prom
 
   for (const run of ordered) {
     const context = reconstructContext(run, { strategyId: strategy.id, strategyVersion: strategy.version, positionOpen });
-    const decision = strategy.evaluate(context);
+    const decision = await strategy.evaluate(context);
     decisionPoints.push({
       analysisRunId: run.id,
       context,

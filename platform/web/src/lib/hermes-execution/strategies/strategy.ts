@@ -92,6 +92,12 @@ export interface Strategy {
    * final Decision. The engine never inspects HOW this arrives at its answer — only that the
    * returned Decision is well-formed — so a strategy is free to compose these methods however it
    * needs to (demo-0001-strategy.ts's own evaluate() calls each of the above at least once).
+   *
+   * Prototype 1.0 — official Hermes Agent decision integration. Async (was synchronous): the one
+   * minimal, mechanical touch this integration makes to an otherwise-frozen contract, since a
+   * strategy backed by an external agent call is inherently asynchronous. Every existing
+   * synchronous implementation (Demo0001Strategy, ResearchVariantStrategy) satisfies this by
+   * simply being declared `async` — no behaviour change, no new rule logic, nothing awaited.
    */
-  evaluate(context: MarketDecisionContext): Decision;
+  evaluate(context: MarketDecisionContext): Promise<Decision>;
 }

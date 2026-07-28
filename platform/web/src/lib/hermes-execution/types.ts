@@ -390,7 +390,23 @@ export type AuditEventType =
   // a real, historically-accurate signal that the execution flow itself reported failure) — this is
   // the "documented repair transition" alternative: a clear, durable, actionable record for an
   // operator that the two stores disagree and manual review is warranted.
-  | "CANDIDATE_FAILED_WITH_CONFIRMED_BROKER_POSITION";
+  | "CANDIDATE_FAILED_WITH_CONFIRMED_BROKER_POSITION"
+  // Prototype 1.0 — official Hermes Agent decision integration. Genuinely new concepts: these are
+  // the first AuditEventType values ever named HERMES_* — every earlier event in this pipeline
+  // (MARKET_DECISION_RECEIVED, etc.) deliberately avoided that prefix because "Hermes" meant the
+  // external Nous Hermes Agent, not this deterministic pipeline (see MARKET_DECISION_RECEIVED's own
+  // comment above). Now that the official Hermes Agent genuinely is the decision brain for this
+  // strategy, these events record its own scan/proposal/rejection outcomes specifically.
+  | "UNIVERSE_SCAN_COMPLETED"
+  | "HERMES_PROPOSAL_SELECTED"
+  | "HERMES_RESPONSE_REJECTED"
+  | "DAILY_PORTFOLIO_SUMMARY"
+  // Prototype 1.0 — Telegram observability. Recorded whenever an outbound notification (through
+  // either AlertSender implementation — the direct Telegram bot transport or the Hermes gateway
+  // bridge) fails to deliver. Never throws into the caller (delivery is always best-effort — see
+  // TelegramAlertingAuditTrail's own doc comment); this is the "log or audit a redacted
+  // notification failure" record that replaces a silent, invisible swallow.
+  | "TELEGRAM_NOTIFICATION_FAILED";
 
 export interface AuditEvent {
   timestamp: string;
