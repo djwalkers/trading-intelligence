@@ -8,6 +8,11 @@ import {
   TIMEFRAME_DURATIONS_MS,
   type MarketTimeframe,
 } from "./market-data/candle-validation";
+import {
+  DEFAULT_EQUITY_SESSION_TIMEZONE,
+  DEFAULT_EQUITY_SESSION_START,
+  DEFAULT_EQUITY_SESSION_END,
+} from "./market-session-defaults";
 
 // Kept as its own small config module (mirrors server-config.ts's shape/caching pattern, reuses
 // its parsing primitives) rather than folded into ServerConfig — this whole feature is meant to
@@ -285,6 +290,18 @@ export interface HermesExecutionConfig {
    * defaults to 60s), so a record genuinely still mid-execution is never mistaken for abandoned,
    * while still recovering promptly after a real crash. */
   recoveryThresholdMs: number;
+  /** Hardening pass — opposing-signal exit stability. Minimum time (ms) a position must have been
+   * held before an OPPOSING_SIGNAL exit is even considered — stop-loss, take-profit, kill-switch,
+   * strategy-disabled, and max-holding exits are NEVER delayed by this (see
+   * runtime/opposing-signal-stability.ts). Defaults to 5 minutes. 0 disables the minimum-hold gate
+   * (every other gate — consecutive confirmation — still applies). */
+  opposingExitMinHoldMs: number;
+  /** Hardening pass — opposing-signal exit stability. How many CONSECUTIVE cycles Hermes must
+   * keep confirming an opposing signal before the exit is allowed to fire, once the minimum hold
+   * period has also elapsed — a single reversal-then-back-to-HOLD scan never closes a position.
+   * Defaults to 2. Must be >= 1 (1 behaves like the pre-hardening immediate-exit behaviour, once
+   * the minimum hold period has separately elapsed). */
+  opposingExitRequiredConfirmations: number;
   /** Prototype 1.0 — official Hermes Agent decision integration. Configuration for the Hermes CLI
    * adapter and the multi-instrument universe scan — see hermes-agent/hermes-agent-adapter.ts and
    * runtime/universe-scanner.ts. Never contains a credential; the CLI itself reads its own
@@ -378,6 +395,8 @@ interface RawHermesExecutionEnv {
   HERMES_MAX_PROPOSALS_PER_SCAN: string | undefined;
   HERMES_TELEGRAM_GATEWAY_TARGET: string | undefined;
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: string | undefined;
+  HERMES_OPPOSING_EXIT_MIN_HOLD_MS: string | undefined;
+  HERMES_OPPOSING_EXIT_CONFIRMATIONS: string | undefined;
 }
 
 const DEFAULT_PAPER_STARTING_CASH = 10_000;
@@ -404,12 +423,14 @@ const DEFAULT_SCHEDULER_INTERVAL_MS = 60_000; // 1 minute
 // tight loops" (e.g. a stray "60" meant as seconds, misread as milliseconds, would otherwise arm a
 // 60ms loop hammering the market data provider and broker).
 const MIN_SCHEDULER_INTERVAL_MS = 5_000;
-const DEFAULT_SESSION_TIMEZONE = "America/New_York";
 // A standard US equities regular session — a reasonable default for "a simple policy suitable for
 // equities," not a claim about any specific listed instrument this pipeline currently trades (which
-// is BTC, an always-open market — see SUPPORTED_MARKET_HOURS_POLICIES's own comment).
-const DEFAULT_SESSION_START = "09:30";
-const DEFAULT_SESSION_END = "16:00";
+// is BTC, an always-open market — see SUPPORTED_MARKET_HOURS_POLICIES's own comment). Remediation
+// pass (finding M5): sourced from the shared ../market-session-defaults.ts module, the same defaults
+// candle-validation.ts's own DEFAULT_EQUITY_MARKET_HOURS_POLICY falls back to.
+const DEFAULT_SESSION_TIMEZONE = DEFAULT_EQUITY_SESSION_TIMEZONE;
+const DEFAULT_SESSION_START = DEFAULT_EQUITY_SESSION_START;
+const DEFAULT_SESSION_END = DEFAULT_EQUITY_SESSION_END;
 const HHMM_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 // Milestone 8 — Deployment-Ready Runtime Configuration. Same BTC/10-unit defaults Mission 7's
@@ -447,6 +468,14 @@ const MIN_MAX_PROPOSALS_PER_SCAN = 1;
 const DEFAULT_HERMES_TELEGRAM_GATEWAY_TARGET = "telegram:Andrew Walker";
 const DEFAULT_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS = 15_000;
 const MIN_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS = 1_000;
+
+// Hardening pass — opposing-signal exit stability.
+const DEFAULT_OPPOSING_EXIT_MIN_HOLD_MS = 5 * 60_000;
+const DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS = 2;
+// Remediation pass (senior review finding M2) — safe floors: no configuration path may restore the
+// pre-hardening immediate-opposing-exit behaviour (see this block's own call site below).
+const MIN_OPPOSING_EXIT_MIN_HOLD_MS = 60_000;
+const MIN_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS = 2;
 
 // Restart-Resilient Autonomy Phase.
 const DEFAULT_AUTO_DEMO_MIN_CONFIDENCE = 0.75;
@@ -516,6 +545,8 @@ export function buildHermesExecutionConfig(
     HERMES_MAX_PROPOSALS_PER_SCAN: process.env.HERMES_MAX_PROPOSALS_PER_SCAN,
     HERMES_TELEGRAM_GATEWAY_TARGET: process.env.HERMES_TELEGRAM_GATEWAY_TARGET,
     HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: process.env.HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS,
+    HERMES_OPPOSING_EXIT_MIN_HOLD_MS: process.env.HERMES_OPPOSING_EXIT_MIN_HOLD_MS,
+    HERMES_OPPOSING_EXIT_CONFIRMATIONS: process.env.HERMES_OPPOSING_EXIT_CONFIRMATIONS,
   },
 ): HermesExecutionConfig {
   const registryPath = env.HERMES_STRATEGY_REGISTRY_PATH
@@ -903,6 +934,41 @@ export function buildHermesExecutionConfig(
     { min: MIN_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS },
   );
 
+  // Hardening pass — opposing-signal exit stability. Wrapped so an invalid value fails with a
+  // message naming the actual offending env var, rather than parseInteger's own generic
+  // "Expected an integer..." — "invalid values must fail clearly at startup" is this feature's own
+  // explicit requirement.
+  //
+  // Remediation pass (senior review finding M2) — safe configuration floors. This gate exists to
+  // prevent a real position from being closed on the strength of a single reversed scan; a value
+  // below these floors would defeat that purpose entirely (0ms hold / 1 confirmation is exactly the
+  // immediate-exit behaviour this whole feature was built to replace). There is deliberately no
+  // production environment override path that can go below these floors — the minimum is enforced
+  // here, in code, not by a config flag.
+  let opposingExitMinHoldMs: number;
+  try {
+    opposingExitMinHoldMs = parseInteger(env.HERMES_OPPOSING_EXIT_MIN_HOLD_MS, DEFAULT_OPPOSING_EXIT_MIN_HOLD_MS, {
+      min: MIN_OPPOSING_EXIT_MIN_HOLD_MS,
+    });
+  } catch (error) {
+    throw new ConfigError(
+      `HERMES_OPPOSING_EXIT_MIN_HOLD_MS is invalid: must be an integer >= ${MIN_OPPOSING_EXIT_MIN_HOLD_MS} (ms). ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  let opposingExitRequiredConfirmations: number;
+  try {
+    opposingExitRequiredConfirmations = parseInteger(
+      env.HERMES_OPPOSING_EXIT_CONFIRMATIONS,
+      DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS,
+      { min: MIN_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS },
+    );
+  } catch (error) {
+    throw new ConfigError(
+      `HERMES_OPPOSING_EXIT_CONFIRMATIONS is invalid: must be an integer >= ${MIN_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS}. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   return {
     registryPath,
     executionMode,
@@ -965,6 +1031,8 @@ export function buildHermesExecutionConfig(
     killSwitchEnabled,
     maxHoldingDurationMs,
     recoveryThresholdMs,
+    opposingExitMinHoldMs,
+    opposingExitRequiredConfirmations,
     hermesAgent: {
       cliPath: hermesAgentCliPath,
       decisionTimeoutMs: hermesAgentDecisionTimeoutMs,

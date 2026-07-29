@@ -56,6 +56,8 @@ const EMPTY = {
   HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
   HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
+  HERMES_OPPOSING_EXIT_MIN_HOLD_MS: undefined,
+  HERMES_OPPOSING_EXIT_CONFIRMATIONS: undefined,
 };
 
 describe("buildHermesExecutionConfig — runtimeTrading defaults", () => {

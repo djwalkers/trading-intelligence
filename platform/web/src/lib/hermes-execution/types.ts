@@ -406,7 +406,28 @@ export type AuditEventType =
   // bridge) fails to deliver. Never throws into the caller (delivery is always best-effort — see
   // TelegramAlertingAuditTrail's own doc comment); this is the "log or audit a redacted
   // notification failure" record that replaces a silent, invisible swallow.
-  | "TELEGRAM_NOTIFICATION_FAILED";
+  | "TELEGRAM_NOTIFICATION_FAILED"
+  // Hardening pass — opposing-signal exit stability. Fired instead of (never alongside) an
+  // automatic exit whenever evaluateExitTrigger's own raw OPPOSING_SIGNAL result is deferred by
+  // runtime/opposing-signal-stability.ts's own minimum-hold-period/consecutive-confirmation gate —
+  // stop-loss/take-profit/kill-switch/strategy-disabled/max-holding are never gated this way and
+  // never emit this event. `details.reason` names which gate blocked it
+  // ("min-hold-not-reached" | "insufficient-confirmations"); `details.consecutiveCount`/
+  // `details.requiredConsecutiveSignals` are always included so an operator can see exactly how
+  // close the position is to actually closing.
+  | "OPPOSING_SIGNAL_EXIT_DEFERRED"
+  // Remediation pass (senior review finding C2) — fired ONCE per eligible instrument, every
+  // universe scan, for BUY, SELL, *and* HOLD alike — the explicit decision-visibility event
+  // HERMES_PROPOSAL_SELECTED could never provide on its own (that event is fired only for
+  // SELECTED BUY/SELL proposals; an instrument Hermes decided to hold has no proposal at all, and
+  // therefore previously left no audit trace whatsoever — see universe-scanner.ts's own
+  // runUniverseScan). audit-derivations.ts's own listDecisions now treats this as the authoritative
+  // per-instrument decision stream (falling back to HERMES_PROPOSAL_SELECTED only for an audit log
+  // that predates this event entirely — see its own doc comment). `details.action` is always
+  // "BUY" | "SELL" | "HOLD"; `details.confidence`/`details.reasoning` are only ever Hermes's own
+  // validated proposal fields for BUY/SELL — never fabricated for HOLD (both are omitted, not
+  // defaulted to a guessed value, in that case).
+  | "HERMES_INSTRUMENT_DECISION_RECORDED";
 
 export interface AuditEvent {
   timestamp: string;

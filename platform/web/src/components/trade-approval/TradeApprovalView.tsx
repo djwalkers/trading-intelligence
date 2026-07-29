@@ -63,6 +63,72 @@ function formatPrice(value: number): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 });
 }
 
+const COPIED_FEEDBACK_MS = 1_500;
+
+/** Hardening pass — Trade Approval UI candidate ID. Shows a compact, monospace, truncated view of
+ * the candidate's own id by default, with a click/tap-to-expand toggle that reveals the FULL id
+ * inline (remediation pass, finding H3: `title` alone is a hover-only mechanism unavailable on
+ * touch/mobile — this toggle is keyboard- and touch-operable, and needs no hover at all), alongside
+ * a copy button — never the candidate's own other internal fields (analysisRunId,
+ * lifecycleRecordId, brokerOrderId, ...), and never any credential. `title` is kept too, as a
+ * bonus for desktop hover, but is no longer the only way to read the full value. Falls back to a
+ * manual `document.execCommand` copy only when the async Clipboard API itself is unavailable (e.g.
+ * a non-secure context) — still never silently does nothing on click. */
+export function CandidateIdCell({ candidateId }: { candidateId: string }) {
+  const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(candidateId);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = candidateId;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
+    } catch {
+      // Clipboard access can be denied by the browser/OS — the full id remains readable via the
+      // expand toggle regardless, so this is a degraded-but-usable failure, not a silent one; no
+      // error state is worth surfacing to the whole page for a copy-button failure.
+    }
+  }, [candidateId]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 font-mono" title={candidateId}>
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        aria-label={expanded ? `Collapse candidate ID ${candidateId}` : `Show full candidate ID ${candidateId}`}
+        data-testid={`toggle-candidate-id-${candidateId}`}
+        // break-all + flex-wrap on the parent: the full (expanded) id can safely wrap onto a
+        // second line on a narrow/mobile viewport rather than overflowing or forcing horizontal
+        // scroll of its own, independent of the table's own outer horizontal-scroll wrapper.
+        className="rounded text-left text-ink-500 underline decoration-dotted decoration-ink-600 underline-offset-2 hover:text-ink-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50 [word-break:break-all]"
+      >
+        {expanded ? candidateId : `${candidateId.slice(0, 8)}…`}
+      </button>
+      <button
+        type="button"
+        onClick={() => void handleCopy()}
+        aria-label={`Copy candidate ID ${candidateId}`}
+        data-testid={`copy-candidate-id-${candidateId}`}
+        className="shrink-0 rounded border border-base-600 px-1.5 py-0.5 text-[10px] font-sans text-ink-400 transition-colors hover:border-accent-teal/40 hover:text-accent-teal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-teal/50"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
 export function TradeApprovalView() {
   const { isConfigured, isLoading: authLoading, user } = useAuth();
   const [candidates, setCandidates] = useState<TradeCandidate[]>([]);
@@ -246,10 +312,11 @@ export function TradeApprovalView() {
           </p>
         ) : (
           <div className="overflow-x-auto scrollbar-thin" role="region" aria-label="Trade candidates table, scroll horizontally for more columns" tabIndex={0}>
-            <table className="w-full min-w-[1500px] text-left text-xs">
+            <table className="w-full min-w-[1650px] text-left text-xs">
               <caption className="sr-only">Trade candidates awaiting or having received human review</caption>
               <thead>
                 <tr className="border-b border-base-700/60 text-ink-500">
+                  <th scope="col" className="px-4 py-2 font-medium">Candidate ID</th>
                   <th scope="col" className="px-4 py-2 font-medium">Status</th>
                   <th scope="col" className="px-4 py-2 font-medium">Instrument</th>
                   <th scope="col" className="px-4 py-2 font-medium">Direction</th>
@@ -276,6 +343,9 @@ export function TradeApprovalView() {
                   const isBusy = pendingActionId === candidate.id;
                   return (
                     <tr key={candidate.id} className="text-ink-300">
+                      <td className="px-4 py-2">
+                        <CandidateIdCell candidateId={candidate.id} />
+                      </td>
                       <td className="px-4 py-2">
                         <Badge className={statusBadgeClassName(candidate.status)}>{candidate.status}</Badge>
                       </td>

@@ -347,6 +347,8 @@ export async function main(): Promise<void> {
     killSwitchEnabled: config.killSwitchEnabled,
     maxHoldingDurationMs: config.maxHoldingDurationMs,
     recoveryThresholdMs: config.recoveryThresholdMs,
+    opposingExitMinHoldMs: config.opposingExitMinHoldMs,
+    opposingExitRequiredConfirmations: config.opposingExitRequiredConfirmations,
     registryClient,
     demoExecutionModeEnabled: config.demoExecutionModeEnabled,
   });

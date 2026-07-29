@@ -29,6 +29,7 @@ import type { TradePerformanceRepository } from "../trade-performance/trade-perf
 import { reconcileBrokerPosition } from "./position-reconciliation";
 import { recoverStaleLifecycleRecords } from "./lifecycle-recovery";
 import { evaluateExitTrigger, executeAutomaticExit } from "./exit-monitor";
+import { OpposingSignalStabilityTracker } from "./opposing-signal-stability";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
@@ -198,6 +199,17 @@ export interface TradingRuntimeDeps {
    * Undefined means "no ceiling configured" (this runtime's pre-existing behaviour: a position is
    * held indefinitely absent another exit trigger). */
   maxHoldingDurationMs?: number;
+  /** Hardening pass — opposing-signal exit stability. Minimum time (ms) a position must have been
+   * held before an OPPOSING_SIGNAL exit is even considered — stop-loss/take-profit/kill-switch/
+   * strategy-disabled/max-holding are NEVER gated by this (see runtime/opposing-signal-stability.ts
+   * and runInstrumentPhaseB's own doc comment). Undefined defaults to 5 minutes, matching config.ts's
+   * own default — every existing caller/test that predates this hardening pass keeps that default
+   * without needing to be updated. */
+  opposingExitMinHoldMs?: number;
+  /** Hardening pass — opposing-signal exit stability. How many CONSECUTIVE cycles the raw
+   * OPPOSING_SIGNAL trigger must fire before the exit is allowed, once the minimum hold period has
+   * also elapsed. Undefined defaults to 2, matching config.ts's own default. */
+  opposingExitRequiredConfirmations?: number;
   /** Restart-Resilient Autonomy Phase — Phase 3 (strategy-disabled exit trigger). Optional: when
    * provided, re-checked fresh every cycle (never cached) to see whether `strategy` is still among
    * the currently enabled set — undefined skips this specific check entirely (treated as "still
@@ -246,6 +258,12 @@ export interface TradingRuntimeUniverseScanDeps {
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+// Hardening pass — opposing-signal exit stability. Mirrors config.ts's own DEFAULT_OPPOSING_EXIT_*
+// constants exactly — used only when deps.opposingExitMinHoldMs/opposingExitRequiredConfirmations
+// are omitted (every existing caller/test that predates this hardening pass), so this runtime's
+// behaviour for those callers matches what a real, unconfigured deployment would also get.
+const DEFAULT_OPPOSING_EXIT_MIN_HOLD_MS = 5 * 60_000;
+const DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS = 2;
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -280,6 +298,20 @@ export class TradingRuntime {
    * `deps.instrument` (preserving every existing caller's exact behaviour: a one-element loop). */
   private get instrumentList(): string[] {
     return this.deps.instruments ?? [this.deps.instrument];
+  }
+
+  // Hardening pass — opposing-signal exit stability. Process-local, in-memory only — see
+  // OpposingSignalStabilityTracker's own top-of-file comment on why, and on the restart-safety
+  // trade-off this implies (a restart can only delay an exit, never skip a real safety check or
+  // trigger an unwarranted one).
+  private readonly opposingSignalStability = new OpposingSignalStabilityTracker();
+
+  private get opposingExitMinHoldMs(): number {
+    return this.deps.opposingExitMinHoldMs ?? DEFAULT_OPPOSING_EXIT_MIN_HOLD_MS;
+  }
+
+  private get opposingExitRequiredConfirmations(): number {
+    return this.deps.opposingExitRequiredConfirmations ?? DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS;
   }
 
   async start(): Promise<void> {
@@ -719,6 +751,17 @@ export class TradingRuntime {
     let currentPositionOpen = reconciliation.positionOpen;
     let currentRecord = reconciliation.record;
 
+    // Remediation pass (senior review finding C1) — reconciles the opposing-signal stability
+    // tracker's own notion of "which position is this instrument's current one" against reality,
+    // EVERY cycle, regardless of whether a position is currently open. This is what detects a
+    // position closed with no explicit automatic-exit/candidate-execution reset call ever having
+    // run for it (e.g. a manual out-of-band closure discovered only via reconciliation), and a
+    // position REPLACED by a different one within a single cycle (an adopted-orphan scenario) —
+    // both clean up the OLD position's own confirmation count, never letting it leak into
+    // whatever this instrument tracks next. See OpposingSignalStabilityTracker.syncPosition's own
+    // doc comment for the exact no-op/reset conditions.
+    this.opposingSignalStability.syncPosition(instrument, currentRecord?.id);
+
     if (currentRecord) {
       await repairCandidateForConfirmedLifecycle({
         lifecycleRecord: currentRecord,
@@ -784,6 +827,14 @@ export class TradingRuntime {
         });
         phaseAExitClosed = exitResult.closed;
         if (phaseAExitClosed) {
+          // Hardening pass — opposing-signal exit stability. This trigger can never itself be
+          // OPPOSING_SIGNAL (Phase A always evaluates against a neutral HOLD placeholder — see this
+          // method's own doc comment), but the position closing here still means any accumulated
+          // opposing-signal count for THIS SPECIFIC position (keyed by its own lifecycle record id,
+          // never by instrument alone — see finding C1 in opposing-signal-stability.ts) must be
+          // cleared, never carried into whatever opens on this instrument next. Captured before
+          // `currentRecord` is cleared below.
+          this.opposingSignalStability.reset(currentRecord.id);
           currentPositionOpen = false;
           currentRecord = undefined;
         }
@@ -873,21 +924,72 @@ export class TradingRuntime {
         now,
       });
 
-      if (trigger2) {
-        exitTrigger = trigger2;
-        const exitResult = await executeAutomaticExit({
-          broker: this.deps.broker,
-          record: currentRecord,
-          trigger: trigger2,
-          lifecycleService: this.deps.lifecycleService,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
+      // Hardening pass — opposing-signal exit stability. Every OTHER trigger (undefined, or one of
+      // the five Hermes-independent ones) means this cycle's own raw signal is definitively NOT
+      // opposing (undefined is the LAST-checked, lowest-priority outcome — see evaluateExitTrigger's
+      // own priority order) or the position is about to close by some other means entirely — either
+      // way, the consecutive-confirmation counter for THIS POSITION (keyed by its own lifecycle
+      // record id — see finding C1) is reset. Only OPPOSING_SIGNAL itself is ever gated; stop-loss/
+      // take-profit/kill-switch/strategy-disabled/max-holding remain exactly as immediate as they
+      // always were (this branch never delays or blocks them).
+      if (trigger2 === "OPPOSING_SIGNAL") {
+        const gate = this.opposingSignalStability.evaluate({
+          positionId: currentRecord.id,
+          isOpposingSignalTriggered: true,
+          openedAt: currentRecord.openedAt,
           now,
-        });
-        exitClosed = exitResult.closed;
-        if (exitClosed) {
-          currentPositionOpen = false;
-          currentRecord = undefined;
+          config: { minHoldMs: this.opposingExitMinHoldMs, requiredConsecutiveSignals: this.opposingExitRequiredConfirmations },
+        })!;
+
+        if (!gate.allow) {
+          await this.recordAudit(
+            "OPPOSING_SIGNAL_EXIT_DEFERRED",
+            {
+              reason: gate.reason,
+              consecutiveCount: gate.consecutiveCount,
+              requiredConsecutiveSignals: gate.requiredConsecutiveSignals,
+              heldMs: gate.heldMs,
+              minHoldMs: gate.minHoldMs,
+            },
+            instrument,
+          );
+        } else {
+          exitTrigger = trigger2;
+          const exitResult = await executeAutomaticExit({
+            broker: this.deps.broker,
+            record: currentRecord,
+            trigger: trigger2,
+            lifecycleService: this.deps.lifecycleService,
+            auditTrail: this.deps.auditTrail,
+            executionRunId,
+            now,
+          });
+          exitClosed = exitResult.closed;
+          if (exitClosed) {
+            this.opposingSignalStability.reset(currentRecord.id);
+            currentPositionOpen = false;
+            currentRecord = undefined;
+          }
+        }
+      } else {
+        this.opposingSignalStability.reset(currentRecord.id);
+
+        if (trigger2) {
+          exitTrigger = trigger2;
+          const exitResult = await executeAutomaticExit({
+            broker: this.deps.broker,
+            record: currentRecord,
+            trigger: trigger2,
+            lifecycleService: this.deps.lifecycleService,
+            auditTrail: this.deps.auditTrail,
+            executionRunId,
+            now,
+          });
+          exitClosed = exitResult.closed;
+          if (exitClosed) {
+            currentPositionOpen = false;
+            currentRecord = undefined;
+          }
         }
       }
     }
@@ -951,6 +1053,13 @@ export class TradingRuntime {
         if (candidate.direction === "BUY") {
           currentPositionOpen = true;
         } else {
+          // Hardening pass — opposing-signal exit stability. A human-approved SELL candidate
+          // closes the position too — reset (by the closed record's own id — see finding C1) so a
+          // later, genuinely new position on this instrument never inherits a stale opposing-signal
+          // count. Guarded: a broker/record combination with no reconciled TradeLifecycleRecord at
+          // all (see this method's own fallback-path comment above) never had anything tracked by
+          // this tracker in the first place — nothing to reset in that case.
+          if (currentRecord) this.opposingSignalStability.reset(currentRecord.id);
           currentPositionOpen = false;
           currentRecord = undefined;
         }

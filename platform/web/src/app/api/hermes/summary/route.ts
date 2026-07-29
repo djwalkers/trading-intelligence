@@ -5,6 +5,7 @@ import { getBrokerSnapshot } from "@/lib/hermes-integration/broker-snapshot";
 import { readHermesRuntimeAuditLog } from "@/lib/hermes-integration/audit-log-reader";
 import {
   deriveObservedRuntimeState,
+  findLastRuntimeStartIndex,
   latestFailureOrWarning,
   listDecisions,
   listUnreconciledClosures,
@@ -98,7 +99,13 @@ export async function GET(request: NextRequest) {
         const decisions = listDecisions(auditLog.events, { limit: 1 });
         latestDecision = decisions[0] ?? null;
 
-        recentFailure = latestFailureOrWarning(auditLog.events);
+        // Deployment safety review — recentFailure scope fix. Scoped to the current run only, so a
+        // stale failure from BEFORE the most recent TRADING_RUNTIME_STARTED event (e.g. an old
+        // candle-validation error left over from a previous process) never resurfaces as "recent"
+        // after a restart. listUnreconciledClosures below is deliberately NOT scoped this way — see
+        // its own doc comment on why an unreconciled closure must remain visible across a restart.
+        const lastStartIndex = findLastRuntimeStartIndex(auditLog.events);
+        recentFailure = latestFailureOrWarning(auditLog.events, { sinceIndex: Math.max(lastStartIndex, 0) });
         if (recentFailure) {
           warnings.push(`Most recent failure (${recentFailure.eventType} at ${recentFailure.timestamp}): ${recentFailure.message}`);
         }

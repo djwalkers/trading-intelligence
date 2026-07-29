@@ -235,6 +235,32 @@ export async function runUniverseScan(deps: UniverseScannerDeps): Promise<Univer
     instrumentSnapshots.filter((s) => s.marketHoursEligible && !s.unavailableReason).map((s) => s.instrument),
   );
 
+  // Remediation pass (senior review finding C2) — explicit per-instrument decision visibility.
+  // Recorded for EVERY eligible instrument, using Hermes's own FULL validated proposal set (BEFORE
+  // ranking/selection below discards some) — "what did Hermes decide," independent of whether the
+  // runtime's own selection logic later chose to act on it (HERMES_PROPOSAL_SELECTED, recorded
+  // separately below, remains the record of THAT downstream decision). An instrument with no
+  // validated proposal at all is HOLD — confidence/reasoning are never fabricated for it; Hermes
+  // simply returned nothing to report beyond the action itself. This is what makes a later, newer
+  // HOLD scan visible in the audit trail at all — previously, only a selected BUY/SELL ever left a
+  // trace, so a stale, older proposal could outrank a genuinely newer HOLD in the audit log (see
+  // audit-derivations.ts's own listDecisions, which now treats this event as its authoritative
+  // per-instrument decision source).
+  const validatedProposalByInstrument = new Map(hermesResult.proposals.map((p) => [p.instrument, p] as const));
+  for (const instrument of eligibleInstrumentSet) {
+    const proposal = validatedProposalByInstrument.get(instrument);
+    await auditTrail.record({
+      timestamp: now.toISOString(),
+      eventType: "HERMES_INSTRUMENT_DECISION_RECORDED",
+      executionRunId,
+      strategyId: strategy.strategyId,
+      instrument,
+      details: proposal
+        ? { action: proposal.action, confidence: proposal.confidence, reasoning: proposal.reasoning }
+        : { action: "HOLD" },
+    });
+  }
+
   let projectedOpenCount = openPositions.length;
   const selected: ValidatedHermesProposal[] = [];
   for (const proposal of ranked) {
@@ -263,7 +289,10 @@ export async function runUniverseScan(deps: UniverseScannerDeps): Promise<Univer
       executionRunId,
       strategyId: strategy.strategyId,
       instrument: proposal.instrument,
-      details: { action: proposal.action, confidence: proposal.confidence },
+      // Hermes summary execution correlation — reasoning included so /api/hermes/summary and
+      // /api/hermes/decisions can show WHY this proposal was made (audit-derivations.ts's own
+      // listDecisions reads this into `reasons`), never fabricated or re-derived elsewhere.
+      details: { action: proposal.action, confidence: proposal.confidence, reasoning: proposal.reasoning },
     });
   }
 

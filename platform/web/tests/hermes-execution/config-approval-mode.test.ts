@@ -65,6 +65,8 @@ const EMPTY = {
   HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
   HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
+  HERMES_OPPOSING_EXIT_MIN_HOLD_MS: undefined,
+  HERMES_OPPOSING_EXIT_CONFIRMATIONS: undefined,
 };
 
 describe("HERMES_APPROVAL_MODE — MANUAL (scenario 16)", () => {
@@ -173,5 +175,80 @@ describe("HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS", () => {
   it("rejects zero and negative values", () => {
     expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: "0" })).toThrow(ConfigError);
     expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_LIFECYCLE_RECOVERY_THRESHOLD_MS: "-1" })).toThrow(ConfigError);
+  });
+});
+
+// Hardening pass — opposing-signal exit stability.
+describe("HERMES_OPPOSING_EXIT_MIN_HOLD_MS", () => {
+  it("defaults to 300,000ms (5 minutes) when unset", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY });
+    expect(config.opposingExitMinHoldMs).toBe(300_000);
+  });
+
+  it("accepts an explicit value", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_MIN_HOLD_MS: "60000" });
+    expect(config.opposingExitMinHoldMs).toBe(60_000);
+  });
+
+  it("accepts exactly the floor value (60,000ms)", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_MIN_HOLD_MS: "60000" });
+    expect(config.opposingExitMinHoldMs).toBe(60_000);
+  });
+
+  // Remediation pass — finding M2: a safe floor prevents any configuration path from restoring the
+  // pre-hardening immediate-opposing-exit behaviour.
+  it("fails clearly, naming the env var and the minimum, when below the 60,000ms floor", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_MIN_HOLD_MS: "0" })).toThrow(
+      /HERMES_OPPOSING_EXIT_MIN_HOLD_MS is invalid[\s\S]*>= 60000/,
+    );
+  });
+
+  it("fails clearly, naming the env var, on a negative value", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_MIN_HOLD_MS: "-1" })).toThrow(
+      /HERMES_OPPOSING_EXIT_MIN_HOLD_MS is invalid/,
+    );
+  });
+
+  it("fails clearly, naming the env var, on a non-numeric value", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_MIN_HOLD_MS: "not-a-number" })).toThrow(
+      /HERMES_OPPOSING_EXIT_MIN_HOLD_MS is invalid/,
+    );
+  });
+});
+
+describe("HERMES_OPPOSING_EXIT_CONFIRMATIONS", () => {
+  it("defaults to 2 when unset", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY });
+    expect(config.opposingExitRequiredConfirmations).toBe(2);
+  });
+
+  it("accepts an explicit value", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_CONFIRMATIONS: "3" });
+    expect(config.opposingExitRequiredConfirmations).toBe(3);
+  });
+
+  it("accepts exactly the floor value (2)", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_CONFIRMATIONS: "2" });
+    expect(config.opposingExitRequiredConfirmations).toBe(2);
+  });
+
+  // Remediation pass — finding M2: a safe floor of 2 confirmations prevents any configuration path
+  // from restoring single-scan (effectively immediate) opposing exits.
+  it("fails clearly, naming the env var and the minimum, on 1 (below the floor)", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_CONFIRMATIONS: "1" })).toThrow(
+      /HERMES_OPPOSING_EXIT_CONFIRMATIONS is invalid[\s\S]*>= 2/,
+    );
+  });
+
+  it("fails clearly, naming the env var, on zero", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_CONFIRMATIONS: "0" })).toThrow(
+      /HERMES_OPPOSING_EXIT_CONFIRMATIONS is invalid/,
+    );
+  });
+
+  it("fails clearly, naming the env var, on a non-integer value", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_OPPOSING_EXIT_CONFIRMATIONS: "1.5" })).toThrow(
+      /HERMES_OPPOSING_EXIT_CONFIRMATIONS is invalid/,
+    );
   });
 });
