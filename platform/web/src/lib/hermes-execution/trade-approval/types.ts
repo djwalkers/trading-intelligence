@@ -51,6 +51,18 @@ export function assertValidCandidateTransition(from: TradeCandidateStatus, to: T
 }
 
 /**
+ * AUTO_DEMO approval-persistence defect fix. Distinguishes WHO/WHAT approved a candidate without
+ * ever needing a fabricated `approvedByUserId`: 'HUMAN' means a real auth.users uuid is present in
+ * `approvedByUserId` (the Trade Approval page's own signed-in-user flow); 'AUTO_DEMO' means the
+ * runtime's own AUTO_DEMO auto-approval path approved it, `approvedByUserId` is deliberately left
+ * undefined (the database column is `uuid`, never a synthetic string — see
+ * trade-candidate-service.ts's own autoApproveTradeCandidate). Undefined on a not-yet-approved
+ * candidate — see supabase/migrations/0027_trade_candidates_approval_source.sql's own three-way
+ * provenance constraint.
+ */
+export type CandidateApprovalSource = "HUMAN" | "AUTO_DEMO";
+
+/**
  * The frozen inputs needed to actually execute this candidate later, exactly as it was reviewed —
  * never re-fetched or re-derived at approval time. `marketContext`/`marketDataSnapshot` are reused
  * verbatim by executeApprovedTradeCandidate (trade-candidate-service.ts) as the input to the
@@ -107,6 +119,8 @@ export interface TradeCandidate extends TradeCandidateInput {
   updatedAt: string;
   approvedAt?: string;
   approvedByUserId?: string;
+  /** Undefined for a not-yet-approved candidate. See CandidateApprovalSource's own doc comment. */
+  approvalSource?: CandidateApprovalSource;
   rejectedAt?: string;
   rejectedByUserId?: string;
   rejectionReason?: string;

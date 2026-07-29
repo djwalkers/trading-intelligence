@@ -13,6 +13,7 @@ import {
   type TradeCandidateRepository,
 } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
+import { checkForDuplicateEntry } from "@/lib/hermes-execution/trade-approval/duplicate-prevention";
 import { MarketDecisionEngine, type MarketDecisionContext } from "@/lib/hermes-execution/market-decision-engine";
 import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
@@ -718,7 +719,12 @@ describe("autoApproveTradeCandidate", () => {
 
     expect(outcome.outcome).toBe("approved");
     if (outcome.outcome === "approved") {
-      expect(outcome.candidate.approvedByUserId).toBe(AUTO_DEMO_APPROVER_ID);
+      // AUTO_DEMO approval-persistence defect fix: approvedByUserId is a uuid column — the
+      // AUTO_DEMO_APPROVER_ID sentinel is NEVER persisted there (that is exactly the bug that broke
+      // production). System provenance is instead recorded via approvalSource, with
+      // approvedByUserId left undefined.
+      expect(outcome.candidate.approvedByUserId).toBeUndefined();
+      expect(outcome.candidate.approvalSource).toBe("AUTO_DEMO");
     }
   });
 
@@ -846,5 +852,188 @@ describe("autoApproveTradeCandidate", () => {
 
     expect(outcome.outcome).toBe("failed");
     expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+  });
+});
+
+// AUTO_DEMO approval-persistence defect fix (VPS production incident: autoApproveTradeCandidate
+// wrote the sentinel string "system:auto-demo" into approved_by_user_id, a uuid column — Postgres
+// rejected it, the transition never committed, and the failure propagated as an uncaught exception
+// rather than a clear outcome). Root cause fixed in approveTradeCandidate (approvalSource instead of
+// a fabricated uuid); this block covers the remaining required scenarios.
+describe("AUTO_DEMO approval-persistence defect fix", () => {
+  it("persists successfully: approvedByUserId stays undefined, approvalSource is 'AUTO_DEMO', and the candidate is durably APPROVED", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const outcome = await autoApproveTradeCandidate({ repository, auditTrail, executionRunId: "test-run", candidateId: candidate.id, now });
+
+    expect(outcome.outcome).toBe("approved");
+    const stored = await repository.getById(candidate.id);
+    expect(stored?.status).toBe("APPROVED");
+    expect(stored?.approvedByUserId).toBeUndefined();
+    expect(stored?.approvalSource).toBe("AUTO_DEMO");
+  });
+
+  it("system approval provenance remains visible in the audit trail even though approvedByUserId is not persisted to the row", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    await autoApproveTradeCandidate({ repository, auditTrail, executionRunId: "test-run", candidateId: candidate.id, now });
+
+    const events = await auditTrail.getEvents();
+    const approvedEvent = events.find((e) => e.eventType === "TRADE_CANDIDATE_APPROVED");
+    expect(approvedEvent?.details).toMatchObject({ approvedByUserId: AUTO_DEMO_APPROVER_ID, approvalSource: "AUTO_DEMO" });
+    const autoApprovedEvent = events.find((e) => e.eventType === "TRADE_CANDIDATE_AUTO_APPROVED");
+    expect(autoApprovedEvent?.details).toMatchObject({ approvedByUserId: AUTO_DEMO_APPROVER_ID });
+  });
+
+  it("manual approval still stores the human UUID and approvalSource stays undefined (never 'AUTO_DEMO')", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+    const humanUserId = "11111111-1111-1111-1111-111111111111";
+
+    const outcome = await approveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      approvedByUserId: humanUserId,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("approved");
+    if (outcome.outcome !== "approved") throw new Error("unreachable");
+    expect(outcome.candidate.approvedByUserId).toBe(humanUserId);
+    expect(outcome.candidate.approvalSource).toBeUndefined();
+  });
+
+  it("a database/persistence failure during auto-approval emits AUTO_APPROVAL_FAILED, reports 'failed', and never claims 'approved'", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const failingRepository: TradeCandidateRepository = {
+      ...repository,
+      getById: repository.getById.bind(repository),
+      list: repository.list.bind(repository),
+      create: repository.create.bind(repository),
+      transition: vi.fn().mockRejectedValue(new Error('invalid input syntax for type uuid: "system:auto-demo"')),
+    };
+
+    const outcome = await autoApproveTradeCandidate({
+      repository: failingRepository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("failed");
+    if (outcome.outcome === "failed") {
+      expect(outcome.reason).toMatch(/could not be persisted/);
+    }
+
+    // The candidate is never left silently PENDING with no explanation anywhere.
+    const events = await auditTrail.getEvents();
+    const failureEvent = events.find((e) => e.eventType === "AUTO_APPROVAL_FAILED");
+    expect(failureEvent).toBeDefined();
+    expect(failureEvent?.details.candidateId).toBe(candidate.id);
+    expect(String(failureEvent?.details.reason)).toMatch(/invalid input syntax for type uuid/);
+
+    // The failed transition never committed — the candidate remains exactly as it durably was,
+    // never fabricated as APPROVED or FAILED here.
+    const stored = await repository.getById(candidate.id);
+    expect(stored?.status).toBe("PENDING");
+  });
+
+  it("a failed auto-approval never executes — executeApprovedTradeCandidate treats the still-PENDING candidate as not-yet-approved", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const failingRepository: TradeCandidateRepository = {
+      ...repository,
+      getById: repository.getById.bind(repository),
+      list: repository.list.bind(repository),
+      create: repository.create.bind(repository),
+      transition: vi.fn().mockRejectedValue(new Error("simulated persistence outage")),
+    };
+
+    const outcome = await autoApproveTradeCandidate({
+      repository: failingRepository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+    expect(outcome.outcome).toBe("failed");
+
+    const broker = makeMockBroker();
+    const lifecycleService = makeLifecycleService(auditTrail, now);
+    const stillPending = await repository.getById(candidate.id);
+    if (!stillPending) throw new Error("unreachable");
+
+    const executionOutcome = await executeApprovedTradeCandidate({
+      repository,
+      broker,
+      auditTrail,
+      executionRunId: "test-run",
+      lifecycleService,
+      portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+      candidate: stillPending,
+      now,
+      brokerProvider: "etoro-demo",
+    });
+
+    expect(executionOutcome.outcome).toBe("already-handled");
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it("does not repeatedly retry auto-approval after a permanent persistence failure — the still-PENDING candidate blocks a fresh duplicate instead", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const failingRepository: TradeCandidateRepository = {
+      ...repository,
+      getById: repository.getById.bind(repository),
+      list: repository.list.bind(repository),
+      create: repository.create.bind(repository),
+      transition: vi.fn().mockRejectedValue(new Error("simulated permanent persistence outage")),
+    };
+    const firstAttempt = await autoApproveTradeCandidate({
+      repository: failingRepository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      now,
+    });
+    expect(firstAttempt.outcome).toBe("failed");
+
+    // The candidate is still PENDING (the failed transition never committed) — a later cycle's own
+    // duplicate check (the actual mechanism that prevents a repeated auto-approval attempt: nothing
+    // ever re-invokes autoApproveTradeCandidate for an existing candidate, only checkForDuplicateEntry
+    // runs again) correctly reports it as a duplicate, so no second candidate/auto-approval attempt
+    // is ever spawned for this instrument+strategy while it remains unresolved.
+    const duplicateCheck = await checkForDuplicateEntry({
+      tradeCandidateRepository: repository,
+      lifecycleStore,
+      strategyId: candidate.strategyId,
+      instrument: candidate.instrument,
+    });
+    expect(duplicateCheck.duplicate).toBe(true);
+
+    const auditEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "AUTO_APPROVAL_FAILED");
+    expect(auditEvents).toHaveLength(1);
   });
 });

@@ -118,6 +118,7 @@ const SAMPLE_ROW: TradeCandidateRow = {
   status: "PENDING",
   approved_at: null,
   approved_by_user_id: null,
+  approval_source: null,
   rejected_at: null,
   rejected_by_user_id: null,
   rejection_reason: null,
@@ -200,6 +201,62 @@ describe("SupabaseTradeCandidateRepository — permission (user_id scoping)", ()
     const repository = new SupabaseTradeCandidateRepository(client, USER_ID);
 
     await expect(repository.create(BASE_INPUT)).rejects.toBeInstanceOf(TradeCandidatePersistenceError);
+  });
+
+  // AUTO_DEMO approval-persistence defect fix. Postgres' own uuid column type genuinely rejects a
+  // non-uuid string with error code 22P02 ("invalid input syntax for type uuid") — this is the exact
+  // production failure ("invalid input syntax for type uuid: \"system:auto-demo\"") observed on the
+  // VPS. Manual approval was NEVER broken by this bug (it always supplies a real auth.users uuid),
+  // but this proves the database itself still correctly rejects a malformed manual user id, exactly
+  // as it always has — trade-candidate-service.ts's own approveTradeCandidate never needs its own
+  // app-level format check because this is the real, already-enforced boundary.
+  it("propagates a clear TradeCandidatePersistenceError for a malformed (non-uuid) approved_by_user_id, matching Postgres' own uuid-column rejection", async () => {
+    const { client, builder } = makeFakeClient({
+      data: null,
+      error: { message: 'invalid input syntax for type uuid: "not-a-uuid"', code: "22P02" },
+    });
+    const repository = new SupabaseTradeCandidateRepository(client, USER_ID);
+
+    await expect(
+      repository.transition("candidate-1", "PENDING", { status: "APPROVED", approvedAt: "x", approvedByUserId: "not-a-uuid" }),
+    ).rejects.toMatchObject({ code: "22P02" });
+    expect(builder.update).toHaveBeenCalledWith(expect.objectContaining({ approved_by_user_id: "not-a-uuid" }));
+  });
+});
+
+describe("SupabaseTradeCandidateRepository — AUTO_DEMO approval never writes a malformed uuid (finding: approval-persistence defect)", () => {
+  it("transition() for a system approval (approvedByUserId undefined, approvalSource 'AUTO_DEMO') sends null for approved_by_user_id — never a sentinel string — and 'AUTO_DEMO' for approval_source", async () => {
+    const { client, builder } = makeFakeClient({ data: { ...SAMPLE_ROW, status: "APPROVED", approval_source: "AUTO_DEMO" }, error: null });
+    const repository = new SupabaseTradeCandidateRepository(client, USER_ID);
+
+    await repository.transition("candidate-1", "PENDING", {
+      status: "APPROVED",
+      approvedAt: "2026-01-01T00:00:00.000Z",
+      approvedByUserId: undefined,
+      approvalSource: "AUTO_DEMO",
+    });
+
+    const updatePayload = (builder.update as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(updatePayload.approved_by_user_id).toBeNull();
+    expect(updatePayload.approval_source).toBe("AUTO_DEMO");
+    // The one concrete regression this test guards: the literal sentinel string must never appear
+    // anywhere in what gets sent to Postgres' own uuid column.
+    expect(updatePayload.approved_by_user_id).not.toBe("system:auto-demo");
+  });
+
+  it("transition() for a human approval sends the real uuid for approved_by_user_id and leaves approval_source null", async () => {
+    const { client, builder } = makeFakeClient({ data: { ...SAMPLE_ROW, status: "APPROVED" }, error: null });
+    const repository = new SupabaseTradeCandidateRepository(client, USER_ID);
+
+    await repository.transition("candidate-1", "PENDING", {
+      status: "APPROVED",
+      approvedAt: "2026-01-01T00:00:00.000Z",
+      approvedByUserId: USER_ID,
+    });
+
+    const updatePayload = (builder.update as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(updatePayload.approved_by_user_id).toBe(USER_ID);
+    expect(updatePayload.approval_source).toBeNull();
   });
 });
 

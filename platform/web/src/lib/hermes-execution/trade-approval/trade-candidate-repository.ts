@@ -7,6 +7,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   assertValidCandidateTransition,
+  type CandidateApprovalSource,
   type TradeCandidate,
   type TradeCandidateInput,
   type TradeCandidateStatus,
@@ -27,6 +28,10 @@ export interface TradeCandidateTransitionPatch {
   status: TradeCandidateStatus;
   approvedAt?: string;
   approvedByUserId?: string;
+  /** AUTO_DEMO approval-persistence defect fix. See CandidateApprovalSource's own doc comment
+   * (trade-approval/types.ts) — undefined leaves the column null (not-yet-approved, or a legacy row
+   * predating this field). */
+  approvalSource?: CandidateApprovalSource;
   rejectedAt?: string;
   rejectedByUserId?: string;
   rejectionReason?: string;
@@ -90,6 +95,8 @@ export interface TradeCandidateRow {
   status: string;
   approved_at: string | null;
   approved_by_user_id: string | null;
+  // AUTO_DEMO approval-persistence defect fix — supabase/migrations/0027_trade_candidates_approval_source.sql.
+  approval_source: string | null;
   rejected_at: string | null;
   rejected_by_user_id: string | null;
   rejection_reason: string | null;
@@ -123,6 +130,7 @@ export function toInsertRow(input: TradeCandidateInput, userId: string): Omit<Tr
     status: "PENDING",
     approved_at: null,
     approved_by_user_id: null,
+    approval_source: null,
     rejected_at: null,
     rejected_by_user_id: null,
     rejection_reason: null,
@@ -155,6 +163,7 @@ export function fromRow(row: TradeCandidateRow): TradeCandidate {
     status: row.status as TradeCandidateStatus,
     approvedAt: row.approved_at ?? undefined,
     approvedByUserId: row.approved_by_user_id ?? undefined,
+    approvalSource: (row.approval_source as CandidateApprovalSource | null) ?? undefined,
     rejectedAt: row.rejected_at ?? undefined,
     rejectedByUserId: row.rejected_by_user_id ?? undefined,
     rejectionReason: row.rejection_reason ?? undefined,
@@ -170,6 +179,7 @@ function toPatchRow(patch: TradeCandidateTransitionPatch): Record<string, unknow
     status: patch.status,
     approved_at: patch.approvedAt ?? null,
     approved_by_user_id: patch.approvedByUserId ?? null,
+    approval_source: patch.approvalSource ?? null,
     rejected_at: patch.rejectedAt ?? null,
     rejected_by_user_id: patch.rejectedByUserId ?? null,
     rejection_reason: patch.rejectionReason ?? null,
@@ -291,6 +301,7 @@ export class InMemoryTradeCandidateRepository implements TradeCandidateRepositor
       updatedAt: new Date().toISOString(),
       approvedAt: patch.approvedAt ?? existing.approvedAt,
       approvedByUserId: patch.approvedByUserId ?? existing.approvedByUserId,
+      approvalSource: patch.approvalSource ?? existing.approvalSource,
       rejectedAt: patch.rejectedAt ?? existing.rejectedAt,
       rejectedByUserId: patch.rejectedByUserId ?? existing.rejectedByUserId,
       rejectionReason: patch.rejectionReason ?? existing.rejectionReason,

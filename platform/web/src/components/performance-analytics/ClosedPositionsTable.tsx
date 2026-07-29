@@ -68,7 +68,16 @@ function ChainDetail({ record, closingCandidate }: ChainDetailProps) {
       <div>
         <p className="font-medium text-ink-200">Approval</p>
         <p className="mt-1 text-ink-500">
-          {closingCandidate?.approvedByUserId ? `${closingCandidate.approvedByUserId} at ${formatDateTime(closingCandidate.approvedAt!)}` : "not recorded"}
+          {/* AUTO_DEMO approval-persistence defect fix: an AUTO_DEMO approval has no
+              approvedByUserId (deliberately never a fabricated uuid — see
+              trade-candidate-service.ts's own approveTradeCandidate) but IS still identifiable via
+              approvalSource, so this never falls back to "not recorded" for a genuine automatic
+              approval. */}
+          {closingCandidate?.approvedByUserId
+            ? `${closingCandidate.approvedByUserId} at ${formatDateTime(closingCandidate.approvedAt!)}`
+            : closingCandidate?.approvalSource === "AUTO_DEMO" && closingCandidate.approvedAt
+              ? `AUTO_DEMO (system) at ${formatDateTime(closingCandidate.approvedAt)}`
+              : "not recorded"}
         </p>
       </div>
       <div>

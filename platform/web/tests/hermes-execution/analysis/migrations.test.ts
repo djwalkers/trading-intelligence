@@ -249,3 +249,43 @@ describe("0026_trade_lifecycle_records.sql", () => {
     }
   });
 });
+
+// AUTO_DEMO approval-persistence defect fix. approved_by_user_id (uuid, already nullable) must
+// remain untouched — genuinely fixing the production bug means the uuid column type is never
+// weakened and the fabricated "system:auto-demo" string is never written there. This migration only
+// adds the new approval_source discriminator column plus a replacement provenance constraint. Same
+// caveat as every describe block above: no live Supabase project is linked to this repo, so these
+// are structural assertions against the migration SQL text.
+describe("0027_trade_candidates_approval_source.sql", () => {
+  const sql = readMigration("0027_trade_candidates_approval_source.sql");
+
+  it("adds approval_source as a new, nullable column — never redefines approved_by_user_id's own uuid type", () => {
+    expect(sql).toMatch(/add column if not exists approval_source text/);
+    // The column is only ever referenced inside comments/constraints below — never "alter column
+    // approved_by_user_id type ..." or any other redefinition of the column itself.
+    expect(sql).not.toMatch(/alter column approved_by_user_id/);
+    expect(sql).not.toMatch(/approved_by_user_id\s+text/i); // never weakened from uuid to text
+  });
+
+  it("constrains approval_source to a closed, known vocabulary", () => {
+    expect(sql).toMatch(/check \(approval_source is null or approval_source in \('AUTO_DEMO'\)\)/);
+  });
+
+  it("replaces the old paired-null constraint with a three-way provenance constraint (not-approved / human / AUTO_DEMO)", () => {
+    expect(sql).toMatch(/drop constraint if exists trade_candidates_approved_fields_together/);
+    expect(sql).toMatch(/add constraint trade_candidates_approval_provenance/);
+    const constraintBlock = sql.match(/add constraint trade_candidates_approval_provenance[\s\S]*?;/)?.[0];
+    expect(constraintBlock).toBeDefined();
+    // Not-yet-approved: everything null.
+    expect(constraintBlock).toMatch(/approved_at is null and approved_by_user_id is null and approval_source is null/);
+    // Human approval: a real approved_by_user_id, no approval_source tag.
+    expect(constraintBlock).toMatch(/approved_at is not null and approved_by_user_id is not null and approval_source is null/);
+    // System approval: approved_by_user_id stays null, approval_source carries the provenance.
+    expect(constraintBlock).toMatch(/approved_at is not null and approved_by_user_id is null and approval_source = 'AUTO_DEMO'/);
+  });
+
+  it("is idempotent — uses IF NOT EXISTS / IF EXISTS for every DDL statement", () => {
+    expect(sql).toMatch(/add column if not exists/);
+    expect(sql).toMatch(/drop constraint if exists/);
+  });
+});

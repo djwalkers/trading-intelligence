@@ -314,6 +314,15 @@ export type AuditEventType =
   // human or automatic — this is what makes the two kinds of approval distinguishable in the audit
   // trail (`approvedByUserId` alone is also a marker, but never the only one).
   | "TRADE_CANDIDATE_AUTO_APPROVED"
+  // AUTO_DEMO approval-persistence defect fix. Fired when autoApproveTradeCandidate's OWN attempt
+  // to persist the PENDING -> APPROVED transition itself throws (e.g. a database outage, or any
+  // other unexpected persistence failure) — distinct from TRADE_CANDIDATE_EXECUTION_FAILED, which
+  // covers a transition that DID persist successfully as APPROVED but was then reverted (either
+  // because its own TRADE_CANDIDATE_AUTO_APPROVED audit write couldn't be recorded, or because
+  // execution itself later failed). Here, the candidate's approval never committed at all, so it
+  // remains in whatever state it already durably had (ordinarily still PENDING) — never silently
+  // left with no explanation, and never treated as approved or executed.
+  | "AUTO_APPROVAL_FAILED"
   // Restart-Resilient Autonomy Phase — duplicate-prevention.ts. Fired when a fresh BUY decision is
   // deliberately NOT turned into a new TradeCandidate because an equivalent one (broker position,
   // durable OPEN/in-flight lifecycle record, PENDING or APPROVED candidate) already exists for the

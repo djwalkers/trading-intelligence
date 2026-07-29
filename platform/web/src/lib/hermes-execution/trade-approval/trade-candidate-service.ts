@@ -112,15 +112,33 @@ export interface ApproveTradeCandidateInput {
   now: Date;
 }
 
+/** Sentinel `approvedByUserId` recognised by approveTradeCandidate below — never a real Supabase
+ * auth user id. Declared here (rather than down in the "Automatic approval" section) purely so it
+ * is defined before approveTradeCandidate's own first reference to it; autoApproveTradeCandidate
+ * (below) is still its only production caller. */
+export const AUTO_DEMO_APPROVER_ID = "system:auto-demo";
+
 /**
  * PENDING -> APPROVED, guarded two ways: (1) an already-expired candidate is transitioned to
  * EXPIRED instead of approved — never lets a human approve a stale entryPrice; (2) the repository's
  * own conditional transition() only applies when the row is still PENDING, so a second, concurrent
  * approve/reject/expiry-sweep call for the same id is a safe no-op here ("already-handled"), never
  * a double approval and never a thrown error.
+ *
+ * AUTO_DEMO approval-persistence defect fix. `approvedByUserId` is a `uuid` column
+ * (supabase/migrations/0024_trade_candidates.sql) — it must NEVER receive anything other than a
+ * genuine auth.users id or null/undefined. autoApproveTradeCandidate (below) calls this same
+ * function with the well-known AUTO_DEMO_APPROVER_ID sentinel; this is the one place that
+ * recognises it and translates it into the correct persisted shape: `approved_by_user_id` stays
+ * null and `approval_source` records 'AUTO_DEMO' instead (see
+ * supabase/migrations/0027_trade_candidates_approval_source.sql and CandidateApprovalSource's own
+ * doc comment). Every OTHER value of `approvedByUserId` is treated as a real human auth.users id,
+ * written through unchanged — manual approval's own behaviour, input shape, and validation (the
+ * database's own uuid/FK constraints) are completely unmodified by this fix.
  */
 export async function approveTradeCandidate(input: ApproveTradeCandidateInput): Promise<ApprovalOutcome> {
   const { repository, auditTrail, executionRunId, candidateId, approvedByUserId, now } = input;
+  const isSystemApproval = approvedByUserId === AUTO_DEMO_APPROVER_ID;
   const candidate = await repository.getById(candidateId);
   if (!candidate) return { outcome: "not-found" };
   if (candidate.status !== "PENDING") return { outcome: "already-handled" };
@@ -142,7 +160,8 @@ export async function approveTradeCandidate(input: ApproveTradeCandidateInput): 
   const approved = await repository.transition(candidateId, "PENDING", {
     status: "APPROVED",
     approvedAt: now.toISOString(),
-    approvedByUserId,
+    approvedByUserId: isSystemApproval ? undefined : approvedByUserId,
+    approvalSource: isSystemApproval ? "AUTO_DEMO" : undefined,
   });
   if (!approved) return { outcome: "already-handled" };
 
@@ -152,7 +171,10 @@ export async function approveTradeCandidate(input: ApproveTradeCandidateInput): 
     executionRunId,
     strategyId: approved.strategyId,
     instrument: approved.instrument,
-    details: { candidateId: approved.id, approvedByUserId },
+    // The audit trail's own `details` is a free-form JSON blob, never a uuid-typed column — the
+    // sentinel string is exactly what makes an automatic approval unambiguous here, and is kept
+    // verbatim regardless of what the database itself persists in approved_by_user_id.
+    details: { candidateId: approved.id, approvedByUserId, approvalSource: isSystemApproval ? "AUTO_DEMO" : "HUMAN" },
   });
 
   return { outcome: "approved", candidate: approved };
@@ -205,10 +227,6 @@ export async function rejectTradeCandidate(input: RejectTradeCandidateInput): Pr
 
 // --- Automatic approval (AUTO_DEMO only — Restart-Resilient Autonomy Phase, Phase 5) ------------
 
-/** Sentinel `approvedByUserId` for every automatic approval — never a real Supabase auth user id,
- * so it is unambiguous in any audit/UI display which approvals were automatic. */
-export const AUTO_DEMO_APPROVER_ID = "system:auto-demo";
-
 export interface AutoApproveTradeCandidateInput {
   repository: TradeCandidateRepository;
   auditTrail: AuditTrail;
@@ -238,18 +256,50 @@ export interface AutoApproveTradeCandidateInput {
  * transition) — explicit, visible, and safe (nothing further ever executes it) — rather than
  * either silently letting a capital-committing trade proceed with a gap in its own audit trail, or
  * leaving it stuck APPROVED with an incomplete one.
+ *
+ * AUTO_DEMO approval-persistence defect fix — requirement 6 (candidate state consistency). The
+ * approveTradeCandidate() call itself can now ALSO fail (any unexpected repository/database error —
+ * the specific uuid-column bug this fix closes is one instance, but this guard is deliberately
+ * general, not specific to that one cause). Previously this was uncaught: it propagated straight out
+ * of this function and crashed the calling cycle, and the candidate was left PENDING with no
+ * explanation anywhere in the audit trail. Now: caught, recorded as a dedicated AUTO_APPROVAL_FAILED
+ * event (distinct from TRADE_CANDIDATE_EXECUTION_FAILED below, which covers an approval that DID
+ * persist but was reverted afterwards), and reported as "failed" — never "approved" — so the caller
+ * (trading-runtime.ts) never proceeds to execute it. The candidate's own persisted status is
+ * whatever it already durably was (ordinarily still PENDING, since the failed transition never
+ * committed) — never fabricated as FAILED here, since this function cannot know whether the
+ * underlying write truly did not apply. Nothing re-attempts auto-approval for this same candidate on
+ * a later cycle (autoApproveTradeCandidate is only ever invoked once, immediately after a fresh
+ * candidate's own creation — see trading-runtime.ts's own runCycleBody) — a PENDING candidate left
+ * behind by this path simply blocks a fresh duplicate (checkForDuplicateEntry) until a human
+ * approves/rejects it or it expires, never a repeated auto-approval attempt.
  */
 export async function autoApproveTradeCandidate(input: AutoApproveTradeCandidateInput): Promise<ApprovalOutcome> {
   const { repository, auditTrail, executionRunId, candidateId, now } = input;
 
-  const outcome = await approveTradeCandidate({
-    repository,
-    auditTrail,
-    executionRunId,
-    candidateId,
-    approvedByUserId: AUTO_DEMO_APPROVER_ID,
-    now,
-  });
+  let outcome: ApprovalOutcome;
+  try {
+    outcome = await approveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId,
+      candidateId,
+      approvedByUserId: AUTO_DEMO_APPROVER_ID,
+      now,
+    });
+  } catch (error) {
+    const reason = `AUTO_DEMO auto-approval could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
+    const current = await repository.getById(candidateId);
+    await auditTrail.record({
+      timestamp: now.toISOString(),
+      eventType: "AUTO_APPROVAL_FAILED",
+      executionRunId,
+      strategyId: current?.strategyId,
+      instrument: current?.instrument,
+      details: { candidateId, reason },
+    });
+    return current ? { outcome: "failed", candidate: current, reason } : { outcome: "not-found" };
+  }
 
   if (outcome.outcome !== "approved") return outcome;
 
