@@ -155,29 +155,31 @@ export async function main(): Promise<void> {
   // time this path doesn't exist yet (loadExisting's own fallback).
   const baseAuditTrail = await JsonFileAuditTrail.loadExisting(HERMES_RUNTIME_AUDIT_LOG_PATH);
 
-  // Prototype V1 — minimum Telegram integration. When enabled, every alert-worthy audit event (see
-  // telegram-alerting-audit-trail.ts's own formatAlert) is also sent to the one configured chat id,
-  // through the exact same AuditTrail instance the runtime/lifecycle pipeline already writes to —
-  // no separate notification path, no duplicated trading/decision logic. The alert sender only ever
-  // needs the Telegram transport + chat id (never TradingRuntime itself), so it has no ordering
-  // dependency on the runtime constructed below; the interactive TelegramBot (commands) is
-  // constructed later, once the runtime and lifecycle store it reports on actually exist.
+  // Telegram alert-activation design fix. Two COMPLETELY INDEPENDENT Telegram capabilities, each
+  // gated by its own flag:
+  //
+  // 1. Outbound gateway alerts (config.hermesAgent.telegramGatewayAlertsEnabled) — every alert-worthy
+  //    audit event (see telegram-alerting-audit-trail.ts's own formatAlert) is sent through the
+  //    already-proven, already-configured Hermes Agent gateway (`hermes send`), through the exact
+  //    same AuditTrail instance the runtime/lifecycle pipeline already writes to — no separate
+  //    notification path, no duplicated trading/decision logic. This path never touches the direct
+  //    Telegram Bot API and so must NEVER require config.telegram's own botToken/allowedChatId — see
+  //    HermesAgentConfig.telegramGatewayAlertsEnabled's own doc comment for why these were
+  //    previously (incorrectly) coupled.
+  // 2. The interactive, two-way command bot (config.telegram.enabled) — a genuinely different
+  //    capability that requires the real Telegram Bot API's own long-polling and a specific bot
+  //    identity, hence its own token + allowed-chat-id requirement (still enforced, unchanged, at
+  //    config-build time). Constructed later, once the runtime and lifecycle store it reports on
+  //    actually exist — see the telegramTransport check further down.
   let auditTrail: AuditTrail = baseAuditTrail;
-  let telegramTransport: HttpTelegramTransport | undefined;
-  if (config.telegram.enabled) {
-    // config.ts fails closed at config-build time whenever telegram.enabled is true — botToken is
-    // therefore always present here. Still needed for the interactive command bot below (/status
-    // /positions /trades ...), which is a genuinely different, two-way capability that requires the
-    // real Telegram Bot API's own long-polling — untouched by the gateway change right below.
-    const botToken = config.telegram.botToken as string;
-    telegramTransport = new HttpTelegramTransport(botToken);
-
+  if (config.hermesAgent.telegramGatewayAlertsEnabled) {
     // Prototype 1.0 — Hermes Telegram gateway bridge. Outbound EVENT alerts (trade opened/closed,
     // automatic exits, Hermes proposals, ...) are routed through the already-proven, already-
     // configured Hermes Agent gateway (`hermes send`) — never a second, direct Telegram Bot API
     // call for this path (see hermes-gateway-alert-sender.ts's own doc comment). Reuses
     // config.hermesAgent's own cliPath/telegramTarget/telegramSendTimeoutMs — this app holds no
-    // separate gateway credential of its own.
+    // separate gateway credential of its own, and this branch is reached regardless of whether
+    // config.telegram.enabled (the interactive bot, below) is on at all.
     const alertSender: AlertSender = new HermesGatewayAlertSender(
       {
         cliPath: config.hermesAgent.cliPath,
@@ -187,7 +189,16 @@ export async function main(): Promise<void> {
       new ChildProcessHermesCliRunner(),
     );
     auditTrail = new TelegramAlertingAuditTrail(baseAuditTrail, alertSender);
-    console.log(`Telegram alerts enabled — outbound notifications routed through the Hermes gateway (target: ${config.hermesAgent.telegramTarget}).`);
+    console.log("Telegram gateway alerts enabled — outbound notifications routed through the Hermes gateway.");
+  }
+
+  let telegramTransport: HttpTelegramTransport | undefined;
+  if (config.telegram.enabled) {
+    // config.ts fails closed at config-build time whenever telegram.enabled is true — botToken is
+    // therefore always present here. This is the interactive command bot ONLY (/status /positions
+    // /trades ...) — completely independent of the outbound gateway-alerts branch above.
+    const botToken = config.telegram.botToken as string;
+    telegramTransport = new HttpTelegramTransport(botToken);
   }
 
   // Restart-Resilient Autonomy Phase — Phase 2. Required, not optional — see

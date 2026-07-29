@@ -45,9 +45,17 @@ export interface RedactedStartupSummary {
   immediateFirstRun: boolean;
   marketHoursPolicy: MarketHoursPolicyType;
   marketHoursTimezone: string;
-  /** Presence-only, same convention as brokerCredentialsConfigured — never the bot token or chat id
-   * themselves (see config.ts's own TelegramConfig doc comment for why neither is ever printed). */
-  telegramConfigured: boolean;
+  /** Telegram alert-activation design fix. Whether the INTERACTIVE, two-way command bot is
+   * configured (a real Telegram Bot API token + allowed chat id) — presence-only, same convention
+   * as brokerCredentialsConfigured, never the bot token or chat id themselves (see config.ts's own
+   * TelegramConfig doc comment for why neither is ever printed). Deliberately reported separately
+   * from `gatewayAlertsEnabled` below — the two are independent capabilities, and a reader must
+   * never infer one from the other. */
+  directTelegramConfigured: boolean;
+  /** Telegram alert-activation design fix. Whether OUTBOUND gateway alerts (trade opened/closed,
+   * exits, ...) are routed through the Hermes Agent gateway (`hermes send`) — this never requires
+   * or implies `directTelegramConfigured`; it can be true while that is false, and vice versa. */
+  gatewayAlertsEnabled: boolean;
   /** Prototype 1.0 — official Hermes Agent multi-instrument wiring. The configured multi-instrument
    * universe (config.hermesAgent.instrumentUniverse) — always present regardless of which strategy
    * is currently selected, since this is plain configuration, never a credential. */
@@ -98,7 +106,8 @@ export function buildRedactedStartupSummary(config: HermesExecutionConfig, strat
     immediateFirstRun: config.scheduler.immediateFirstRun,
     marketHoursPolicy: config.scheduler.marketHoursPolicy,
     marketHoursTimezone: config.scheduler.sessionTimezone,
-    telegramConfigured: config.telegram.enabled,
+    directTelegramConfigured: config.telegram.enabled,
+    gatewayAlertsEnabled: config.hermesAgent.telegramGatewayAlertsEnabled,
     instrumentUniverse: config.hermesAgent.instrumentUniverse,
     universeScanEnabled: strategy.strategyId === HERMES_AGENT_STRATEGY_ID,
     hermesCliPath: config.hermesAgent.cliPath,

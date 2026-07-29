@@ -60,6 +60,7 @@ const EMPTY = {
   HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
   HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
+  HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: undefined,
   HERMES_OPPOSING_EXIT_MIN_HOLD_MS: undefined,
   HERMES_OPPOSING_EXIT_CONFIRMATIONS: undefined,
 };
@@ -100,7 +101,8 @@ describe("buildRedactedStartupSummary — shape", () => {
       immediateFirstRun: true,
       marketHoursPolicy: "always-open",
       marketHoursTimezone: "America/New_York",
-      telegramConfigured: false,
+      directTelegramConfigured: false,
+      gatewayAlertsEnabled: false,
       instrumentUniverse: ["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"],
       universeScanEnabled: false,
       hermesCliPath: "/home/andy/.local/bin/hermes",
@@ -131,7 +133,7 @@ describe("buildRedactedStartupSummary — shape", () => {
     expect(summary.brokerCredentialsConfigured).toBe(true);
   });
 
-  it("reports telegramConfigured: true once Telegram is enabled with a token and chat id", () => {
+  it("reports directTelegramConfigured: true once Telegram is enabled with a token and chat id", () => {
     const config = buildHermesExecutionConfig({
       ...EMPTY,
       HERMES_TELEGRAM_ENABLED: "true",
@@ -139,7 +141,22 @@ describe("buildRedactedStartupSummary — shape", () => {
       HERMES_TELEGRAM_ALLOWED_CHAT_ID: "555",
     });
     const summary = buildRedactedStartupSummary(config, STRATEGY);
-    expect(summary.telegramConfigured).toBe(true);
+    expect(summary.directTelegramConfigured).toBe(true);
+    // Telegram alert-activation design fix: enabling the interactive bot must never also imply
+    // gateway alerts are on — the two are fully independent.
+    expect(summary.gatewayAlertsEnabled).toBe(false);
+  });
+
+  // Telegram alert-activation design fix — the core requirement this fix exists for: gateway alerts
+  // must work WITHOUT any direct Telegram Bot API credentials, and reporting must make this visible.
+  it("reports gatewayAlertsEnabled: true with directTelegramConfigured: false when only the gateway flag is set", () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true",
+    });
+    const summary = buildRedactedStartupSummary(config, STRATEGY);
+    expect(summary.gatewayAlertsEnabled).toBe(true);
+    expect(summary.directTelegramConfigured).toBe(false);
   });
 });
 

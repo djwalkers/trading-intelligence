@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { HermesGatewayAlertSender, HermesGatewayDeliveryError } from "@/lib/hermes-execution/telegram/hermes-gateway-alert-sender";
+import { TelegramAlertingAuditTrail } from "@/lib/hermes-execution/telegram/telegram-alerting-audit-trail";
+import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
+import type { AuditEvent } from "@/lib/hermes-execution/types";
 import type { HermesCliRunner, HermesCliRunResult } from "@/lib/hermes-execution/hermes-agent/hermes-cli-runner";
 
 // Prototype 1.0 — Hermes Telegram gateway bridge. Every test uses a FAKE HermesCliRunner — no real
@@ -96,5 +99,57 @@ describe("HermesGatewayAlertSender — fails observably (throws a clear, bounded
     await expect(sender.sendAlert("Kill switch active: entry blocked. [DEMO]")).rejects.toThrow();
     await sender.sendAlert("Kill switch active: entry blocked. [DEMO]");
     expect(attempt).toBe(2);
+  });
+});
+
+// Telegram alert-activation design fix. Wires the REAL production path — TelegramAlertingAuditTrail
+// + HermesGatewayAlertSender, exactly as market-runtime.ts constructs it when
+// config.hermesAgent.telegramGatewayAlertsEnabled is true — never config.telegram.enabled, and never
+// any bot token or chat id, proving the outbound alert path genuinely needs no direct Telegram Bot
+// API credential of any kind.
+function makeEvent(eventType: AuditEvent["eventType"], details: Record<string, unknown> = {}): AuditEvent {
+  return { timestamp: "2026-01-01T00:00:00.000Z", eventType, executionRunId: "test-run", instrument: "BTC", details };
+}
+
+describe("TelegramAlertingAuditTrail + HermesGatewayAlertSender — the real gateway-alerts wiring (Telegram alert-activation design fix)", () => {
+  it("TRADE_OPENED triggers exactly one `hermes send` call through the gateway sender", async () => {
+    const runner = new FakeRunner();
+    const alertSender = new HermesGatewayAlertSender(CONFIG, runner);
+    const auditTrail = new TelegramAlertingAuditTrail(new InMemoryAuditTrail(), alertSender);
+
+    await auditTrail.record(makeEvent("TRADE_OPENED", { entryPrice: 50_000, brokerOrderId: "order-123" }));
+
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.args.join(" ")).toContain("Trade opened: BTC @ 50000");
+  });
+
+  it("TRADE_CLOSED triggers exactly one `hermes send` call through the gateway sender", async () => {
+    const runner = new FakeRunner();
+    const alertSender = new HermesGatewayAlertSender(CONFIG, runner);
+    const auditTrail = new TelegramAlertingAuditTrail(new InMemoryAuditTrail(), alertSender);
+
+    await auditTrail.record(makeEvent("TRADE_CLOSED", { realisedPnl: 42.5, realisedPnlPercent: 8.5, exitReason: "take-profit" }));
+
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.args.join(" ")).toContain("Trade closed: BTC");
+  });
+
+  it("a gateway delivery failure never blocks or throws into the caller — the original event is still durably recorded", async () => {
+    const failingRunner: HermesCliRunner = {
+      run: async () => ({ ok: false, reason: "non-zero-exit", exitCode: 1, stderrExcerpt: "gateway not running" }),
+    };
+    const alertSender = new HermesGatewayAlertSender(CONFIG, failingRunner);
+    const inner = new InMemoryAuditTrail();
+    const auditTrail = new TelegramAlertingAuditTrail(inner, alertSender);
+
+    await expect(
+      auditTrail.record(makeEvent("TRADE_OPENED", { entryPrice: 50_000, brokerOrderId: "order-456" })),
+    ).resolves.toBeUndefined();
+
+    const events = await inner.getEvents();
+    expect(events.find((e) => e.eventType === "TRADE_OPENED")).toBeDefined();
+    const failure = events.find((e) => e.eventType === "TELEGRAM_NOTIFICATION_FAILED");
+    expect(failure).toBeDefined();
+    expect(failure?.details.durableEventId).toBe("order-456");
   });
 });

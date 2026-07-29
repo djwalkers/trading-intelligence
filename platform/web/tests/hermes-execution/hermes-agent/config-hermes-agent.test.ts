@@ -61,6 +61,7 @@ const EMPTY = {
   HERMES_MAX_PROPOSALS_PER_SCAN: undefined,
   HERMES_TELEGRAM_GATEWAY_TARGET: undefined,
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: undefined,
+  HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: undefined,
   HERMES_OPPOSING_EXIT_MIN_HOLD_MS: undefined,
   HERMES_OPPOSING_EXIT_CONFIRMATIONS: undefined,
 };
@@ -153,6 +154,67 @@ describe("hermesAgent config — bounds", () => {
       maxProposalsPerScan: 1,
       telegramTarget: "telegram:Custom",
       telegramSendTimeoutMs: 5000,
+      telegramGatewayAlertsEnabled: false,
     });
+  });
+});
+
+// Telegram alert-activation design fix. HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED is a completely
+// independent flag from HERMES_TELEGRAM_ENABLED/HERMES_TELEGRAM_BOT_TOKEN/
+// HERMES_TELEGRAM_ALLOWED_CHAT_ID — outbound gateway alerts must never require direct Telegram Bot
+// API credentials, since this path never calls the Telegram Bot API at all (only `hermes send`).
+describe("hermesAgent config — HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED (Telegram alert-activation design fix)", () => {
+  it("defaults to false (gateway alerts disabled by default)", () => {
+    const config = buildHermesExecutionConfig({ ...EMPTY });
+    expect(config.hermesAgent.telegramGatewayAlertsEnabled).toBe(false);
+  });
+
+  it("can be enabled WITHOUT HERMES_TELEGRAM_BOT_TOKEN or HERMES_TELEGRAM_ALLOWED_CHAT_ID set — never fails closed for missing direct Telegram credentials", () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true",
+    });
+    expect(config.hermesAgent.telegramGatewayAlertsEnabled).toBe(true);
+    expect(config.telegram.enabled).toBe(false);
+    expect(config.telegram.botToken).toBeUndefined();
+    expect(config.telegram.allowedChatId).toBeUndefined();
+  });
+
+  it("direct Telegram (interactive bot) remains disabled while gateway alerts work independently", () => {
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true",
+      HERMES_TELEGRAM_ENABLED: "false",
+    });
+    expect(config.hermesAgent.telegramGatewayAlertsEnabled).toBe(true);
+    expect(config.telegram.enabled).toBe(false);
+  });
+
+  it("the interactive Telegram bot (HERMES_TELEGRAM_ENABLED) still requires both a bot token and an allowed chat id, unaffected by the new gateway flag", () => {
+    expect(() =>
+      buildHermesExecutionConfig({ ...EMPTY, HERMES_TELEGRAM_ENABLED: "true", HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true" }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      buildHermesExecutionConfig({
+        ...EMPTY,
+        HERMES_TELEGRAM_ENABLED: "true",
+        HERMES_TELEGRAM_BOT_TOKEN: "token",
+        HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true",
+      }),
+    ).toThrow(/HERMES_TELEGRAM_ALLOWED_CHAT_ID/);
+
+    const config = buildHermesExecutionConfig({
+      ...EMPTY,
+      HERMES_TELEGRAM_ENABLED: "true",
+      HERMES_TELEGRAM_BOT_TOKEN: "token",
+      HERMES_TELEGRAM_ALLOWED_CHAT_ID: "555",
+      HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "true",
+    });
+    expect(config.telegram.enabled).toBe(true);
+    expect(config.hermesAgent.telegramGatewayAlertsEnabled).toBe(true);
+  });
+
+  it("rejects a non-boolean-like value", () => {
+    expect(() => buildHermesExecutionConfig({ ...EMPTY, HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: "not-a-boolean" })).toThrow(ConfigError);
   });
 });

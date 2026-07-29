@@ -223,10 +223,17 @@ export interface RuntimeTradingConfig {
 // telegram/telegram-bot.ts). Fails closed exactly like every other optional-but-paired feature in
 // this file (Hyperliquid/Trading212/eToro credentials): enabled without both the token and the
 // allowed chat id is a config-build-time error, never a silently-disabled bot.
+//
+// Telegram alert-activation design fix. This config covers ONLY the interactive, two-way Telegram
+// command bot (/status /positions /trades ...), which genuinely needs its own direct Telegram Bot
+// API credentials (long-polling as a specific bot identity, replying only to one allowed chat).
+// Outbound alert notifications (trade opened/closed, exits, ...) are a completely separate concern
+// routed through the already-configured Hermes Agent gateway (`hermes send`) — see
+// HermesAgentConfig.telegramGatewayAlertsEnabled below — and must never require these credentials.
 export interface TelegramConfig {
   enabled: boolean;
   /** Never logged, printed, or included in any redacted summary — see
-   * runtime-config/startup-summary.ts, which reports only `telegramConfigured: boolean`. */
+   * runtime-config/startup-summary.ts, which reports only `directTelegramConfigured: boolean`. */
   botToken: string | undefined;
   /** The one chat/user id the bot will ever respond to or accept commands from — every other
    * sender's message is silently ignored (see telegram/telegram-bot.ts's own authorization check).
@@ -338,6 +345,13 @@ export interface HermesAgentConfig {
    * treating it as failed — a notification is best-effort and must never block or delay a trading
    * cycle (see hermes-gateway-alert-sender.ts). */
   telegramSendTimeoutMs: number;
+  /** Telegram alert-activation design fix. Independently gates ONLY the outbound alert path
+   * (TelegramAlertingAuditTrail + HermesGatewayAlertSender, wired in market-runtime.ts) — deliberately
+   * NEVER coupled to TelegramConfig.enabled/botToken/allowedChatId: this path never talks to the
+   * direct Telegram Bot API at all, only spawns `hermes send`, which reuses the Hermes gateway's own
+   * already-configured credentials. Defaults to false — outbound gateway alerts are opt-in, exactly
+   * like every other optional integration in this file. */
+  telegramGatewayAlertsEnabled: boolean;
 }
 
 interface RawHermesExecutionEnv {
@@ -395,6 +409,7 @@ interface RawHermesExecutionEnv {
   HERMES_MAX_PROPOSALS_PER_SCAN: string | undefined;
   HERMES_TELEGRAM_GATEWAY_TARGET: string | undefined;
   HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: string | undefined;
+  HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: string | undefined;
   HERMES_OPPOSING_EXIT_MIN_HOLD_MS: string | undefined;
   HERMES_OPPOSING_EXIT_CONFIRMATIONS: string | undefined;
 }
@@ -545,6 +560,7 @@ export function buildHermesExecutionConfig(
     HERMES_MAX_PROPOSALS_PER_SCAN: process.env.HERMES_MAX_PROPOSALS_PER_SCAN,
     HERMES_TELEGRAM_GATEWAY_TARGET: process.env.HERMES_TELEGRAM_GATEWAY_TARGET,
     HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS: process.env.HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS,
+    HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED: process.env.HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED,
     HERMES_OPPOSING_EXIT_MIN_HOLD_MS: process.env.HERMES_OPPOSING_EXIT_MIN_HOLD_MS,
     HERMES_OPPOSING_EXIT_CONFIRMATIONS: process.env.HERMES_OPPOSING_EXIT_CONFIRMATIONS,
   },
@@ -934,6 +950,12 @@ export function buildHermesExecutionConfig(
     { min: MIN_HERMES_TELEGRAM_GATEWAY_SEND_TIMEOUT_MS },
   );
 
+  // Telegram alert-activation design fix. Deliberately independent of telegramEnabled/botToken/
+  // allowedChatId above — this flag alone decides whether outbound gateway alerts are wired up;
+  // never paired-validated with any direct Telegram Bot API credential, since this path never uses
+  // one. Defaults to false (opt-in).
+  const hermesTelegramGatewayAlertsEnabled = parseBoolean(env.HERMES_TELEGRAM_GATEWAY_ALERTS_ENABLED, false);
+
   // Hardening pass — opposing-signal exit stability. Wrapped so an invalid value fails with a
   // message naming the actual offending env var, rather than parseInteger's own generic
   // "Expected an integer..." — "invalid values must fail clearly at startup" is this feature's own
@@ -1041,6 +1063,7 @@ export function buildHermesExecutionConfig(
       maxProposalsPerScan,
       telegramTarget: hermesTelegramGatewayTarget,
       telegramSendTimeoutMs: hermesTelegramGatewaySendTimeoutMs,
+      telegramGatewayAlertsEnabled: hermesTelegramGatewayAlertsEnabled,
     },
   };
 }
