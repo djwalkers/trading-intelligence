@@ -3,9 +3,13 @@ import { TelegramAlertingAuditTrail, formatAlert } from "@/lib/hermes-execution/
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { AuditEvent, AuditEventType } from "@/lib/hermes-execution/types";
 
+// Telegram alert refinement. Curated down to ONLY genuinely actionable trading events —
+// TRADE_OPENED, TRADE_CLOSED, and a small set of critical operational failures — see
+// telegram-alerting-audit-trail.ts's own top-of-file doc comment for the full rationale.
+
 function makeEvent(eventType: AuditEventType, details: Record<string, unknown> = {}, instrument = "BTC"): AuditEvent {
   return {
-    timestamp: "2026-01-01T00:00:00.000Z",
+    timestamp: "2026-07-29T14:18:00.000Z",
     eventType,
     executionRunId: "test-run",
     instrument,
@@ -18,182 +22,189 @@ function makeAlertSender() {
   return { sent, sendAlert: vi.fn(async (text: string) => { sent.push(text); }) };
 }
 
-describe("formatAlert — the eight required alert-worthy event types", () => {
-  it("TRADING_RUNTIME_STARTED", () => {
-    expect(formatAlert(makeEvent("TRADING_RUNTIME_STARTED"))).toBe("Runtime started. [DEMO]");
-  });
+const TRADE_OPENED_DETAILS = {
+  entryPrice: 64_208.29,
+  side: "BUY",
+  quantity: 9.95,
+  sizingMode: "NOTIONAL",
+  stopLoss: 63_769.02,
+  takeProfit: 65_304.91,
+  brokerPositionId: "3570001762",
+  brokerOrderId: "order-1",
+  openedAt: "2026-07-29T14:18:00.000Z",
+};
 
-  it("TRADING_RUNTIME_STOPPED — plain stop", () => {
-    expect(formatAlert(makeEvent("TRADING_RUNTIME_STOPPED", { timedOut: false }))).toBe("Runtime stopped. [DEMO]");
-  });
+const TRADE_CLOSED_DETAILS = {
+  entryPrice: 1_898.6,
+  exitPrice: 1_887.89,
+  exitReason: "automatic-exit-opposing_signal",
+  realisedPnl: -0.06,
+  realisedPnlPercent: -0.56,
+  holdingDurationMs: 65 * 60_000,
+  brokerPositionId: "3570011300",
+  closedAt: "2026-07-29T15:23:00.000Z",
+};
 
-  it("TRADING_RUNTIME_STOPPED — forced by the bounded shutdown timeout", () => {
-    const text = formatAlert(makeEvent("TRADING_RUNTIME_STOPPED", { timedOut: true }));
-    expect(text).toContain("Runtime stopped.");
-    expect(text).toContain("forced");
-  });
-
-  it("TRADE_OPENED — includes entry price and broker order id", () => {
-    const text = formatAlert(makeEvent("TRADE_OPENED", { entryPrice: 50_000, brokerOrderId: "order-123" }));
-    expect(text).toContain("Trade opened: BTC @ 50000");
-    expect(text).toContain("order order-123");
-  });
-
-  it("TRADE_CLOSED — includes realised P/L (the mission's explicit requirement) and exit reason", () => {
-    const text = formatAlert(
-      makeEvent("TRADE_CLOSED", { realisedPnl: 42.5, realisedPnlPercent: 8.5, exitReason: "take-profit" }),
+describe("formatAlert — TRADE OPENED", () => {
+  it("matches the required template exactly, in Europe/London local time", () => {
+    const text = formatAlert(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC"));
+    expect(text).toBe(
+      [
+        "🟢 TRADE OPENED [DEMO]",
+        "",
+        "Instrument: BTC",
+        "Direction: BUY",
+        "Entry: 64,208.29",
+        "Position value: £9.95",
+        "Stop-loss: 63,769.02",
+        "Take-profit: 65,304.91",
+        "Position ID: 3570001762",
+        "Opened: 29 Jul 2026, 15:18 BST",
+      ].join("\n"),
     );
-    expect(text).toContain("Trade closed: BTC");
-    expect(text).toContain("Realised P/L 42.5");
-    expect(text).toContain("8.5%");
-    expect(text).toContain("take-profit");
   });
 
-  it("TRADE_RISK_REJECTED — includes the blocked reasons", () => {
-    const text = formatAlert(makeEvent("TRADE_RISK_REJECTED", { blockedReasons: ["max exposure exceeded"] }));
-    expect(text).toContain("Risk rejection: BTC");
-    expect(text).toContain("max exposure exceeded");
+  it("shows a UNITS position's own quantity, never a fabricated currency figure", () => {
+    const text = formatAlert(makeEvent("TRADE_OPENED", { ...TRADE_OPENED_DETAILS, sizingMode: "UNITS", quantity: 10 }, "SOL"));
+    expect(text).toContain("Position value: 10 units");
   });
 
-  it("TRADE_EXECUTION_FAILED — an open-side execution failure", () => {
-    const text = formatAlert(makeEvent("TRADE_EXECUTION_FAILED", { message: "broker rejected order" }));
-    expect(text).toContain("Execution failure: BTC");
-    expect(text).toContain("broker rejected order");
-  });
-
-  it("TRADE_CLOSE_FAILED — a close-side execution failure", () => {
-    const text = formatAlert(makeEvent("TRADE_CLOSE_FAILED", { message: "close endpoint returned 404" }));
-    expect(text).toContain("Execution failure (close): BTC");
-    expect(text).toContain("close endpoint returned 404");
-  });
-
-  it("BROKER_CONNECTION_FAILED — a broker/runtime error", () => {
-    const text = formatAlert(makeEvent("BROKER_CONNECTION_FAILED", { reason: "invalid API key" }));
-    expect(text).toContain("Broker error: connection failed");
-    expect(text).toContain("invalid API key");
-  });
-
-  it("TRADING_CYCLE_FAILED — a runtime error", () => {
-    const text = formatAlert(makeEvent("TRADING_CYCLE_FAILED", { message: "unexpected exception" }));
-    expect(text).toContain("Runtime error: cycle failed");
-    expect(text).toContain("unexpected exception");
-  });
-
-  it("returns undefined for every other event type — no alert noise for routine pipeline events", () => {
-    expect(formatAlert(makeEvent("CANDLE_PROCESSED"))).toBeUndefined();
-    expect(formatAlert(makeEvent("STRATEGY_LOADED"))).toBeUndefined();
-    expect(formatAlert(makeEvent("TRADING_CYCLE_STARTED"))).toBeUndefined();
-    expect(formatAlert(makeEvent("TRADE_APPROVED"))).toBeUndefined();
-  });
-
-  // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
-  // review: "emit a durable alert event whenever a lifecycle enters CLOSED_UNRECONCILED").
-  it("BROKER_RECONCILIATION_MISMATCH — alerts when the resolution is 'reconciled-closed-unreconciled'", () => {
+  it("shows 'Not set' for a missing stop-loss/take-profit — never fabricates 0", () => {
     const text = formatAlert(
-      makeEvent("BROKER_RECONCILIATION_MISMATCH", { resolution: "reconciled-closed-unreconciled", lifecycleRecordId: "lifecycle-1" }),
+      makeEvent("TRADE_OPENED", { ...TRADE_OPENED_DETAILS, stopLoss: undefined, takeProfit: undefined }, "BTC"),
     );
-    expect(text).toContain("CLOSED_UNRECONCILED");
-    expect(text).toContain("lifecycle-1");
+    expect(text).toContain("Stop-loss: Not set");
+    expect(text).toContain("Take-profit: Not set");
   });
 
-  // Prototype 1.0 — official Hermes Agent decision integration. "failed-closed" now ALSO alerts —
-  // the general reconciliation-warning bullet the mission's own Phase 5 list requires — distinct
-  // wording from the CLOSED_UNRECONCILED-specific message above, never conflated.
-  it("BROKER_RECONCILIATION_MISMATCH — alerts with a general reconciliation warning for the 'failed-closed' resolution", () => {
-    const text = formatAlert(makeEvent("BROKER_RECONCILIATION_MISMATCH", { resolution: "failed-closed", reason: "ambiguous broker state" }));
-    expect(text).toContain("Reconciliation warning");
-    expect(text).toContain("ambiguous broker state");
+  it("shows 'Unavailable' for a missing broker position ID — never omits the line", () => {
+    const text = formatAlert(makeEvent("TRADE_OPENED", { ...TRADE_OPENED_DETAILS, brokerPositionId: undefined }, "BTC"));
+    expect(text).toContain("Position ID: Unavailable");
   });
 
-  it("BROKER_RECONCILIATION_MISMATCH — returns undefined for any other/unknown resolution value", () => {
-    expect(formatAlert(makeEvent("BROKER_RECONCILIATION_MISMATCH", { resolution: "some-future-resolution" }))).toBeUndefined();
+  it("returns undefined (no alert) when the minimum required fields are missing — never a partial/misleading alert", () => {
+    expect(formatAlert(makeEvent("TRADE_OPENED", {}, "BTC"))).toBeUndefined();
+    expect(formatAlert(makeEvent("TRADE_OPENED", { entryPrice: 100 }, "BTC"))).toBeUndefined(); // side missing
   });
 });
 
-describe("formatAlert — Prototype 1.0 official Hermes Agent decision integration event types", () => {
-  it("DUPLICATE_ENTRY_SUPPRESSED", () => {
-    const text = formatAlert(makeEvent("DUPLICATE_ENTRY_SUPPRESSED", { reason: "already pending" }));
-    expect(text).toContain("Duplicate suppressed");
-    expect(text).toContain("already pending");
+describe("formatAlert — TRADE CLOSED", () => {
+  it("matches the required template exactly, with a clear exit-reason label and Europe/London local time", () => {
+    const text = formatAlert(makeEvent("TRADE_CLOSED", TRADE_CLOSED_DETAILS, "ETH"));
+    expect(text).toBe(
+      [
+        "🔴 TRADE CLOSED [DEMO]",
+        "",
+        "Instrument: ETH",
+        "Reason: Opposing signal",
+        "Entry: 1,898.60",
+        "Exit: 1,887.89",
+        "Realised P/L: -£0.06",
+        "Return: -0.56%",
+        "Held: 1h 5m",
+        "Position ID: 3570011300",
+        "Closed: 29 Jul 2026, 16:23 BST",
+      ].join("\n"),
+    );
   });
 
-  it("KILL_SWITCH_ENTRY_BLOCKED", () => {
-    const text = formatAlert(makeEvent("KILL_SWITCH_ENTRY_BLOCKED", {}, "BTC"));
-    expect(text).toContain("Kill switch active");
+  it.each([
+    ["automatic-exit-stop_loss", "Stop-loss"],
+    ["automatic-exit-take_profit", "Take-profit"],
+    ["automatic-exit-opposing_signal", "Opposing signal"],
+    ["market-decision-sell", "Opposing signal"],
+    ["automatic-exit-max_holding_duration", "Maximum holding time"],
+    ["automatic-exit-kill_switch", "Kill switch"],
+    ["automatic-exit-strategy_disabled", "Other risk exit"],
+    ["some-future-unrecognised-reason", "Other risk exit"],
+  ])("maps closeReason %s to the clear label %s", (exitReason, expectedLabel) => {
+    const text = formatAlert(makeEvent("TRADE_CLOSED", { ...TRADE_CLOSED_DETAILS, exitReason }, "ETH"));
+    expect(text).toContain(`Reason: ${expectedLabel}`);
+  });
+
+  it("shows a positive realised P/L without a forced sign, matching a gain example", () => {
+    const text = formatAlert(makeEvent("TRADE_CLOSED", { ...TRADE_CLOSED_DETAILS, realisedPnl: 12.5, realisedPnlPercent: 3.2 }, "ETH"));
+    expect(text).toContain("Realised P/L: £12.50");
+    expect(text).toContain("Return: 3.20%");
+  });
+
+  it("never estimates realised P/L — shows 'Unavailable' when it is genuinely absent", () => {
+    const text = formatAlert(makeEvent("TRADE_CLOSED", { ...TRADE_CLOSED_DETAILS, realisedPnl: undefined }, "ETH"));
+    expect(text).toContain("Realised P/L: Unavailable");
+  });
+
+  it("returns undefined (no alert) when the minimum required fields are missing", () => {
+    expect(formatAlert(makeEvent("TRADE_CLOSED", {}, "ETH"))).toBeUndefined();
+  });
+});
+
+describe("formatAlert — critical operational failures only", () => {
+  it("BROKER_CONNECTION_FAILED", () => {
+    const text = formatAlert(makeEvent("BROKER_CONNECTION_FAILED", { reason: "401 Unauthorized" }, "BTC"));
+    expect(text).toContain("Broker connection failed");
+    expect(text).toContain("401 Unauthorized");
     expect(text).toContain("BTC");
   });
 
-  it("TRADE_CANDIDATE_CREATED — candidate pending manual approval", () => {
-    const text = formatAlert(makeEvent("TRADE_CANDIDATE_CREATED", { direction: "BUY", confidence: 0.82 }, "ETH"));
-    expect(text).toContain("Candidate pending manual approval");
-    expect(text).toContain("ETH");
-    expect(text).toContain("BUY");
+  it("TRADE_CLOSE_FAILED — the position remains open and unprotected", () => {
+    const text = formatAlert(makeEvent("TRADE_CLOSE_FAILED", { message: "close endpoint returned 404" }, "BTC"));
+    expect(text).toContain("Close failed");
+    expect(text).toContain("close endpoint returned 404");
+    expect(text).toContain("remains OPEN");
   });
 
-  it("TRADE_CANDIDATE_AUTO_APPROVED — future AUTO_DEMO approval", () => {
-    const text = formatAlert(makeEvent("TRADE_CANDIDATE_AUTO_APPROVED", {}, "ETH"));
-    expect(text).toContain("auto-approved");
-    expect(text).toContain("AUTO_DEMO");
+  it("TRADING_CYCLE_FAILED", () => {
+    const text = formatAlert(makeEvent("TRADING_CYCLE_FAILED", { message: "unexpected exception" }));
+    expect(text).toContain("Trading cycle failed");
+    expect(text).toContain("unexpected exception");
+  });
+});
+
+// Requirement 4 — noisy/routine events must never produce a Telegram message. Every one of these
+// still gets recorded to the (unmodified) inner audit trail — see the TelegramAlertingAuditTrail
+// describe block below for that separate assertion — only the ALERT dispatch is suppressed here.
+describe("formatAlert — noisy/routine events send no Telegram message", () => {
+  const noisyEvents: Array<[AuditEventType, Record<string, unknown>]> = [
+    ["TRADING_RUNTIME_STARTED", {}],
+    ["TRADING_RUNTIME_STOPPED", { timedOut: false }],
+    ["TRADING_CYCLE_STARTED", {}],
+    ["TRADING_CYCLE_COMPLETED", {}],
+    ["UNIVERSE_SCAN_COMPLETED", { eligibleInstrumentCount: 5, selectedProposalCount: 2 }],
+    ["HERMES_PROPOSAL_SELECTED", { action: "BUY", confidence: 0.82 }],
+    ["HERMES_RESPONSE_REJECTED", { reason: "unknown instrument DOGE" }],
+    ["HERMES_INSTRUMENT_DECISION_RECORDED", { action: "HOLD" }],
+    ["TRADE_CANDIDATE_CREATED", { direction: "BUY", confidence: 0.82 }],
+    ["TRADE_CANDIDATE_EXPIRED", {}],
+    ["TRADE_CANDIDATE_AUTO_APPROVED", {}],
+    ["TRADE_CANDIDATE_APPROVED", {}],
+    ["TRADE_CANDIDATE_REJECTED", {}],
+    ["BROKER_RECONCILIATION_MISMATCH", { resolution: "reconciled-closed-unreconciled" }],
+    ["BROKER_RECONCILIATION_MISMATCH", { resolution: "failed-closed" }],
+    ["OPPOSING_SIGNAL_EXIT_DEFERRED", { reason: "min-hold-not-reached" }],
+    ["DUPLICATE_ENTRY_SUPPRESSED", { reason: "already pending" }],
+    ["KILL_SWITCH_ENTRY_BLOCKED", {}],
+    ["AUTOMATIC_EXIT_TRIGGERED", { trigger: "STOP_LOSS" }],
+    ["TRADE_RISK_REJECTED", { blockedReasons: ["max exposure exceeded"] }],
+    ["TRADE_EXECUTION_FAILED", { message: "broker rejected order" }],
+    ["CANDLE_PROCESSED", {}],
+    ["STRATEGY_LOADED", {}],
+    ["AUTO_APPROVAL_FAILED", { reason: "x" }],
+  ];
+
+  it.each(noisyEvents)("%s sends nothing", (eventType, details) => {
+    expect(formatAlert(makeEvent(eventType, details))).toBeUndefined();
   });
 
-  it("AUTOMATIC_EXIT_TRIGGERED — stop-loss", () => {
-    const text = formatAlert(makeEvent("AUTOMATIC_EXIT_TRIGGERED", { trigger: "STOP_LOSS" }, "BTC"));
-    expect(text).toContain("Stop-loss triggered");
-  });
-
-  it("AUTOMATIC_EXIT_TRIGGERED — take-profit", () => {
-    const text = formatAlert(makeEvent("AUTOMATIC_EXIT_TRIGGERED", { trigger: "TAKE_PROFIT" }, "BTC"));
-    expect(text).toContain("Take-profit triggered");
-  });
-
-  it("AUTOMATIC_EXIT_TRIGGERED — kill switch close", () => {
-    const text = formatAlert(makeEvent("AUTOMATIC_EXIT_TRIGGERED", { trigger: "KILL_SWITCH" }, "BTC"));
-    expect(text).toContain("Kill switch");
-  });
-
-  it("UNIVERSE_SCAN_COMPLETED — scan summary", () => {
-    const text = formatAlert(makeEvent("UNIVERSE_SCAN_COMPLETED", { eligibleInstrumentCount: 5, selectedProposalCount: 2 }));
-    expect(text).toContain("Scan complete");
-    expect(text).toContain("5");
-    expect(text).toContain("2");
-  });
-
-  it("HERMES_PROPOSAL_SELECTED — Hermes opportunity identified", () => {
-    const text = formatAlert(makeEvent("HERMES_PROPOSAL_SELECTED", { action: "BUY", confidence: 0.82 }, "ETH"));
-    expect(text).toContain("Hermes opportunity selected");
-    expect(text).toContain("ETH");
-    expect(text).toContain("BUY");
-  });
-
-  it("HERMES_RESPONSE_REJECTED — Hermes proposal rejected as invalid", () => {
-    const text = formatAlert(makeEvent("HERMES_RESPONSE_REJECTED", { reason: "unknown instrument DOGE" }));
-    expect(text).toContain("Hermes proposal rejected as invalid");
-    expect(text).toContain("unknown instrument DOGE");
-  });
-
-  it("DAILY_PORTFOLIO_SUMMARY", () => {
-    const text = formatAlert(makeEvent("DAILY_PORTFOLIO_SUMMARY", { tradeCount: 3, realisedPnl: 42.5, openPositionCount: 1 }));
-    expect(text).toContain("Daily summary");
-    expect(text).toContain("3");
-    expect(text).toContain("42.5");
-  });
-
-  it("every alert-worthy message clearly labels the account as DEMO", () => {
-    const eventTypes: Array<[string, Record<string, unknown>]> = [
-      ["TRADE_OPENED", { entryPrice: 100, brokerOrderId: "1" }],
-      ["TRADE_CLOSED", { realisedPnl: 1, realisedPnlPercent: 1, exitReason: "x" }],
-      ["UNIVERSE_SCAN_COMPLETED", {}],
-      ["DAILY_PORTFOLIO_SUMMARY", {}],
-    ];
-    for (const [eventType, details] of eventTypes) {
-      const text = formatAlert(makeEvent(eventType as never, details));
-      expect(text).toMatch(/\[DEMO\]/);
-    }
+  // DAILY_PORTFOLIO_SUMMARY is deliberately excluded even though it IS a wanted alert — it is sent
+  // through its own direct path (daily-account-summary-service.ts), never through this generic
+  // per-event dispatch — see this file's own top-of-file doc comment for why.
+  it("DAILY_PORTFOLIO_SUMMARY sends nothing through the generic per-event path", () => {
+    expect(formatAlert(makeEvent("DAILY_PORTFOLIO_SUMMARY", { tradesOpenedToday: 1 }))).toBeUndefined();
   });
 });
 
 describe("TelegramAlertingAuditTrail", () => {
-  it("always forwards record() to the inner audit trail first, unchanged", async () => {
+  it("always forwards record() to the inner audit trail first, unchanged — even for a routine, non-alert-worthy event", async () => {
     const inner = new InMemoryAuditTrail();
     const alertSender = makeAlertSender();
     const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
@@ -202,20 +213,46 @@ describe("TelegramAlertingAuditTrail", () => {
     await decorated.record(event);
 
     expect(await inner.getEvents()).toEqual([event]);
+    expect(alertSender.sendAlert).not.toHaveBeenCalled();
   });
 
-  it("dispatches exactly one alert for an alert-worthy event", async () => {
+  it("TRADE_OPENED dispatches exactly one message after a confirmed broker opening", async () => {
     const inner = new InMemoryAuditTrail();
     const alertSender = makeAlertSender();
     const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
 
-    await decorated.record(makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "abc" }));
+    await decorated.record(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC"));
 
     expect(alertSender.sendAlert).toHaveBeenCalledOnce();
-    expect(alertSender.sent[0]).toContain("Trade opened");
+    expect(alertSender.sent[0]).toContain("TRADE OPENED");
   });
 
-  it("sends no alert for an event type not in the required list", async () => {
+  it("TRADE_CLOSED dispatches exactly one message, including realised P/L, after a verified closure", async () => {
+    const inner = new InMemoryAuditTrail();
+    const alertSender = makeAlertSender();
+    const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
+
+    await decorated.record(makeEvent("TRADE_CLOSED", TRADE_CLOSED_DETAILS, "ETH"));
+
+    expect(alertSender.sendAlert).toHaveBeenCalledOnce();
+    expect(alertSender.sent[0]).toContain("TRADE CLOSED");
+    expect(alertSender.sent[0]).toContain("Realised P/L: -£0.06");
+  });
+
+  it("scan and runtime events send no Telegram message", async () => {
+    const inner = new InMemoryAuditTrail();
+    const alertSender = makeAlertSender();
+    const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
+
+    await decorated.record(makeEvent("TRADING_RUNTIME_STARTED"));
+    await decorated.record(makeEvent("TRADING_CYCLE_STARTED"));
+    await decorated.record(makeEvent("UNIVERSE_SCAN_COMPLETED", { eligibleInstrumentCount: 5, selectedProposalCount: 2 }));
+
+    expect(alertSender.sendAlert).not.toHaveBeenCalled();
+    expect(await inner.getEvents()).toHaveLength(3); // still fully recorded, just never alerted
+  });
+
+  it("sends no alert for an event type not in the curated list", async () => {
     const inner = new InMemoryAuditTrail();
     const alertSender = makeAlertSender();
     const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
@@ -229,7 +266,7 @@ describe("TelegramAlertingAuditTrail", () => {
     const inner = new InMemoryAuditTrail();
     const alertSender = { sendAlert: vi.fn(async () => { throw new Error("Telegram unreachable"); }) };
     const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
-    const event = makeEvent("TRADING_RUNTIME_STARTED");
+    const event = makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC");
 
     await expect(decorated.record(event)).resolves.toBeUndefined();
 
@@ -238,13 +275,14 @@ describe("TelegramAlertingAuditTrail", () => {
   });
 
   // Prototype 1.0 — Telegram observability. A delivery failure must be audited, not silently
-  // swallowed — but must never throw into the caller (an order may have already succeeded).
-  describe("TelegramAlertingAuditTrail — delivery-failure observability", () => {
+  // swallowed — but must never throw into the caller (an order may have already succeeded), and
+  // must never block or delay trading.
+  describe("TelegramAlertingAuditTrail — delivery-failure observability (notification failures remain non-blocking)", () => {
     it("records a TELEGRAM_NOTIFICATION_FAILED event referencing the original event type and reason", async () => {
       const inner = new InMemoryAuditTrail();
       const alertSender = { sendAlert: vi.fn(async () => { throw new Error("Hermes gateway delivery failed: timeout") }) };
       const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
-      const event = makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "order-123" });
+      const event = makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC");
 
       await decorated.record(event);
 
@@ -255,16 +293,17 @@ describe("TelegramAlertingAuditTrail", () => {
       expect(failure?.details.reason).toContain("timeout");
     });
 
-    it("includes the durable event ID (e.g. brokerOrderId) where the original event carries one", async () => {
+    it("includes the durable event ID (e.g. brokerPositionId) where the original event carries one", async () => {
       const inner = new InMemoryAuditTrail();
       const alertSender = { sendAlert: vi.fn(async () => { throw new Error("delivery failed") }) };
       const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
-      const event = makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "order-123" });
+      const { brokerOrderId: _brokerOrderId, ...detailsWithoutOrderId } = TRADE_OPENED_DETAILS;
+      const event = makeEvent("TRADE_OPENED", detailsWithoutOrderId, "BTC");
 
       await decorated.record(event);
 
       const failure = (await inner.getEvents()).find((e) => e.eventType === "TELEGRAM_NOTIFICATION_FAILED");
-      expect(failure?.details.durableEventId).toBe("order-123");
+      expect(failure?.details.durableEventId).toBe("3570001762");
     });
 
     it("never throws into the caller, even when a delivery failure occurs after an order has already succeeded", async () => {
@@ -272,19 +311,15 @@ describe("TelegramAlertingAuditTrail", () => {
       const alertSender = { sendAlert: vi.fn(async () => { throw new Error("network unreachable") }) };
       const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
 
-      await expect(decorated.record(makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "order-1" }))).resolves.toBeUndefined();
+      await expect(decorated.record(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC"))).resolves.toBeUndefined();
     });
 
     it("never exposes a credential/token-shaped value in the recorded failure's own reason field", async () => {
       const inner = new InMemoryAuditTrail();
-      // Simulates an underlying error whose message happens to be safe/bounded (as
-      // HermesGatewayDeliveryError/TelegramApiError both are by construction) — this test
-      // documents that the reason recorded here is exactly `error.message`, never anything else
-      // (e.g. never the full Error object, its stack, or any raw request/response data).
       const alertSender = { sendAlert: vi.fn(async () => { throw new Error("Hermes gateway delivery failed: non-zero-exit") }) };
       const decorated = new TelegramAlertingAuditTrail(inner, alertSender);
 
-      await decorated.record(makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "order-1" }));
+      await decorated.record(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC"));
 
       const failure = (await inner.getEvents()).find((e) => e.eventType === "TELEGRAM_NOTIFICATION_FAILED");
       expect(failure?.details.reason).not.toMatch(/bot\d+:[A-Za-z0-9_-]{20,}/);
@@ -303,7 +338,7 @@ describe("TelegramAlertingAuditTrail", () => {
       const alertSender = { sendAlert: vi.fn(async () => { throw new Error("delivery failed") }) };
       const decorated = new TelegramAlertingAuditTrail(failingInner, alertSender);
 
-      await expect(decorated.record(makeEvent("TRADE_OPENED", { entryPrice: 100, brokerOrderId: "order-1" }))).resolves.toBeUndefined();
+      await expect(decorated.record(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS, "BTC"))).resolves.toBeUndefined();
     });
   });
 

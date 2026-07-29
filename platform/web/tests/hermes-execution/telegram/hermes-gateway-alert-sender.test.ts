@@ -112,15 +112,33 @@ function makeEvent(eventType: AuditEvent["eventType"], details: Record<string, u
 }
 
 describe("TelegramAlertingAuditTrail + HermesGatewayAlertSender — the real gateway-alerts wiring (Telegram alert-activation design fix)", () => {
+  const TRADE_OPENED_DETAILS = {
+    entryPrice: 50_000,
+    brokerOrderId: "order-123",
+    brokerPositionId: "pos-123",
+    side: "BUY",
+    quantity: 10,
+    sizingMode: "NOTIONAL",
+    openedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const TRADE_CLOSED_DETAILS = {
+    entryPrice: 46_000,
+    exitPrice: 50_000,
+    realisedPnl: 42.5,
+    realisedPnlPercent: 8.5,
+    exitReason: "automatic-exit-take_profit",
+    closedAt: "2026-01-01T01:00:00.000Z",
+  };
+
   it("TRADE_OPENED triggers exactly one `hermes send` call through the gateway sender", async () => {
     const runner = new FakeRunner();
     const alertSender = new HermesGatewayAlertSender(CONFIG, runner);
     const auditTrail = new TelegramAlertingAuditTrail(new InMemoryAuditTrail(), alertSender);
 
-    await auditTrail.record(makeEvent("TRADE_OPENED", { entryPrice: 50_000, brokerOrderId: "order-123" }));
+    await auditTrail.record(makeEvent("TRADE_OPENED", TRADE_OPENED_DETAILS));
 
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0]?.args.join(" ")).toContain("Trade opened: BTC @ 50000");
+    expect(runner.calls[0]?.args.join(" ")).toContain("TRADE OPENED");
   });
 
   it("TRADE_CLOSED triggers exactly one `hermes send` call through the gateway sender", async () => {
@@ -128,10 +146,10 @@ describe("TelegramAlertingAuditTrail + HermesGatewayAlertSender — the real gat
     const alertSender = new HermesGatewayAlertSender(CONFIG, runner);
     const auditTrail = new TelegramAlertingAuditTrail(new InMemoryAuditTrail(), alertSender);
 
-    await auditTrail.record(makeEvent("TRADE_CLOSED", { realisedPnl: 42.5, realisedPnlPercent: 8.5, exitReason: "take-profit" }));
+    await auditTrail.record(makeEvent("TRADE_CLOSED", TRADE_CLOSED_DETAILS));
 
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0]?.args.join(" ")).toContain("Trade closed: BTC");
+    expect(runner.calls[0]?.args.join(" ")).toContain("TRADE CLOSED");
   });
 
   it("a gateway delivery failure never blocks or throws into the caller — the original event is still durably recorded", async () => {
@@ -143,7 +161,7 @@ describe("TelegramAlertingAuditTrail + HermesGatewayAlertSender — the real gat
     const auditTrail = new TelegramAlertingAuditTrail(inner, alertSender);
 
     await expect(
-      auditTrail.record(makeEvent("TRADE_OPENED", { entryPrice: 50_000, brokerOrderId: "order-456" })),
+      auditTrail.record(makeEvent("TRADE_OPENED", { ...TRADE_OPENED_DETAILS, brokerOrderId: "order-456", brokerPositionId: "pos-456" })),
     ).resolves.toBeUndefined();
 
     const events = await inner.getEvents();

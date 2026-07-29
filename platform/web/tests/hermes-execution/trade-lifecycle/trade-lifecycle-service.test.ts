@@ -299,6 +299,55 @@ describe("TradeLifecycleService — successful closure", () => {
     });
   });
 
+  // Telegram alert refinement — the TRADE OPENED/TRADE CLOSED Telegram templates are built entirely
+  // from these two audit events' own details, so both must carry every field those templates need.
+  it("TRADE_OPENED carries side/quantity/sizingMode/stopLoss/takeProfit/openedAt for the Telegram alert template", async () => {
+    const { service, auditTrail } = makeService();
+    let record = await createRecord(service, "NOTIONAL");
+    record = await service.recordApproved(record, PERMITTED_RISK);
+    record = await service.recordExecutionSubmitted(record);
+    await service.recordOpened(record, {
+      entryPrice: 100,
+      brokerOrderId: "order-1",
+      brokerPositionId: "broker-pos-1",
+      openedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const events = await auditTrail.getEvents();
+    expect(events.at(-1)).toMatchObject({
+      eventType: "TRADE_OPENED",
+      details: {
+        entryPrice: 100,
+        brokerOrderId: "order-1",
+        brokerPositionId: "broker-pos-1",
+        side: "BUY",
+        quantity: 10,
+        sizingMode: "NOTIONAL",
+        stopLoss: undefined,
+        takeProfit: undefined,
+        openedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+  });
+
+  it("TRADE_CLOSED carries entryPrice/brokerPositionId/closedAt for the Telegram alert template", async () => {
+    const { service, auditTrail } = makeService();
+    let record = await openRecord(service);
+    record = await service.recordCloseRequested(record);
+    await service.recordClosed(record, { exitPrice: 110, exitReason: "market-decision-sell", closedAt: "2026-01-01T01:00:00.000Z" });
+
+    const events = await auditTrail.getEvents();
+    expect(events.at(-1)).toMatchObject({
+      eventType: "TRADE_CLOSED",
+      details: {
+        entryPrice: 100,
+        exitPrice: 110,
+        closedAt: "2026-01-01T01:00:00.000Z",
+        brokerPositionId: undefined, // openRecord's own fixture never sets one
+      },
+    });
+  });
+
   // Broker Sizing Semantic Fix — proves recordClosed's own recomputed P/L for a NOTIONAL (eToro-style)
   // record matches EtoroDemoBroker.closePosition's own inline percent-return formula exactly, never
   // the UNITS price-delta-times-quantity formula (which would treat the notional as an asset-unit

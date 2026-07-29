@@ -41,6 +41,7 @@ import type { HermesAgentAdapterConfig } from "../hermes-agent/hermes-agent-adap
 import type { HermesCliRunner } from "../hermes-agent/hermes-cli-runner";
 import type { HermesAgentStrategy } from "../hermes-agent/hermes-agent-strategy";
 import type { TradingCycleResultSummary } from "./types";
+import type { DailyAccountSummaryService } from "../telegram/daily-account-summary-service";
 
 // Phase 2B — Decision Intelligence: Historical Analysis Persistence. AnalysisIntegrationDeps is
 // entirely optional and additive: when `deps.analysis` is undefined (the default for every
@@ -241,6 +242,13 @@ export interface TradingRuntimeDeps {
    * Hermes call ever happens and every instrument's own MarketDecisionEngine.evaluate() runs
    * exactly as it always has (e.g. DEMO-0001's own deterministic ruleset, completely unaffected). */
   universeScan?: TradingRuntimeUniverseScanDeps;
+  /** Telegram alert refinement — requirement 3 (daily account summary). Optional and additive,
+   * same "undefined means behave exactly as before this feature existed" convention `analysis`
+   * above uses — undefined (whenever gateway alerts are disabled) means this runtime never checks
+   * or sends anything, byte-for-byte the same as before this feature existed. Checked once per
+   * cycle (see runCycleBody's own call site), never per instrument — this concern is account-wide,
+   * not per-instrument. */
+  dailyAccountSummary?: DailyAccountSummaryService;
 }
 
 /** Prototype 1.0 — official Hermes Agent decision integration. Only the Hermes-specific pieces —
@@ -616,6 +624,23 @@ export class TradingRuntime {
               perInstrument: instruments.length > 1 ? perInstrument : undefined,
             },
       );
+
+      // Telegram alert refinement — requirement 3 (daily account summary). Checked once per cycle,
+      // strictly after this cycle's own real trading work has already fully completed — a no-op
+      // almost every cycle (see DailyAccountSummaryService.maybeSend's own doc comment for exactly
+      // when it actually does anything). Never lets a failure here affect this cycle's own outcome:
+      // maybeSend() already catches everything itself, but this is wrapped again anyway, matching
+      // persistTradePerformance's own "can never fail this cycle" defence-in-depth convention.
+      if (this.deps.dailyAccountSummary) {
+        try {
+          await this.deps.dailyAccountSummary.maybeSend();
+        } catch (error) {
+          logger.error("Hermes daily account summary check failed unexpectedly", {
+            component: "hermes-execution",
+            error: toErrorMessage(error),
+          });
+        }
+      }
 
       return {
         kind: "completed",

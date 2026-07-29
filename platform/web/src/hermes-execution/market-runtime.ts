@@ -9,6 +9,8 @@ import { TelegramAlertingAuditTrail, type AlertSender } from "@/lib/hermes-execu
 import { TelegramBot } from "@/lib/hermes-execution/telegram/telegram-bot";
 import { HttpTelegramTransport } from "@/lib/hermes-execution/telegram/telegram-transport";
 import { HermesGatewayAlertSender } from "@/lib/hermes-execution/telegram/hermes-gateway-alert-sender";
+import { DailyAccountSummaryService } from "@/lib/hermes-execution/telegram/daily-account-summary-service";
+import { JsonFileDailyAccountSummaryStateStore } from "@/lib/hermes-execution/telegram/daily-account-summary-state-store";
 import { ChildProcessHermesCliRunner } from "@/lib/hermes-execution/hermes-agent/hermes-cli-runner";
 import type { AuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
@@ -172,6 +174,11 @@ export async function main(): Promise<void> {
   //    config-build time). Constructed later, once the runtime and lifecycle store it reports on
   //    actually exist — see the telegramTransport check further down.
   let auditTrail: AuditTrail = baseAuditTrail;
+  // Telegram alert refinement. Hoisted out of the `if` block below (unlike the earlier version of
+  // this file) — the daily account summary (constructed later, once `deps`/`tradeLifecycleStore`
+  // exist) reuses this EXACT SAME AlertSender instance, never a second one, so a duplicate-
+  // suppression cache or CLI process convention never diverges between the two.
+  let gatewayAlertSender: AlertSender | undefined;
   if (config.hermesAgent.telegramGatewayAlertsEnabled) {
     // Prototype 1.0 — Hermes Telegram gateway bridge. Outbound EVENT alerts (trade opened/closed,
     // automatic exits, Hermes proposals, ...) are routed through the already-proven, already-
@@ -180,7 +187,7 @@ export async function main(): Promise<void> {
     // config.hermesAgent's own cliPath/telegramTarget/telegramSendTimeoutMs — this app holds no
     // separate gateway credential of its own, and this branch is reached regardless of whether
     // config.telegram.enabled (the interactive bot, below) is on at all.
-    const alertSender: AlertSender = new HermesGatewayAlertSender(
+    gatewayAlertSender = new HermesGatewayAlertSender(
       {
         cliPath: config.hermesAgent.cliPath,
         telegramTarget: config.hermesAgent.telegramTarget,
@@ -188,7 +195,7 @@ export async function main(): Promise<void> {
       },
       new ChildProcessHermesCliRunner(),
     );
-    auditTrail = new TelegramAlertingAuditTrail(baseAuditTrail, alertSender);
+    auditTrail = new TelegramAlertingAuditTrail(baseAuditTrail, gatewayAlertSender);
     console.log("Telegram gateway alerts enabled — outbound notifications routed through the Hermes gateway.");
   }
 
@@ -328,6 +335,24 @@ export async function main(): Promise<void> {
     );
   }
 
+  // Telegram alert refinement — requirement 3 (daily account summary). Constructed only when
+  // gateway alerts are enabled at all (undefined otherwise — TradingRuntime never checks or sends
+  // anything in that case, see its own dailyAccountSummary doc comment). Reuses the SAME broker/
+  // marketDataProvider/lifecycleStore instances the runtime itself uses — never a second broker
+  // connection, never a second source of truth.
+  const dailyAccountSummary = gatewayAlertSender
+    ? new DailyAccountSummaryService({
+        broker: deps.broker,
+        marketDataProvider: deps.marketDataProvider,
+        lifecycleStore: deps.lifecycleStore,
+        auditTrail,
+        alertSender: gatewayAlertSender,
+        stateStore: new JsonFileDailyAccountSummaryStateStore(),
+        executionRunId,
+        brokerProvider: config.brokerProvider,
+      })
+    : undefined;
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -362,6 +387,7 @@ export async function main(): Promise<void> {
     opposingExitRequiredConfirmations: config.opposingExitRequiredConfirmations,
     registryClient,
     demoExecutionModeEnabled: config.demoExecutionModeEnabled,
+    dailyAccountSummary,
   });
 
   let telegramBot: TelegramBot | undefined;

@@ -160,10 +160,21 @@ export class TradeLifecycleService {
       brokerPositionId: input.brokerPositionId,
       openedAt,
     });
+    // Telegram alert refinement. Enriched (additive only — every existing consumer of this event's
+    // details reads a field already present before this change) so the TRADE OPENED Telegram
+    // template (telegram-alerting-audit-trail.ts) can be built entirely from this one audit event,
+    // without needing the full TradeLifecycleRecord: side/quantity/sizingMode/stopLoss/takeProfit
+    // are the record's own frozen values, never re-derived or guessed.
     await this.audit("TRADE_OPENED", updated, {
       entryPrice: input.entryPrice,
       brokerOrderId: input.brokerOrderId,
       brokerPositionId: input.brokerPositionId,
+      side: updated.side,
+      quantity: updated.quantity,
+      sizingMode: updated.sizingMode,
+      stopLoss: updated.stopLoss,
+      takeProfit: updated.takeProfit,
+      openedAt,
     });
     return updated;
   }
@@ -206,12 +217,18 @@ export class TradeLifecycleService {
       realisedPnlPercent,
       holdingDurationMs,
     });
+    // Telegram alert refinement. Enriched (additive only, same reasoning as recordOpened's own
+    // comment above) so the TRADE CLOSED Telegram template can be built entirely from this one
+    // audit event: entryPrice/brokerPositionId are the record's own frozen/broker-confirmed values.
     await this.audit("TRADE_CLOSED", updated, {
+      entryPrice: record.entryPrice,
       exitPrice: input.exitPrice,
       exitReason: input.exitReason,
       realisedPnl,
       realisedPnlPercent,
       holdingDurationMs,
+      brokerPositionId: updated.brokerPositionId,
+      closedAt,
     });
     return updated;
   }

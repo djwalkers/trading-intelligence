@@ -529,9 +529,12 @@ describe("Runtime ordering — Telegram delivery failure never affects broker/li
     expect(broker.closePosition).toHaveBeenCalledTimes(1);
     expect(broker.closePosition).toHaveBeenCalledWith("eth-existing", expect.anything(), expect.anything(), expect.anything());
 
+    // Telegram alert refinement — AUTOMATIC_EXIT_TRIGGERED is deliberately no longer alert-worthy
+    // (curated down to only TRADE_OPENED/TRADE_CLOSED/critical failures); the automatic stop-loss
+    // exit's own TRADE_CLOSED event is what the Telegram alert path now attempts (and fails) for.
     const events = await innerAuditTrail.getEvents();
     const failure = events.find(
-      (e) => e.eventType === "TELEGRAM_NOTIFICATION_FAILED" && e.details.originalEventType === "AUTOMATIC_EXIT_TRIGGERED",
+      (e) => e.eventType === "TELEGRAM_NOTIFICATION_FAILED" && e.details.originalEventType === "TRADE_CLOSED",
     );
     expect(failure).toBeDefined();
     expect(JSON.stringify(failure)).not.toContain("super-secret");
