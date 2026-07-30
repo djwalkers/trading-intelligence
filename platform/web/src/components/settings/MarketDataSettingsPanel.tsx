@@ -35,8 +35,9 @@ export function MarketDataSettingsPanel() {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-ink-100">Historical market data</span>
           <span className="text-xs text-ink-500">
-            Powers the AI Engine&apos;s indicators (moving averages, RSI, momentum). Configured for
-            always-on server-based scanning; this browser always uses sample history.
+            Powers the legacy Strategy Simulator&apos;s indicators (moving averages, RSI, momentum).
+            Configured for always-on server-based scanning; this browser always uses sample
+            history.
           </span>
         </div>
         <Badge className="border-base-600 bg-base-800 text-ink-300">Configured on server</Badge>

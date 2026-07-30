@@ -18,7 +18,7 @@ export default function SignalsPage() {
     <>
       <PageHeader
         title="Signals"
-        description="A simplified, manual signal feed generated from sample market data — separate from the AI Engine's own automatic scanning."
+        description="A simplified, manual signal feed generated from sample market data — separate from the legacy Strategy Simulator's own automatic scanning."
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -33,9 +33,9 @@ export default function SignalsPage() {
 
       <InfoNote>
         These signals come from a simplified, manually-reviewed strategy feed over sample market
-        data — a separate system from the AI Engine described on the Dashboard and Operations
-        Centre. They do not reflect real market conditions and are not a recommendation to buy or
-        sell any instrument.
+        data — a separate system from the legacy Strategy Simulator described on Operations
+        Centre, and entirely unrelated to Hermes Agent. They do not reflect real market conditions
+        and are not a recommendation to buy or sell any instrument.
       </InfoNote>
     </>
   );

@@ -108,7 +108,7 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
           trades={openTrades.slice(0, RECENT_TRADES_LIMIT)}
           prices={prices}
           onCloseTrade={requestClose}
-          emptyMessage="No open trades yet. Place one from Signals or Market Intelligence, or let the AI Engine open one automatically — it will appear here with live pricing."
+          emptyMessage="No open trades yet. Place one from Signals or Market Intelligence, or let the legacy Strategy Simulator open one automatically — it will appear here with live pricing."
         />
       </SectionPanel>
 

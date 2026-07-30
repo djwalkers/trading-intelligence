@@ -53,9 +53,9 @@ export function BotDecisionsView() {
   if (decisions.length === 0) {
     return (
       <p className="px-5 py-6 text-sm text-ink-500">
-        Your AI has not completed any scans yet. Use the &quot;Run scan now&quot; button on the
-        Dashboard, or turn on automatic scanning in Settings — every scan and its outcome will be
-        recorded here.
+        The legacy simulator has not completed any scans yet. Use the &quot;Run legacy scan
+        now&quot; button in Settings, or turn on automatic scanning there — every scan and its
+        outcome will be recorded here.
       </p>
     );
   }

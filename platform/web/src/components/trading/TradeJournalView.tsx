@@ -67,7 +67,7 @@ export function TradeJournalView() {
     <>
       <PageHeader
         title="Trade Journal"
-        description="A complete record of every paper trade placed in this browser, from signals and Market Intelligence alike."
+        description="A complete record of every simulated paper trade placed in this browser, from signals and Market Intelligence alike — entirely separate from the Hermes/eToro demo account shown on the Dashboard."
       />
 
       <div className="panel flex flex-wrap gap-2 px-4 py-3">
@@ -101,7 +101,7 @@ export function TradeJournalView() {
           onCloseTrade={requestClose}
           emptyMessage={
             trades.length === 0
-              ? "No paper trades yet. Place one from Signals or Market Intelligence, or let the AI Engine trade automatically — every trade, open or closed, will be recorded here."
+              ? "No paper trades yet. Place one from Signals or Market Intelligence, or let the legacy Strategy Simulator trade automatically — every trade, open or closed, will be recorded here."
               : "No trades match this filter."
           }
         />

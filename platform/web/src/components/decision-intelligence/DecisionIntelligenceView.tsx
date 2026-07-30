@@ -128,7 +128,7 @@ export function DecisionIntelligenceView() {
     <>
       <PageHeader
         title="AI Decision History"
-        description="Every candidate the AI Engine has ever evaluated — accepted and rejected alike — kept as a long-term record for future analysis."
+        description="Every candidate the legacy Strategy Simulator has ever evaluated — accepted and rejected alike — kept as a long-term record for future analysis. Not connected to Hermes Agent or eToro."
       />
 
       <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 px-5 py-4 text-xs text-ink-500">

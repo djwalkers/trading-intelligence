@@ -12,7 +12,7 @@ export default function BotDecisionsPage() {
     <>
       <PageHeader
         title="Bot Decisions"
-        description="Every scan the AI Engine has made in this browser, and why."
+        description="Every scan the legacy Strategy Simulator has made in this browser, and why. Not connected to Hermes Agent or eToro."
       />
 
       <SectionPanel
@@ -23,8 +23,8 @@ export default function BotDecisionsPage() {
       </SectionPanel>
 
       <InfoNote>
-        Scans happen when you click &quot;Run scan now&quot; on the Dashboard, or automatically if
-        you&apos;ve turned on automatic scanning in Settings. It is paper trading only; no real
+        Scans happen when you click &quot;Run legacy scan now&quot; in Settings, or automatically
+        if you&apos;ve turned on automatic scanning there. It is paper trading only; no real
         orders are placed. This log is stored in this browser only — it doesn&apos;t include scans
         made by always-on server-based scanning, which are recorded separately (see AI Decision
         History).

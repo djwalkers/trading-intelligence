@@ -16,9 +16,13 @@ import {
 // Build 1.12.0 — renamed from BotRunnerStatusPanel and trimmed: scheduling configuration (mode,
 // interval, start/stop) moved to Settings (BrowserAutomationPanel/ServerAutomationPanel) since
 // that's a configuration concern, not a health one. What's left here is purely observational: has
-// the AI Engine scanned recently, what did it decide, and are its two safety layers (Portfolio Risk
-// Manager, Position Protection) active — condensed to one line per limit group rather than one row
-// per number, so this reads as a health summary, not a checklist. No thresholds changed.
+// the legacy Strategy Simulator scanned recently, what did it decide, and are its two safety layers
+// (Portfolio Risk Manager, Position Protection) active — condensed to one line per limit group
+// rather than one row per number, so this reads as a health summary, not a checklist. No
+// thresholds changed.
+//
+// Legacy-worker UI cleanup. Renamed from "AI Engine" — this is the deterministic legacy Strategy
+// Simulator, never the official Hermes Agent (see docs/audit/LEGACY_WORKER_IMPACT_ASSESSMENT.md).
 export function AIEngineActivityPanel() {
   const { decisions, isHydrated } = useBotDecisionLog();
   const last = decisions[0] ?? null;
@@ -28,7 +32,7 @@ export function AIEngineActivityPanel() {
     <div className="divide-y divide-base-700/60">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-ink-100">AI Engine</span>
+          <span className="text-sm font-medium text-ink-100">Legacy Strategy Simulator</span>
           <span className="text-xs text-ink-500">
             Scans every watchlist instrument, ranks tradeable opportunities, and applies risk checks
             before opening any paper trade.

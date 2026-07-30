@@ -16,7 +16,7 @@ export default function StrategiesPage() {
     <>
       <PageHeader
         title="Strategies"
-        description="The rule-based strategies behind the Signals feed, evaluated against sample market data — separate from the three strategies the AI Engine uses for automatic scanning."
+        description="The rule-based strategies behind the Signals feed, evaluated against sample market data — separate from the three strategies the legacy Strategy Simulator uses for automatic scanning."
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

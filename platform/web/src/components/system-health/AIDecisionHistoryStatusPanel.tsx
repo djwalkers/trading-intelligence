@@ -37,7 +37,8 @@ export function AIDecisionHistoryStatusPanel() {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium text-ink-100">Decisions recorded</span>
           <span className="text-xs text-ink-500">
-            Every candidate the AI Engine has considered — accepted and rejected alike
+            Every candidate the legacy Strategy Simulator has considered — accepted and rejected
+            alike
           </span>
         </div>
         <span className="text-sm text-ink-300">{status.recordsStored}</span>
