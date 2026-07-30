@@ -2,7 +2,7 @@ import { PortfolioView } from "@/components/portfolio/PortfolioView";
 import { paperPortfolio } from "@/lib/mock";
 
 export const metadata = {
-  title: "Paper Portfolio | Trading Intelligence Platform",
+  title: "Local Paper Simulation | Trading Intelligence Platform",
 };
 
 export default function PaperPortfolioPage() {

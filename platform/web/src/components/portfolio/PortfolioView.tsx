@@ -46,8 +46,8 @@ export function PortfolioView({ paperPortfolio }: PortfolioViewProps) {
   return (
     <>
       <PageHeader
-        title="Paper Portfolio"
-        description="Simulated portfolio performance. No real capital is deployed and no orders are executed."
+        title="Local Paper Simulation"
+        description="Simulated portfolio performance, tracked entirely in this browser. No real capital is deployed, no orders are executed, and this is entirely separate from the Hermes/eToro demo account shown on the Dashboard."
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

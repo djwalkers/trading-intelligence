@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getBrokerSnapshot } from "@/lib/hermes-integration/broker-snapshot";
+import { getBrokerSnapshot, resetInstrumentIdToSymbolCacheForTests } from "@/lib/hermes-integration/broker-snapshot";
 
 // Never calls a real broker/API — BrokerFactory.create is mocked below so this suite exercises
 // only broker-snapshot.ts's own mapping/error-handling logic, deterministically and offline.
@@ -16,10 +16,12 @@ vi.mock("@/lib/hermes-execution/config", () => ({
 const BASE_CONFIG = {
   brokerProvider: "etoro-demo",
   runtimeTrading: { mode: "demo" },
+  hermesAgent: { instrumentUniverse: ["BTC", "ETH", "SOL", "AAPL", "MSFT", "NVDA"] },
 };
 
 afterEach(() => {
   vi.clearAllMocks();
+  resetInstrumentIdToSymbolCacheForTests();
 });
 
 describe("getBrokerSnapshot", () => {
@@ -113,6 +115,75 @@ describe("getBrokerSnapshot", () => {
         accountMode: "paper",
       },
     ]);
+  });
+
+  // Main Dashboard Hermes/eToro fix — instrument-ID-to-symbol mapping. eToro exposes only a
+  // numeric instrumentID on a raw position; a broker adapter that ALSO supports resolveInstrument()
+  // must have its known ids mapped back to the app's own configured symbol, never left as an
+  // opaque number when a resolution is available.
+  describe("instrument-ID-to-symbol mapping", () => {
+    function makeResolvableBroker(idsBySymbol: Record<string, number>, positions: Array<{ instrumentID: number; isBuy?: boolean; amount?: number }>) {
+      const resolveInstrument = vi.fn(async (term: string) => {
+        const instrumentId = idsBySymbol[term];
+        if (instrumentId === undefined) throw new Error(`no fixture id for ${term}`);
+        return { instrumentId, displayName: term, symbol: term };
+      });
+      return {
+        getAccount: () => ({ cashBalance: 1000, startingCashBalance: 1000 }),
+        getOpenPositions: () => [],
+        getRawPortfolio: async () => ({ clientPortfolio: { credit: 1000, positions } }),
+        resolveInstrument,
+      };
+    }
+
+    it("maps a known instrument id to its configured symbol instead of the raw numeric id", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeResolvableBroker({ BTC: 100_000, ETH: 100_001 }, [{ instrumentID: 100_000, isBuy: true, amount: 10 }]);
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.instrument).toBe("BTC");
+    });
+
+    it("falls back to the raw numeric id (never guesses) for an instrument that fails to resolve", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeResolvableBroker({ BTC: 100_000 }, [{ instrumentID: 999_999, isBuy: true, amount: 10 }]);
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.instrument).toBe("999999");
+    });
+
+    it("resolves the configured universe only once (module-level cache) across repeated calls", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeResolvableBroker({ BTC: 100_000, ETH: 100_001 }, [{ instrumentID: 100_000, isBuy: true, amount: 10 }]);
+      mockCreate.mockResolvedValue(broker);
+
+      await getBrokerSnapshot();
+      const callsAfterFirst = broker.resolveInstrument.mock.calls.length;
+      expect(callsAfterFirst).toBeGreaterThan(0);
+
+      await getBrokerSnapshot();
+      expect(broker.resolveInstrument.mock.calls.length).toBe(callsAfterFirst); // no new calls
+    });
+
+    it("never attempts resolution at all for a broker with no resolveInstrument capability", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue({
+        getAccount: () => ({ cashBalance: 1000, startingCashBalance: 1000 }),
+        getOpenPositions: () => [],
+        getRawPortfolio: async () => ({ clientPortfolio: { credit: 1000, positions: [{ instrumentID: 100_000, isBuy: true, amount: 10 }] } }),
+      });
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.instrument).toBe("100000");
+    });
   });
 
   it("returns ok: false, not a thrown error, when getRawPortfolio() itself fails", async () => {

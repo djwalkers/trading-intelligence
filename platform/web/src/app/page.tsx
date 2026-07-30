@@ -1,21 +1,27 @@
+import Link from "next/link";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { SectionPanel } from "@/components/ui/SectionPanel";
 import { InfoNote } from "@/components/ui/InfoNote";
 import { WatchlistView } from "@/components/watchlist/WatchlistView";
-import { PortfolioOverviewKpis } from "@/components/dashboard/PortfolioOverviewKpis";
+import { HermesPortfolioSection } from "@/components/dashboard/HermesPortfolioSection";
 import { AIActivityKpis } from "@/components/dashboard/AIActivityKpis";
 import { RecentAIDecisionsList } from "@/components/dashboard/RecentAIDecisionsList";
 import { QuickActionsPanel } from "@/components/dashboard/QuickActionsPanel";
 import { MarketOverviewSummary } from "@/components/dashboard/MarketOverviewSummary";
-import { instruments, paperPortfolio, marketStatus } from "@/lib/mock";
+import { instruments, marketStatus } from "@/lib/mock";
 import { getStrategyEngine } from "@/lib/strategy-engine";
 import { DotIcon } from "@/components/icons";
 
 // Build 1.12.0 — rebuilt around one question: "What is my AI doing right now?" Every panel that
 // used to configure something (browser/server automatic scanning) moved to Settings; this page now
-// only observes and lets you trigger a scan or jump elsewhere. No trading logic, risk rule, or
-// calculation changed — every figure here is read from the same functions/data the rest of the app
-// already uses (see each component's own comments for exactly which one).
+// only observes and lets you trigger a scan or jump elsewhere.
+//
+// Main Dashboard Hermes/eToro fix. The portfolio section now represents the Hermes runtime's own
+// connected eToro demo account (broker ground truth — see HermesPortfolioSection.tsx), not the
+// legacy local paper-trading simulation `paperPortfolio` used to feed. That local simulation still
+// exists, unmodified, at its own separate /portfolio route ("Local Paper Simulation") — it is
+// deliberately never shown here any more, so the two account models are never mixed together on
+// this page.
 export default function DashboardPage() {
   const watchlistSnapshot = instruments.slice(0, 5);
   const strategyScores = getStrategyEngine().evaluateAll(instruments);
@@ -24,14 +30,10 @@ export default function DashboardPage() {
     <>
       <PageHeader
         title="Dashboard"
-        description="What your AI is doing right now, and how your paper portfolio is performing."
+        description="What your AI is doing right now, and how your Hermes/eToro demo account is performing."
       />
 
-      <SectionPanel title="Portfolio overview" description="Your simulated trading account, at a glance">
-        <div className="px-5 pt-4">
-          <PortfolioOverviewKpis paperPortfolio={paperPortfolio} />
-        </div>
-      </SectionPanel>
+      <HermesPortfolioSection />
 
       <SectionPanel
         title="AI activity"
@@ -75,8 +77,14 @@ export default function DashboardPage() {
       </div>
 
       <InfoNote>
-        This platform runs on simulated paper trading. No broker is connected, no real money is at
-        risk, and nothing shown here is financial advice.
+        The portfolio above reflects the Hermes runtime&apos;s own connected eToro <strong>demo</strong>{" "}
+        account — a real demo broker connection, not simulated locally, but still no real money at
+        risk (eToro demo accounts use virtual funds only). A separate,{" "}
+        <Link href="/portfolio" className="text-ink-300 underline hover:text-ink-100">
+          Local Paper Simulation
+        </Link>{" "}
+        also exists in this browser, entirely independent of the Hermes/eToro account above. Nothing
+        shown here is financial advice.
       </InfoNote>
     </>
   );

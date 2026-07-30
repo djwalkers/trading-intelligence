@@ -45,7 +45,7 @@ export function AIActivityKpis() {
         valueClassName={automationOn ? "text-accent-teal" : "text-ink-100"}
         sublabel={automationOn ? automationDetail : "Manual only — see Settings"}
       />
-      <StatCard label="AI decisions today" value={isHydrated ? String(decisionsToday) : loadingValue} />
+      <StatCard label="AI decisions today (this browser)" value={isHydrated ? String(decisionsToday) : loadingValue} />
       <StatCard
         label="Last scan (this browser)"
         value={!isHydrated ? loadingValue : lastScan ? formatDateTime(lastScan.timestamp) : "Never"}

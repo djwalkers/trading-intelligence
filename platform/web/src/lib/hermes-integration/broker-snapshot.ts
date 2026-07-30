@@ -3,6 +3,7 @@ import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import { BrokerFactory } from "@/lib/hermes-execution/broker-factory";
 import type { PaperBroker } from "@/lib/hermes-execution/paper-broker";
+import { hasInstrumentResolution } from "@/lib/hermes-execution/runtime/position-reconciliation";
 import { logger } from "@/lib/logger/logger";
 
 // Hermes Integration API v1. Reuses the existing broker abstraction (BrokerFactory + the PaperBroker
@@ -18,8 +19,12 @@ import { logger } from "@/lib/logger/logger";
 // that file — see docs/hermes-integration-api.md's "Architecture" section.
 
 export interface HermesPositionDto {
-  /** eToro exposes no human-readable symbol on a raw position (only a numeric instrumentID) — see
-   * this module's own EtoroDemoBroker branch below. Reported as-is rather than fabricated. */
+  /** eToro exposes no human-readable symbol on a raw position (only a numeric instrumentID). Main
+   * Dashboard Hermes/eToro fix: mapped back to the app's own configured instrument symbol (e.g.
+   * "BTC") via resolveInstrumentIdMap() below whenever the broker supports instrument resolution
+   * and the id is a KNOWN, resolved one — never a guessed mapping. Falls back to the raw numeric id
+   * as a string only when genuinely unresolvable (an unrecognised instrument, or a broker with no
+   * resolution capability at all) — see this module's own EtoroDemoBroker branch below. */
   instrument: string;
   side: "BUY" | "SELL" | "unknown";
   quantity: number | null;
@@ -80,6 +85,47 @@ function hasRawPortfolio(broker: PaperBroker): broker is PaperBroker & RawPortfo
   return typeof (broker as Partial<RawPortfolioBroker>).getRawPortfolio === "function";
 }
 
+// Main Dashboard Hermes/eToro fix — instrument-ID-to-symbol mapping. eToro's own instrument search
+// returns its ENTIRE ~16,000-instrument universe regardless of the search term (confirmed live —
+// see etoro-client.ts's own EtoroInstrumentSearchResponse doc comment), so resolveInstrument() is
+// not cheap to call on every single portfolio/positions poll. Real-world instrument identities
+// never change, so this is cached at MODULE scope (this process's whole lifetime, across every
+// getBrokerSnapshot() call and every freshly-constructed broker instance — getBrokerSnapshot()
+// itself constructs a new, throwaway broker per call, so a per-broker-instance cache would never
+// actually persist) — resolved lazily, once, the first time a raw position's instrument id needs
+// mapping. Only entries that resolved successfully are cached; an instrument that failed to
+// resolve is simply retried on the next call, never permanently remembered as "unknown."
+let instrumentIdToSymbolCache: Map<number, string> | undefined;
+
+async function resolveInstrumentIdMap(
+  broker: PaperBroker,
+  instrumentUniverse: readonly string[],
+): Promise<Map<number, string>> {
+  if (instrumentIdToSymbolCache) return instrumentIdToSymbolCache;
+  if (!hasInstrumentResolution(broker)) return new Map();
+
+  const resolved = new Map<number, string>();
+  for (const instrument of instrumentUniverse) {
+    try {
+      const { instrumentId } = await broker.resolveInstrument(instrument);
+      resolved.set(instrumentId, instrument);
+    } catch (error) {
+      logger.warn("Hermes Integration API could not resolve one configured instrument's id — its raw positions will show a numeric id instead", {
+        component: "hermes-integration-broker-snapshot",
+        instrument,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  instrumentIdToSymbolCache = resolved;
+  return resolved;
+}
+
+/** Test-only escape hatch — mirrors resetHermesExecutionConfigCacheForTests(). */
+export function resetInstrumentIdToSymbolCacheForTests(): void {
+  instrumentIdToSymbolCache = undefined;
+}
+
 export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   let config;
   try {
@@ -113,8 +159,9 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   if (hasRawPortfolio(broker)) {
     try {
       const raw = await broker.getRawPortfolio();
+      const idToSymbol = await resolveInstrumentIdMap(broker, config.hermesAgent.instrumentUniverse);
       const positions: HermesPositionDto[] = raw.clientPortfolio.positions.map((position) => ({
-        instrument: String(position.instrumentID),
+        instrument: idToSymbol.get(position.instrumentID) ?? String(position.instrumentID),
         side: position.isBuy === undefined ? "unknown" : position.isBuy ? "BUY" : "SELL",
         quantity: position.amount ?? null,
         entryPrice: position.openRate ?? null,
