@@ -4,7 +4,9 @@ import { requireHermesAuth, withHermesGuard } from "@/lib/hermes-integration/aut
 import { resetHermesIntegrationConfigCacheForTests, MIN_HERMES_INTEGRATION_TOKEN_LENGTH } from "@/lib/hermes-integration/config";
 
 const VALID_TOKEN = "a".repeat(MIN_HERMES_INTEGRATION_TOKEN_LENGTH);
+const VALID_BASE_URL = "https://hermes.example-vps.com";
 const originalToken = process.env.HERMES_INTEGRATION_TOKEN;
+const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 
 function makeRequest(headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1:3000/api/hermes/health", { headers });
@@ -13,12 +15,15 @@ function makeRequest(headers: Record<string, string> = {}): NextRequest {
 describe("requireHermesAuth", () => {
   beforeEach(() => {
     process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
     resetHermesIntegrationConfigCacheForTests();
   });
 
   afterEach(() => {
     if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
     else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
     resetHermesIntegrationConfigCacheForTests();
   });
 
@@ -91,12 +96,15 @@ describe("requireHermesAuth", () => {
 describe("withHermesGuard", () => {
   beforeEach(() => {
     process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
     resetHermesIntegrationConfigCacheForTests();
   });
 
   afterEach(() => {
     if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
     else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
     resetHermesIntegrationConfigCacheForTests();
   });
 

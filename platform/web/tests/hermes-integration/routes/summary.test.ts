@@ -3,7 +3,9 @@ import { NextRequest } from "next/server";
 import { resetHermesIntegrationConfigCacheForTests, MIN_HERMES_INTEGRATION_TOKEN_LENGTH } from "@/lib/hermes-integration/config";
 
 const VALID_TOKEN = "a".repeat(MIN_HERMES_INTEGRATION_TOKEN_LENGTH);
+const VALID_BASE_URL = "https://hermes.example-vps.com";
 const originalToken = process.env.HERMES_INTEGRATION_TOKEN;
+const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 
 const mockGetConfig = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-execution/config", () => ({ getHermesExecutionConfig: mockGetConfig }));
@@ -27,6 +29,7 @@ const BASE_CONFIG = { runtimeTrading: { mode: "demo" }, brokerProvider: "etoro-d
 describe("GET /api/hermes/summary — subsystem failure degradation", () => {
   beforeEach(() => {
     process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
     resetHermesIntegrationConfigCacheForTests();
     vi.clearAllMocks();
     mockGetConfig.mockReturnValue(BASE_CONFIG);
@@ -37,6 +40,8 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
   afterEach(() => {
     if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
     else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
     resetHermesIntegrationConfigCacheForTests();
   });
 

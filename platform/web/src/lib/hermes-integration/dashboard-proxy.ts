@@ -20,13 +20,21 @@ import type { HermesErrorEnvelope } from "./response-envelope";
 // envelope/status is forwarded through unchanged, so a genuine 401 (e.g. HERMES_INTEGRATION_TOKEN
 // missing or misconfigured) is visible to the dashboard as a real "unauthorised" state, never
 // silently swallowed or misreported as a generic error.
+//
+// Split-deployment fix. The frontend (this Next.js app) and the Hermes runtime (which owns
+// /api/hermes/*) can now run on entirely different hosts — frontend on Vercel, Hermes on a VPS —
+// so this can no longer assume /api/hermes/* lives at the SAME origin as the incoming request
+// (request.nextUrl.origin, the previous behaviour). The upstream URL is now built from
+// HERMES_INTEGRATION_BASE_URL (config.baseUrl — see config.ts's own validation: required together
+// with the token, HTTPS-enforced for anything remote, trailing-slash-normalised) instead — `request`
+// itself is no longer needed to determine where to call.
 
 /**
  * Proxies one GET /api/hermes/<path> call for a same-origin dashboard route handler. `path` must
  * be a plain path segment (e.g. "portfolio") — never accepts caller-supplied input, so there is no
  * injection surface here; every call site passes a hard-coded literal.
  */
-export async function proxyHermesGet(request: NextRequest, path: string): Promise<NextResponse> {
+export async function proxyHermesGet(path: string): Promise<NextResponse> {
   let config;
   try {
     config = getHermesIntegrationConfig();
@@ -45,7 +53,10 @@ export async function proxyHermesGet(request: NextRequest, path: string): Promis
     return NextResponse.json<HermesErrorEnvelope>(
       {
         ok: false,
-        error: { code: "UNAUTHORIZED", message: "Hermes Integration API is not configured (HERMES_INTEGRATION_TOKEN is not set)." },
+        error: {
+          code: "UNAUTHORIZED",
+          message: "Hermes Integration API is not configured (HERMES_INTEGRATION_TOKEN / HERMES_INTEGRATION_BASE_URL are not set).",
+        },
         meta: { timestamp: new Date().toISOString() },
       },
       { status: 401 },
@@ -54,7 +65,7 @@ export async function proxyHermesGet(request: NextRequest, path: string): Promis
 
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/api/hermes/${path}`, request.nextUrl.origin), {
+    upstream = await fetch(new URL(`/api/hermes/${path}`, config.baseUrl), {
       headers: { Authorization: `Bearer ${config.token}` },
       cache: "no-store",
     });
@@ -69,6 +80,22 @@ export async function proxyHermesGet(request: NextRequest, path: string): Promis
     );
   }
 
-  const body = await upstream.json();
+  let body: unknown;
+  try {
+    body = await upstream.json();
+  } catch {
+    return NextResponse.json<HermesErrorEnvelope>(
+      {
+        ok: false,
+        error: {
+          code: "UPSTREAM_MALFORMED_RESPONSE",
+          message: `The Hermes Integration API returned a response that could not be parsed as JSON (HTTP ${upstream.status}).`,
+        },
+        meta: { timestamp: new Date().toISOString() },
+      },
+      { status: 502 },
+    );
+  }
+
   return NextResponse.json(body, { status: upstream.status });
 }

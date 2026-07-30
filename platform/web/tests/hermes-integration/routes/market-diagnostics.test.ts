@@ -3,7 +3,9 @@ import { NextRequest } from "next/server";
 import { resetHermesIntegrationConfigCacheForTests, MIN_HERMES_INTEGRATION_TOKEN_LENGTH } from "@/lib/hermes-integration/config";
 
 const VALID_TOKEN = "a".repeat(MIN_HERMES_INTEGRATION_TOKEN_LENGTH);
+const VALID_BASE_URL = "https://hermes.example-vps.com";
 const originalToken = process.env.HERMES_INTEGRATION_TOKEN;
+const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 
 const { getMarketDiagnosticsMock } = vi.hoisted(() => ({ getMarketDiagnosticsMock: vi.fn() }));
 vi.mock("@/lib/hermes-execution/market-diagnostics-service", async () => {
@@ -51,6 +53,7 @@ const SAMPLE_DIAGNOSTICS = {
 describe("GET /api/hermes/market-diagnostics", () => {
   beforeEach(() => {
     process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
     resetHermesIntegrationConfigCacheForTests();
     getMarketDiagnosticsMock.mockReset();
   });
@@ -58,6 +61,8 @@ describe("GET /api/hermes/market-diagnostics", () => {
   afterEach(() => {
     if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
     else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
     resetHermesIntegrationConfigCacheForTests();
   });
 
