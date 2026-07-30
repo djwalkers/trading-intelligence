@@ -38,11 +38,35 @@ vi.mock("@/lib/hermes-execution/config", () => ({
   }),
 }));
 
-import { classify, type ResolutionOutcome, type QuoteOutcome, type CandleOutcome } from "@/hermes-execution/etoro-instrument-probe";
+import {
+  classify,
+  classificationReasons,
+  type ResolutionOutcome,
+  type QuoteOutcome,
+  type CandleOutcome,
+} from "@/hermes-execution/etoro-instrument-probe";
+
+const QUOTE_STALENESS_THRESHOLD_MS = 60_000;
+
+function freshQuote(overrides: Partial<Extract<QuoteOutcome, { kind: "success" }>> = {}): QuoteOutcome {
+  return {
+    kind: "success",
+    retrievalSucceeded: true,
+    bid: 100,
+    ask: 101,
+    spread: 1,
+    date: new Date().toISOString(),
+    probeReceivedAt: new Date().toISOString(),
+    ageSeconds: 5,
+    freshness: "FRESH",
+    usableForVerification: true,
+    ...overrides,
+  };
+}
 
 describe("classify", () => {
   const success: ResolutionOutcome = { kind: "success", resolved: { instrumentId: 1, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 } };
-  const okQuote: QuoteOutcome = { kind: "success", bid: 100, ask: 101, spread: 1, date: undefined, dateParseError: false, staleMs: undefined, stale: false };
+  const okQuote: QuoteOutcome = freshQuote();
   const okCandles: CandleOutcome = { kind: "success", candleCount: 60, firstTimestamp: "a", lastTimestamp: "b", lastCandleAgeSeconds: 10 };
 
   it("classifies a transport-error resolution as NOT_TESTED — never conflated with a genuine negative result", () => {
@@ -57,7 +81,7 @@ describe("classify", () => {
     expect(classify({ kind: "ambiguous", candidateCount: 2 }, undefined, undefined)).toBe("UNSUPPORTED");
   });
 
-  it("classifies a resolved instrument with a working quote and candles as READ_ONLY_VERIFIED", () => {
+  it("classifies a resolved instrument with a fresh, valid quote and valid candles as READ_ONLY_VERIFIED", () => {
     expect(classify(success, okQuote, okCandles)).toBe("READ_ONLY_VERIFIED");
   });
 
@@ -71,6 +95,73 @@ describe("classify", () => {
 
   it("classifies a resolved instrument with invalid candles as PARTIALLY_SUPPORTED, even though the quote succeeded", () => {
     expect(classify(success, okQuote, { kind: "invalid", message: "gap", gapCount: 1 })).toBe("PARTIALLY_SUPPORTED");
+  });
+
+  // Live-BTC-run remediation (probe-etoro-1785446881512): a syntactically valid ("kind: success")
+  // but stale quote used to satisfy classify()'s old `quote?.kind === "success"` check outright.
+  describe("quote freshness gating (live-BTC-run defect fix)", () => {
+    it("classifies a STALE quote (kind: success, usableForVerification: false) as PARTIALLY_SUPPORTED, never READ_ONLY_VERIFIED", () => {
+      const staleQuote = freshQuote({
+        freshness: "STALE",
+        usableForVerification: false,
+        ageSeconds: 6045,
+      });
+      expect(classify(success, staleQuote, okCandles)).toBe("PARTIALLY_SUPPORTED");
+    });
+
+    it("classifies an INVALID_TIMESTAMP quote as PARTIALLY_SUPPORTED", () => {
+      const invalidTimestampQuote = freshQuote({
+        freshness: "INVALID_TIMESTAMP",
+        usableForVerification: false,
+        ageSeconds: undefined,
+        date: "not-a-real-date",
+      });
+      expect(classify(success, invalidTimestampQuote, okCandles)).toBe("PARTIALLY_SUPPORTED");
+    });
+
+    it("classifies a quote with a missing timestamp (freshness UNKNOWN) as not READ_ONLY_VERIFIED — a missing timestamp is never treated as fresh", () => {
+      const missingTimestampQuote = freshQuote({
+        freshness: "UNKNOWN",
+        usableForVerification: false,
+        ageSeconds: undefined,
+        date: undefined,
+      });
+      expect(classify(success, missingTimestampQuote, okCandles)).not.toBe("READ_ONLY_VERIFIED");
+      expect(classify(success, missingTimestampQuote, okCandles)).toBe("PARTIALLY_SUPPORTED");
+    });
+
+    it("classifies a quote exactly at the freshness threshold boundary as FRESH (age === threshold is not stale)", () => {
+      const boundaryQuote = freshQuote({ freshness: "FRESH", usableForVerification: true, ageSeconds: QUOTE_STALENESS_THRESHOLD_MS / 1000 });
+      expect(classify(success, boundaryQuote, okCandles)).toBe("READ_ONLY_VERIFIED");
+    });
+  });
+});
+
+describe("classificationReasons", () => {
+  const success: ResolutionOutcome = { kind: "success", resolved: { instrumentId: 1, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 } };
+  const okCandles: CandleOutcome = { kind: "success", candleCount: 60, firstTimestamp: "a", lastTimestamp: "b", lastCandleAgeSeconds: 10 };
+
+  it("is empty when the instrument is fully READ_ONLY_VERIFIED", () => {
+    expect(classificationReasons(success, freshQuote(), okCandles)).toEqual([]);
+  });
+
+  it("includes QUOTE_STALE for a stale quote", () => {
+    const staleQuote = freshQuote({ freshness: "STALE", usableForVerification: false, ageSeconds: 6045 });
+    expect(classificationReasons(success, staleQuote, okCandles)).toContain("QUOTE_STALE");
+  });
+
+  it("includes QUOTE_TIMESTAMP_INVALID for an unparseable timestamp", () => {
+    const invalidQuote = freshQuote({ freshness: "INVALID_TIMESTAMP", usableForVerification: false, ageSeconds: undefined });
+    expect(classificationReasons(success, invalidQuote, okCandles)).toContain("QUOTE_TIMESTAMP_INVALID");
+  });
+
+  it("includes QUOTE_TIMESTAMP_MISSING for a missing timestamp", () => {
+    const missingQuote = freshQuote({ freshness: "UNKNOWN", usableForVerification: false, ageSeconds: undefined, date: undefined });
+    expect(classificationReasons(success, missingQuote, okCandles)).toContain("QUOTE_TIMESTAMP_MISSING");
+  });
+
+  it("includes RESOLUTION_NO_MATCH for an unresolved instrument, with no other reasons appended", () => {
+    expect(classificationReasons({ kind: "no-match" }, undefined, undefined)).toEqual(["RESOLUTION_NO_MATCH"]);
   });
 });
 
@@ -270,13 +361,19 @@ describe("etoro-instrument-probe — main()", () => {
     const evidenceEvents = await readEvidenceFile(evidenceFile);
     expect(evidenceEvents).toHaveLength(1);
     const doc = evidenceEvents[0]!.details;
-    expect(doc.schemaVersion).toBe(1);
+    expect(doc.schemaVersion).toBe(2);
     expect(doc.instrument).toBe("BTC");
     expect(doc.classification).toBe("READ_ONLY_VERIFIED");
+    expect(doc.classificationReasons).toEqual([]);
     expect(doc.appVersion).toBeTruthy();
     expect((doc.configuration as Record<string, unknown>).currency).toBeNull();
     expect((doc.resolution as Record<string, unknown>).kind).toBe("success");
-    expect((doc.quote as Record<string, unknown>).kind).toBe("success");
+    const quote = doc.quote as Record<string, unknown>;
+    expect(quote.kind).toBe("success");
+    expect(quote.freshness).toBe("FRESH");
+    expect(quote.usableForVerification).toBe(true);
+    expect(typeof quote.ageSeconds).toBe("number");
+    expect(quote.probeReceivedAt).toBeTruthy();
     expect((doc.candles as Record<string, unknown>).kind).toBe("success");
   });
 
@@ -367,7 +464,7 @@ describe("etoro-instrument-probe — main()", () => {
       expect(quote.reason).toMatch(/inverted/);
     });
 
-    it("records an unparseable quote date honestly as a parse error, never silently as 'no timestamp'", async () => {
+    it("records an unparseable quote date honestly as INVALID_TIMESTAMP, never silently as fresh or 'no timestamp' — and this is not READ_ONLY_VERIFIED", async () => {
       const broker = makeFakeBroker({
         BTC: {
           resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
@@ -382,11 +479,164 @@ describe("etoro-instrument-probe — main()", () => {
 
       const events = await readProbeLog();
       const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(classified?.details.classificationReasons).toContain("QUOTE_TIMESTAMP_INVALID");
       const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
       const quote = evidence[0]!.details.quote as Record<string, unknown>;
       expect(quote.kind).toBe("success");
-      expect(quote.dateParseError).toBe(true);
-      expect(quote.staleMs).toBeUndefined();
+      expect(quote.retrievalSucceeded).toBe(true);
+      expect(quote.freshness).toBe("INVALID_TIMESTAMP");
+      expect(quote.usableForVerification).toBe(false);
+      expect(quote.ageSeconds).toBeUndefined();
+    });
+
+    it("records a missing quote timestamp honestly as UNKNOWN freshness, never treated as fresh — and this is not READ_ONLY_VERIFIED", async () => {
+      const broker = makeFakeBroker({
+        BTC: {
+          resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+          rate: () => Promise.resolve({ bid: 100, ask: 101 }), // no `date` field at all
+          candles: () => Promise.resolve(validCandles(60, 0)),
+        },
+      });
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      expect(classified?.details.classification).not.toBe("READ_ONLY_VERIFIED");
+      expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(classified?.details.classificationReasons).toContain("QUOTE_TIMESTAMP_MISSING");
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      const quote = evidence[0]!.details.quote as Record<string, unknown>;
+      expect(quote.freshness).toBe("UNKNOWN");
+      expect(quote.usableForVerification).toBe(false);
+    });
+
+    it("live-BTC-run remediation: a stale quote (age past threshold) + valid candles produces PARTIALLY_SUPPORTED, never READ_ONLY_VERIFIED", async () => {
+      const staleDate = new Date(Date.now() - 6_045_000).toISOString(); // ~6045s old, matches the observed defect
+      const broker = makeFakeBroker({
+        BTC: {
+          resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+          rate: () => Promise.resolve({ bid: 50000, ask: 50010, date: staleDate }),
+          candles: () => Promise.resolve(validCandles(60, 0)),
+        },
+      });
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(classified?.details.classificationReasons).toEqual(["QUOTE_STALE"]);
+
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      const doc = evidence[0]!.details;
+      const quote = doc.quote as Record<string, unknown>;
+      expect(quote.kind).toBe("success");
+      expect(quote.freshness).toBe("STALE");
+      expect(quote.usableForVerification).toBe(false);
+      expect(quote.ageSeconds).toBeGreaterThan(6_000);
+      expect(quote.date).toBe(staleDate);
+      expect(quote.probeReceivedAt).toBeTruthy();
+      expect(doc.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(doc.classificationReasons).toEqual(["QUOTE_STALE"]);
+      expect((doc.configuration as Record<string, unknown>).quoteStalenessThresholdMs).toBe(60_000);
+    });
+
+    it("prints an unmistakable STALE summary line, never a generic success line with only a trailing (STALE) annotation", async () => {
+      const staleDate = new Date(Date.now() - 6_045_000).toISOString();
+      const broker = makeFakeBroker({
+        BTC: {
+          resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+          rate: () => Promise.resolve({ bid: 50000, ask: 50010, date: staleDate }),
+          candles: () => Promise.resolve(validCandles(60, 0)),
+        },
+      });
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      let lines: string[];
+      try {
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+      } finally {
+        // Captured BEFORE mockRestore() — restoring also resets .mock.calls, which would
+        // otherwise silently make every assertion below check against an empty array.
+        lines = logSpy.mock.calls.map((call) => String(call[0]));
+        logSpy.mockRestore();
+      }
+
+      const quoteLine = lines.find((line) => line.includes("Stage 2 (quote):"));
+      const classificationLine = lines.find((line) => line.includes("Classification:"));
+
+      expect(quoteLine).toBeTruthy();
+      expect(quoteLine).toMatch(/STALE/);
+      expect(quoteLine).toMatch(/exceeds 60s threshold/);
+      expect(quoteLine).not.toMatch(/^\s*Stage 2 \(quote\):\s+bid=.*\(STALE\)\s*$/);
+
+      expect(classificationLine).toBeTruthy();
+      expect(classificationLine).toMatch(/PARTIALLY_SUPPORTED/);
+      expect(classificationLine).toMatch(/QUOTE_STALE/);
+    });
+
+    describe("freshness threshold boundary", () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("treats a quote exactly at the configured threshold age as FRESH, contributing to READ_ONLY_VERIFIED", async () => {
+        const now = new Date("2026-01-01T00:00:00.000Z");
+        vi.useFakeTimers();
+        vi.setSystemTime(now);
+        const boundaryDate = new Date(now.getTime() - QUOTE_STALENESS_THRESHOLD_MS).toISOString();
+
+        const broker = makeFakeBroker({
+          BTC: {
+            resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+            rate: () => Promise.resolve({ bid: 100, ask: 101, date: boundaryDate }),
+            candles: () => Promise.resolve(validCandles(60, 0)),
+          },
+        });
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        expect(classified?.details.classification).toBe("READ_ONLY_VERIFIED");
+      });
+
+      it("treats a quote 1 second past the configured threshold age as STALE, producing PARTIALLY_SUPPORTED", async () => {
+        const now = new Date("2026-01-01T00:00:00.000Z");
+        vi.useFakeTimers();
+        vi.setSystemTime(now);
+        const justPastBoundaryDate = new Date(now.getTime() - QUOTE_STALENESS_THRESHOLD_MS - 1_000).toISOString();
+
+        const broker = makeFakeBroker({
+          BTC: {
+            resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+            rate: () => Promise.resolve({ bid: 100, ask: 101, date: justPastBoundaryDate }),
+            candles: () => Promise.resolve(validCandles(60, 0)),
+          },
+        });
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+        expect(classified?.details.classificationReasons).toEqual(["QUOTE_STALE"]);
+      });
     });
 
     it("never records a currency assumption — configuration.currency is always null", async () => {

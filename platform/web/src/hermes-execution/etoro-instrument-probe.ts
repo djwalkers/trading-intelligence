@@ -114,8 +114,40 @@ export type ResolutionOutcome =
   | { kind: "ambiguous"; candidateCount: number }
   | { kind: "transport-error"; message: string };
 
+// Live-BTC-run remediation (probe-etoro-1785446881512 classification defect). Four distinct,
+// honestly-named states — never collapsed into a single "stale: boolean" flag again:
+//  - FRESH: a quote timestamp was returned, parsed cleanly, and its age is within threshold.
+//  - STALE: a quote timestamp was returned and parsed cleanly, but its age exceeds threshold.
+//  - INVALID_TIMESTAMP: a quote timestamp was returned but could not be parsed at all.
+//  - UNKNOWN: no quote timestamp was returned. eToro's rate response `date` field is the ONLY
+//    signal this tool has for how old the underlying price is — there is no separately trustworthy
+//    receipt timestamp in this adapter's contract (the probe's own `probeReceivedAt` only proves
+//    WE made a fresh HTTP call, never that the price itself is current). A missing timestamp is
+//    therefore never treated as fresh, and is recorded as UNKNOWN, not FRESH.
+export type QuoteFreshness = "FRESH" | "STALE" | "INVALID_TIMESTAMP" | "UNKNOWN";
+
 export type QuoteOutcome =
-  | { kind: "success"; bid: number; ask: number; spread: number; date: string | undefined; dateParseError: boolean; staleMs: number | undefined; stale: boolean }
+  | {
+      kind: "success";
+      // Preserves raw retrieval success (a valid, finite, non-inverted bid/ask was returned)
+      // as a fact distinct from whether that quote is USABLE for Stage 2 verification —
+      // `usableForVerification` is the one field classify() and the catalogue must ever gate on,
+      // never `kind` alone.
+      retrievalSucceeded: true;
+      bid: number;
+      ask: number;
+      spread: number;
+      /** eToro's own rate-response timestamp, verbatim, or undefined if it returned none. */
+      date: string | undefined;
+      /** This probe's own wall-clock capture time — proves when WE received the response, never
+       * how current the underlying price is (see QuoteFreshness's own doc comment). */
+      probeReceivedAt: string;
+      /** Only defined when `date` was present and parsed cleanly. */
+      ageSeconds: number | undefined;
+      freshness: QuoteFreshness;
+      /** True only when freshness === "FRESH" — the single field READ_ONLY_VERIFIED gates on. */
+      usableForVerification: boolean;
+    }
   // A rate WAS returned but is not genuinely usable (non-finite/non-positive, or ask < bid) — a
   // distinct, conclusive negative result, never silently accepted as "success" (plan §6 requirement
   // 4: invalid data must never read as verified).
@@ -140,6 +172,7 @@ interface InstrumentProbeResult {
   quote?: QuoteOutcome;
   candles?: CandleOutcome;
   classification: Classification;
+  classificationReasons: string[];
 }
 
 /** The non-secret configuration snapshot captured into every evidence document — never apiKey/
@@ -156,8 +189,15 @@ interface ProbeConfiguration {
   currency: null;
 }
 
+// Live-BTC-run remediation. Bumped from 1 -> 2: schemaVersion 1 documents (e.g.
+// probe-etoro-1785446881512) predate the QuoteOutcome freshness fix and may contain a stale quote
+// misclassified as READ_ONLY_VERIFIED — a future catalogue-ingestion safeguard can reject/flag
+// schemaVersion 1 rows outright rather than re-deriving trust from their own (possibly wrong)
+// classification field. Building that ingestion/rejection logic is explicitly out of scope here.
+const EVIDENCE_SCHEMA_VERSION = 2;
+
 interface InstrumentEvidenceDocument {
-  schemaVersion: 1;
+  schemaVersion: typeof EVIDENCE_SCHEMA_VERSION;
   runId: string;
   instrument: string;
   startedAt: string;
@@ -169,6 +209,9 @@ interface InstrumentEvidenceDocument {
   quote: QuoteOutcome | undefined;
   candles: CandleOutcome | undefined;
   classification: Classification;
+  /** Machine-readable codes explaining why `classification` isn't READ_ONLY_VERIFIED — always
+   * empty when it is. See classificationReasons()'s own doc comment. */
+  classificationReasons: string[];
 }
 
 interface ProbeDeps {
@@ -266,6 +309,7 @@ async function probeResolution(deps: ProbeDeps, instrument: string, attempt = 1)
 async function probeQuote(deps: ProbeDeps, instrument: string, attempt = 1): Promise<QuoteOutcome> {
   try {
     const rate = await deps.broker.getRate(instrument);
+    const probeReceivedAt = new Date().toISOString();
 
     if (!Number.isFinite(rate.bid) || !Number.isFinite(rate.ask) || rate.bid <= 0 || rate.ask <= 0) {
       const reason = `non-finite or non-positive rate: bid=${rate.bid}, ask=${rate.ask}`;
@@ -278,30 +322,54 @@ async function probeQuote(deps: ProbeDeps, instrument: string, attempt = 1): Pro
       return { kind: "malformed", bid: rate.bid, ask: rate.ask, reason };
     }
 
-    let staleMs: number | undefined;
-    let dateParseError = false;
-    if (rate.date !== undefined) {
-      const parsed = Date.parse(rate.date);
-      if (Number.isFinite(parsed)) {
-        staleMs = Date.now() - parsed;
+    // Live-BTC-run remediation. Freshness is now a first-class, four-state fact — never a bare
+    // boolean derived only when a timestamp happens to parse. A missing timestamp is UNKNOWN, not
+    // FRESH (see QuoteFreshness's own doc comment); only FRESH is usable for verification.
+    let ageSeconds: number | undefined;
+    let freshness: QuoteFreshness;
+    if (rate.date === undefined) {
+      freshness = "UNKNOWN";
+    } else {
+      const parsedMs = Date.parse(rate.date);
+      if (!Number.isFinite(parsedMs)) {
+        freshness = "INVALID_TIMESTAMP";
       } else {
-        dateParseError = true;
+        ageSeconds = Math.max(0, (Date.now() - parsedMs) / 1000);
+        freshness = ageSeconds * 1000 > QUOTE_STALENESS_THRESHOLD_MS ? "STALE" : "FRESH";
       }
     }
-    const stale = staleMs !== undefined && staleMs > QUOTE_STALENESS_THRESHOLD_MS;
+    const usableForVerification = freshness === "FRESH";
 
+    // `outcome` here is deliberately gated on usableForVerification, not merely "a rate came
+    // back" — this is the exact field a naive reader of the cross-run pointer log would scan for
+    // "did Stage 2 pass," and a stale/unparseable/missing-timestamp quote must never read as
+    // "success" there, even though QuoteOutcome.kind itself stays "success" (retrieval succeeded).
     await recordStageResult(deps, instrument, "quote", {
-      outcome: "success",
+      outcome: usableForVerification ? "success" : "failure",
       attempt,
       bid: rate.bid,
       ask: rate.ask,
       spread: rate.ask - rate.bid,
       quoteDate: rate.date,
-      dateParseError,
-      staleMs,
-      stale,
+      probeReceivedAt,
+      ageSeconds,
+      freshnessThresholdMs: QUOTE_STALENESS_THRESHOLD_MS,
+      freshness,
+      usableForVerification,
+      ...(usableForVerification ? {} : { reason: `freshness-${freshness.toLowerCase()}` }),
     });
-    return { kind: "success", bid: rate.bid, ask: rate.ask, spread: rate.ask - rate.bid, date: rate.date, dateParseError, staleMs, stale };
+    return {
+      kind: "success",
+      retrievalSucceeded: true,
+      bid: rate.bid,
+      ask: rate.ask,
+      spread: rate.ask - rate.bid,
+      date: rate.date,
+      probeReceivedAt,
+      ageSeconds,
+      freshness,
+      usableForVerification,
+    };
   } catch (error) {
     if (error instanceof EtoroRateUnavailableError) {
       await recordStageResult(deps, instrument, "quote", { outcome: "failure", attempt, reason: error.reason });
@@ -385,19 +453,70 @@ async function probeCandles(deps: ProbeDeps, instrument: string, attempt = 1): P
  * negative result. Quote and candles are gated only on resolution succeeding, and are evaluated
  * independently of each other (a working quote feed and a working candle feed are two distinct
  * capabilities — one failing must never be recorded as if the other did too). READ_ONLY_VERIFIED
- * requires BOTH to have genuinely succeeded — a malformed quote or invalid/gapped candle history
- * (both distinct from "success") always falls through to PARTIALLY_SUPPORTED, never
- * READ_ONLY_VERIFIED. VERIFIED itself is never assigned here at all — see Classification's own doc
- * comment.
+ * requires BOTH to have genuinely succeeded — a malformed quote, a quote whose `usableForVerification`
+ * is false (stale, unparseable timestamp, or missing timestamp — see QuoteFreshness), or
+ * invalid/gapped candle history (all distinct from "success") always falls through to
+ * PARTIALLY_SUPPORTED, never READ_ONLY_VERIFIED. VERIFIED itself is never assigned here at all —
+ * see Classification's own doc comment.
+ *
+ * Live-BTC-run remediation (probe-etoro-1785446881512): `quote?.kind === "success"` ALONE used to
+ * gate READ_ONLY_VERIFIED — a syntactically valid but 6045-second-stale quote passed that check,
+ * since staleness was tracked in a separate, unconsulted field. The gate is now
+ * `quote?.kind === "success" && quote.usableForVerification`, which is false for anything but a
+ * fresh, parseable, within-threshold quote.
  */
 export function classify(resolution: ResolutionOutcome, quote: QuoteOutcome | undefined, candles: CandleOutcome | undefined): Classification {
   if (resolution.kind === "transport-error") return "NOT_TESTED";
   if (resolution.kind === "no-match" || resolution.kind === "ambiguous") return "UNSUPPORTED";
   // resolution.kind === "success" from here.
-  const quoteOk = quote?.kind === "success";
+  const quoteOk = quote?.kind === "success" && quote.usableForVerification;
   const candlesOk = candles?.kind === "success";
   if (quoteOk && candlesOk) return "READ_ONLY_VERIFIED";
   return "PARTIALLY_SUPPORTED";
+}
+
+/**
+ * Explains WHY classify() returned what it did — empty exactly when READ_ONLY_VERIFIED (nothing to
+ * explain), one or more machine-readable codes otherwise. Persisted into every evidence document's
+ * own `classificationReasons` field (plan requirement 4) so a future catalogue-ingestion reader
+ * never has to re-derive "why wasn't this READ_ONLY_VERIFIED" from raw stage outcomes by hand.
+ */
+export function classificationReasons(
+  resolution: ResolutionOutcome,
+  quote: QuoteOutcome | undefined,
+  candles: CandleOutcome | undefined,
+): string[] {
+  if (resolution.kind === "transport-error") return ["RESOLUTION_TRANSPORT_ERROR"];
+  if (resolution.kind === "no-match") return ["RESOLUTION_NO_MATCH"];
+  if (resolution.kind === "ambiguous") return ["RESOLUTION_AMBIGUOUS"];
+
+  const reasons: string[] = [];
+
+  if (!quote) {
+    reasons.push("QUOTE_NOT_ATTEMPTED");
+  } else if (quote.kind === "malformed") {
+    reasons.push("QUOTE_MALFORMED");
+  } else if (quote.kind === "unavailable") {
+    reasons.push("QUOTE_UNAVAILABLE");
+  } else if (quote.kind === "transport-error") {
+    reasons.push("QUOTE_TRANSPORT_ERROR");
+  } else if (!quote.usableForVerification) {
+    if (quote.freshness === "STALE") reasons.push("QUOTE_STALE");
+    else if (quote.freshness === "INVALID_TIMESTAMP") reasons.push("QUOTE_TIMESTAMP_INVALID");
+    else if (quote.freshness === "UNKNOWN") reasons.push("QUOTE_TIMESTAMP_MISSING");
+  }
+
+  if (!candles) {
+    reasons.push("CANDLES_NOT_ATTEMPTED");
+  } else if (candles.kind === "unavailable") {
+    reasons.push("CANDLES_UNAVAILABLE");
+  } else if (candles.kind === "invalid") {
+    reasons.push("CANDLES_INVALID");
+  } else if (candles.kind === "transport-error") {
+    reasons.push("CANDLES_TRANSPORT_ERROR");
+  }
+
+  return reasons;
 }
 
 function tryGetGitCommit(): string | undefined {
@@ -457,11 +576,12 @@ async function probeInstrument(
   }
 
   const classification = classify(resolution, quote, candles);
+  const reasons = classificationReasons(resolution, quote, candles);
   const completedAt = new Date().toISOString();
 
   const evidenceFile = await writeInstrumentEvidence(
     {
-      schemaVersion: 1,
+      schemaVersion: EVIDENCE_SCHEMA_VERSION,
       runId: deps.executionRunId,
       instrument,
       startedAt,
@@ -473,21 +593,25 @@ async function probeInstrument(
       quote,
       candles,
       classification,
+      classificationReasons: reasons,
     },
     deps.secrets,
   );
 
   // Concise, cross-run pointer event — the full detail lives in the evidence document above; this
   // is deliberately lightweight (never duplicates every stage's own detail a second time).
+  // classificationReasons IS still duplicated here (unlike per-stage detail) since it's exactly
+  // the field that makes a stale/malformed quote impossible to mistake for a clean pass even from
+  // this lightweight log alone.
   await deps.auditTrail.record({
     timestamp: completedAt,
     eventType: "INSTRUMENT_PROBE_CLASSIFIED",
     executionRunId: deps.executionRunId,
     instrument,
-    details: { classification, evidenceFile },
+    details: { classification, classificationReasons: reasons, evidenceFile },
   });
 
-  return { result: { instrument, resolution, quote, candles, classification }, evidenceFile };
+  return { result: { instrument, resolution, quote, candles, classification, classificationReasons: reasons }, evidenceFile };
 }
 
 function describeResolution(outcome: ResolutionOutcome): string {
@@ -503,19 +627,29 @@ function describeResolution(outcome: ResolutionOutcome): string {
   }
 }
 
+// Live-BTC-run remediation. A stale/unparseable/missing-timestamp quote must never print as a
+// generic "success" line with a trailing "(STALE)" annotation easy to skim past — each non-fresh
+// freshness state gets its own unmistakable, uppercase-led summary line instead, matching the
+// terminal output the mission itself specifies (e.g. "STALE — age 6045s exceeds 60s threshold").
 function describeQuote(outcome: QuoteOutcome | undefined): string {
   if (!outcome) return "not attempted (resolution did not succeed)";
+  const thresholdSeconds = Math.round(QUOTE_STALENESS_THRESHOLD_MS / 1000);
   switch (outcome.kind) {
-    case "success":
-      return (
-        `bid=${outcome.bid}, ask=${outcome.ask}, spread=${outcome.spread}` +
-        (outcome.dateParseError
-          ? ", quote timestamp present but unparseable"
-          : outcome.date
-            ? `, quoteDate=${outcome.date}${outcome.stale ? " (STALE)" : ""}`
-            : ", no quote timestamp returned") +
-        ", currency=unknown (never eToro-confirmed — see plan §4)"
-      );
+    case "success": {
+      const base = `bid=${outcome.bid}, ask=${outcome.ask}, spread=${outcome.spread}, currency=unknown (never eToro-confirmed — see plan §4)`;
+      const ageDisplay = outcome.ageSeconds !== undefined ? Math.round(outcome.ageSeconds) : undefined;
+      switch (outcome.freshness) {
+        case "FRESH":
+          return `FRESH — age ${ageDisplay}s within ${thresholdSeconds}s threshold, quoteDate=${outcome.date} (${base}) — usable for verification`;
+        case "STALE":
+          return `STALE — age ${ageDisplay}s exceeds ${thresholdSeconds}s threshold (${base}) — NOT usable for verification`;
+        case "INVALID_TIMESTAMP":
+          return `INVALID TIMESTAMP — quote timestamp "${outcome.date}" could not be parsed (${base}) — NOT usable for verification`;
+        case "UNKNOWN":
+          return `UNKNOWN FRESHNESS — no quote timestamp returned (${base}) — NOT usable for verification (a missing timestamp is never assumed fresh)`;
+      }
+      break;
+    }
     case "malformed":
       return `rate returned but not usable (${outcome.reason}) — recorded as malformed, never as success`;
     case "unavailable":
@@ -523,6 +657,7 @@ function describeQuote(outcome: QuoteOutcome | undefined): string {
     case "transport-error":
       return `transport/auth error after retry: ${outcome.message}`;
   }
+  return "unknown quote outcome";
 }
 
 function describeCandles(outcome: CandleOutcome | undefined): string {
@@ -643,7 +778,10 @@ export async function main(): Promise<void> {
     console.log(`  Stage 1 (resolution): ${describeResolution(result.resolution)}`);
     console.log(`  Stage 2 (quote):      ${describeQuote(result.quote)}`);
     console.log(`  Stage 3 (candles):    ${describeCandles(result.candles)}`);
-    console.log(`  Classification:       ${result.classification}`);
+    console.log(
+      `  Classification:       ${result.classification}` +
+        (result.classificationReasons.length > 0 ? ` (${result.classificationReasons.join(", ")})` : ""),
+    );
     console.log(`  Evidence:             ${evidenceFile}`);
     console.log("");
     results.push(result);
