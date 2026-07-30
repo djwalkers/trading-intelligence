@@ -12,6 +12,7 @@ import type { HermesPositionItem } from "@/lib/hermes-dashboard/types";
 function makePosition(overrides: Partial<HermesPositionItem> = {}): HermesPositionItem {
   return {
     instrument: "BTC",
+    brokerInstrumentId: 100_000,
     side: "BUY",
     quantity: 9.95,
     units: 9.95,
@@ -20,6 +21,7 @@ function makePosition(overrides: Partial<HermesPositionItem> = {}): HermesPositi
     unrealisedPnl: null,
     pricingTimestamp: null,
     pricingSource: "unavailable",
+    pricingFailureReason: null,
     openedAt: "2026-07-29T15:18:00.000Z",
     provider: "etoro-demo",
     accountMode: "demo",

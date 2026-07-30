@@ -25,6 +25,9 @@ export interface HermesPortfolioData {
 
 export interface HermesPositionItem {
   instrument: string;
+  // Instrument-resolution defect fix. The broker's own raw numeric instrument id, preserved
+  // alongside the friendly `instrument` symbol above — see broker-snapshot.ts's own doc comment.
+  brokerInstrumentId: number | null;
   side: "BUY" | "SELL" | "unknown";
   quantity: number | null;
   units: number | null;
@@ -33,6 +36,9 @@ export interface HermesPositionItem {
   unrealisedPnl: number | null;
   pricingTimestamp: string | null;
   pricingSource: "broker" | "unavailable";
+  // Instrument-resolution defect fix. Explicit diagnostic provenance for why this position's
+  // pricing is unavailable — null exactly when pricingSource === "broker".
+  pricingFailureReason: string | null;
   openedAt: string | null;
   provider: string;
   accountMode: string;

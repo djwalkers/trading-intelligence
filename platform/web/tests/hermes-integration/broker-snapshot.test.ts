@@ -80,6 +80,7 @@ describe("getBrokerSnapshot", () => {
     expect(result.positions).toEqual([
       {
         instrument: "1001",
+        brokerInstrumentId: 1001,
         side: "BUY",
         quantity: 50,
         units: 2,
@@ -88,6 +89,7 @@ describe("getBrokerSnapshot", () => {
         unrealisedPnl: null,
         pricingTimestamp: null,
         pricingSource: "unavailable",
+        pricingFailureReason: "The connected broker does not support live rate quoting.",
         openedAt: "2026-01-01T00:00:00.000Z",
         provider: "etoro-demo",
         accountMode: "demo",
@@ -95,6 +97,7 @@ describe("getBrokerSnapshot", () => {
       },
       {
         instrument: "1002",
+        brokerInstrumentId: 1002,
         side: "SELL",
         quantity: 20,
         units: null,
@@ -103,6 +106,7 @@ describe("getBrokerSnapshot", () => {
         unrealisedPnl: null,
         pricingTimestamp: null,
         pricingSource: "unavailable",
+        pricingFailureReason: "The connected broker does not support live rate quoting.",
         openedAt: null,
         provider: "etoro-demo",
         accountMode: "demo",
@@ -127,6 +131,7 @@ describe("getBrokerSnapshot", () => {
     expect(result.positions).toEqual([
       {
         instrument: "BTC",
+        brokerInstrumentId: null,
         side: "BUY",
         quantity: 1,
         units: 1,
@@ -135,6 +140,7 @@ describe("getBrokerSnapshot", () => {
         unrealisedPnl: null,
         pricingTimestamp: null,
         pricingSource: "unavailable",
+        pricingFailureReason: "The connected broker does not support live rate quoting.",
         openedAt: "2026-01-01T00:00:00.000Z",
         provider: "local",
         accountMode: "paper",
@@ -384,6 +390,198 @@ describe("getBrokerSnapshot", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.positions[0]?.brokerPositionId).toBe("42");
+    });
+  });
+
+  // Instrument-resolution defect fix. Reproduces the production error verbatim:
+  // `"ETH" was never resolved through resolveInstrument()` / `"BTC" was never resolved through
+  // resolveInstrument()`. This fake broker mirrors EtoroDemoBroker's REAL behaviour exactly:
+  // getRate(term) refuses to quote any term this SPECIFIC broker instance has not itself resolved
+  // via resolveInstrument() first — its own unresolved-instrument safety guard, never weakened or
+  // bypassed by this fix.
+  describe("instrument resolution before live quoting (production defect fix)", () => {
+    function makeEtoroLikeBroker(
+      idsBySymbol: Record<string, number>,
+      positions: Array<{ positionID?: number; instrumentID: number; isBuy?: boolean; amount?: number; units?: number; openRate?: number }>,
+      ratesByInstrumentId: Record<number, { bid: number; ask: number }>,
+      cashBalance = 1000,
+    ) {
+      const resolvedInstruments = new Map<string, number>();
+
+      const resolveInstrument = vi.fn(async (term: string) => {
+        const instrumentId = idsBySymbol[term];
+        if (instrumentId === undefined) throw new Error(`no fixture id for ${term}`);
+        resolvedInstruments.set(term, instrumentId);
+        return { instrumentId, displayName: term, symbol: term };
+      });
+
+      const getRate = vi.fn(async (term: string) => {
+        const instrumentId = resolvedInstruments.get(term);
+        if (instrumentId === undefined) {
+          // The exact real EtoroDemoBroker.requireResolvedInstrument() safety-guard message.
+          throw new Error(`"${term}" was never resolved through resolveInstrument() — refusing to submit an order against unresolved market data.`);
+        }
+        const rate = ratesByInstrumentId[instrumentId];
+        if (!rate) throw new Error(`no fixture rate for instrument ${instrumentId}`);
+        return rate;
+      });
+
+      return {
+        getAccount: () => ({ cashBalance, startingCashBalance: cashBalance }),
+        getOpenPositions: () => [],
+        getRawPortfolio: async () => ({ clientPortfolio: { credit: cashBalance, positions } }),
+        resolveInstrument,
+        getRate,
+      };
+    }
+
+    it("resolves and prices a raw BTC instrument id successfully, without ever relying on a prior resolveInstrument() call", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeEtoroLikeBroker(
+        { BTC: 100_000, ETH: 100_001 },
+        [{ instrumentID: 100_000, isBuy: true, amount: 500, units: 2, openRate: 100 }],
+        { 100_000: { bid: 110, ask: 111 } },
+      );
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(broker.resolveInstrument).toHaveBeenCalledWith("BTC");
+      expect(result.positions[0]?.pricingSource).toBe("broker");
+      expect(result.positions[0]?.currentPrice).toBe(110);
+      expect(result.positions[0]?.unrealisedPnl).toBeCloseTo(20, 6);
+      expect(result.unrealisedPnlComplete).toBe(true);
+    });
+
+    it("resolves and prices a raw ETH instrument id successfully", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeEtoroLikeBroker(
+        { BTC: 100_000, ETH: 100_001 },
+        [{ instrumentID: 100_001, isBuy: false, amount: 200, units: 5, openRate: 50 }],
+        { 100_001: { bid: 45, ask: 48 } },
+      );
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(broker.resolveInstrument).toHaveBeenCalledWith("ETH");
+      expect(result.positions[0]?.pricingSource).toBe("broker");
+      expect(result.positions[0]?.currentPrice).toBe(48);
+      expect(result.positions[0]?.unrealisedPnl).toBeCloseTo((50 - 48) * 5, 6);
+    });
+
+    it("keeps friendly display symbols in the API response even though pricing resolves via the same symbol internally", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeEtoroLikeBroker(
+        { BTC: 100_000, ETH: 100_001 },
+        [
+          { instrumentID: 100_000, isBuy: true, amount: 500, units: 2, openRate: 100 },
+          { instrumentID: 100_001, isBuy: false, amount: 200, units: 5, openRate: 50 },
+        ],
+        { 100_000: { bid: 110, ask: 111 }, 100_001: { bid: 45, ask: 48 } },
+      );
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions.map((p) => p.instrument)).toEqual(["BTC", "ETH"]);
+      expect(result.positions.map((p) => p.brokerInstrumentId)).toEqual([100_000, 100_001]);
+    });
+
+    it("leaves an instrument that cannot be resolved genuinely unavailable — never bypasses the adapter's safety guard to force a price", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      const broker = makeEtoroLikeBroker(
+        { BTC: 100_000 }, // ETH deliberately absent from the resolvable universe
+        [{ instrumentID: 100_001, isBuy: true, amount: 200, units: 5, openRate: 50 }],
+        { 100_001: { bid: 45, ask: 48 } },
+      );
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // instrumentID 100001 has no known symbol mapping at all here, so `instrument` falls back to
+      // the raw numeric id — resolveInstrument("100001") then genuinely fails (no such search term).
+      expect(result.positions[0]?.instrument).toBe("100001");
+      expect(result.positions[0]?.pricingSource).toBe("unavailable");
+      expect(result.positions[0]?.pricingFailureReason).toContain("Could not resolve");
+      expect(result.positions[0]?.currentPrice).toBeNull();
+      expect(result.positions[0]?.unrealisedPnl).toBeNull();
+      expect(result.unrealisedPnlComplete).toBe(false);
+      // getRate() must never even be attempted once resolution has failed — the safety guard is
+      // never worked around.
+      expect(broker.getRate).not.toHaveBeenCalled();
+    });
+
+    it("refuses to price a position when resolving its display symbol resolves to a DIFFERENT instrument than its own known broker instrument id", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+
+      // Deliberately flaky resolution: "BTC" resolves to 100000 the first time (during the
+      // id-to-symbol display-mapping pass, matching this position's own raw instrumentID — so it
+      // is correctly displayed as "BTC") but to a DIFFERENT id (999999) the second time (during the
+      // live-pricing resolution step) — simulating an ambiguous/drifted resolution. Pricing against
+      // 999999 would silently attach the WRONG market's price to this position's P/L, so it must be
+      // refused rather than risked.
+      let btcResolveCount = 0;
+      const resolveInstrument = vi.fn(async (term: string) => {
+        if (term !== "BTC") throw new Error(`no fixture id for ${term}`);
+        btcResolveCount += 1;
+        return { instrumentId: btcResolveCount === 1 ? 100_000 : 999_999, displayName: term, symbol: term };
+      });
+      const getRate = vi.fn(async () => ({ bid: 110, ask: 111 }));
+      const broker = {
+        getAccount: () => ({ cashBalance: 1000, startingCashBalance: 1000 }),
+        getOpenPositions: () => [],
+        getRawPortfolio: async () => ({
+          clientPortfolio: { credit: 1000, positions: [{ instrumentID: 100_000, isBuy: true, amount: 500, units: 2, openRate: 100 }] },
+        }),
+        resolveInstrument,
+        getRate,
+      };
+      mockCreate.mockResolvedValue(broker);
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.instrument).toBe("BTC"); // display mapping still correct
+      expect(result.positions[0]?.pricingSource).toBe("unavailable");
+      expect(result.positions[0]?.pricingFailureReason).toContain("resolved to a different eToro instrument");
+      expect(getRate).not.toHaveBeenCalled();
+    });
+
+    it("regression: prices correctly on a brand-new broker instance even when the module-level id-to-symbol cache is already warm from a PRIOR instance", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+
+      const firstBroker = makeEtoroLikeBroker(
+        { BTC: 100_000, ETH: 100_001 },
+        [{ instrumentID: 100_000, isBuy: true, amount: 500, units: 2, openRate: 100 }],
+        { 100_000: { bid: 110, ask: 111 } },
+      );
+      mockCreate.mockResolvedValueOnce(firstBroker);
+      const firstResult = await getBrokerSnapshot();
+      expect(firstResult.ok).toBe(true);
+
+      // getBrokerSnapshot() constructs a brand-new, throwaway broker per call — this second
+      // instance's own resolvedInstruments cache starts EMPTY, even though the module-level
+      // id-to-symbol display map is already warm from firstBroker above. Before this fix, pricing
+      // relied on that stale resolution and getRate() would throw exactly the production error.
+      const secondBroker = makeEtoroLikeBroker(
+        { BTC: 100_000, ETH: 100_001 },
+        [{ instrumentID: 100_000, isBuy: true, amount: 500, units: 2, openRate: 100 }],
+        { 100_000: { bid: 120, ask: 121 } },
+      );
+      mockCreate.mockResolvedValueOnce(secondBroker);
+
+      const secondResult = await getBrokerSnapshot();
+      expect(secondResult.ok).toBe(true);
+      if (!secondResult.ok) return;
+      expect(secondBroker.resolveInstrument).toHaveBeenCalledWith("BTC");
+      expect(secondResult.positions[0]?.pricingSource).toBe("broker");
+      expect(secondResult.positions[0]?.currentPrice).toBe(120);
+      expect(secondResult.unrealisedPnlComplete).toBe(true);
     });
   });
 });

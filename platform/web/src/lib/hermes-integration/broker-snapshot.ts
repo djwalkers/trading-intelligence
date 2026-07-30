@@ -36,6 +36,13 @@ export interface HermesPositionDto {
    * as a string only when genuinely unresolvable (an unrecognised instrument, or a broker with no
    * resolution capability at all) — see this module's own EtoroDemoBroker branch below. */
   instrument: string;
+  /** Instrument-resolution defect fix. The broker's own raw numeric instrument identifier (eToro's
+   * `instrumentID`) — preserved alongside the friendly `instrument` symbol above so live pricing
+   * can be cross-checked against it (see priceOpenPositions()'s own mismatch guard) even though the
+   * broker's own quoting methods are keyed by a resolved SYMBOL/search-term, not this raw id
+   * directly. Null for a broker with no separate raw-id concept (the generic PaperBroker fallback
+   * branch below, where `instrument` already IS the broker-native identifier). */
+  brokerInstrumentId: number | null;
   side: "BUY" | "SELL" | "unknown";
   /** The notional/invested amount in the account's own currency (eToro's own "amount" field, or a
    * non-eToro broker's own quantity where that IS the true unit count) — the pre-existing "display
@@ -67,6 +74,12 @@ export interface HermesPositionDto {
    * did not (fetch failure, unmapped instrument, or a broker with no rate-fetching capability at
    * all) — never conflated with a successful zero-valued fetch. */
   pricingSource: "broker" | "unavailable";
+  /** Instrument-resolution defect fix. Explicit diagnostic provenance for WHY this specific
+   * position's pricing is unavailable — names the requested display symbol, the broker instrument
+   * id (when known), and the underlying resolution/quote failure, so an operator never has to
+   * cross-reference logs to understand a single "Unavailable" figure. Null exactly when
+   * `pricingSource === "broker"`. */
+  pricingFailureReason: string | null;
   openedAt: string | null;
   provider: string;
   accountMode: string;
@@ -191,12 +204,66 @@ export function resetInstrumentIdToSymbolCacheForTests(): void {
 
 interface PricedPosition {
   instrument: string;
+  brokerInstrumentId: number | null;
   side: "BUY" | "SELL" | "unknown";
   units: number | null;
   entryPrice: number | null;
   currentPrice: number | null;
   unrealisedPnl: number | null;
   pricingSource: "broker" | "unavailable";
+  pricingFailureReason: string | null;
+}
+
+/** `"BTC" (broker instrument id 100000)` / `"BTC"` when no raw id is known — used to keep every
+ * diagnostic message below consistent, and to always name both identities together rather than
+ * just whichever one happened to be at hand. */
+function describeInstrument(instrument: string, brokerInstrumentId: number | null): string {
+  return brokerInstrumentId !== null ? `"${instrument}" (broker instrument id ${brokerInstrumentId})` : `"${instrument}"`;
+}
+
+function toMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Instrument-resolution defect fix. `getRate()` on an EtoroDemoBroker-shaped adapter refuses to
+ * quote an instrument that THIS SPECIFIC broker instance has not itself resolved via
+ * `resolveInstrument()` first (its own unresolved-instrument safety guard — never bypassed here).
+ * getBrokerSnapshot() constructs a fresh, throwaway broker per request, so a prior request's
+ * resolution (even the module-level idToSymbol cache's own one-time resolution pass) does NOT carry
+ * over — every request must explicitly resolve the instruments it is about to price, on the broker
+ * instance it is about to price them with. Brokers with no resolution concept at all
+ * (`!hasInstrumentResolution`) skip this step and are queried directly.
+ *
+ * Also cross-checks the resolved instrument id against this position's own known
+ * `brokerInstrumentId` (from the raw portfolio read) when both are known — resolving the friendly
+ * display symbol to a DIFFERENT instrument than the position's own raw id would silently price
+ * against the wrong market; this is refused rather than risking a mismatched, wrong-looking figure.
+ */
+async function ensureResolvedForPricing(
+  broker: PaperBroker,
+  instrument: string,
+  brokerInstrumentId: number | null,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!hasInstrumentResolution(broker)) return { ok: true };
+
+  try {
+    const resolved = await broker.resolveInstrument(instrument);
+    if (brokerInstrumentId !== null && resolved.instrumentId !== brokerInstrumentId) {
+      return {
+        ok: false,
+        reason:
+          `${describeInstrument(instrument, brokerInstrumentId)} resolved to a different eToro instrument ` +
+          `(id ${resolved.instrumentId}) than this position's own broker instrument id — refusing to price against a mismatched instrument.`,
+      };
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `Could not resolve ${describeInstrument(instrument, brokerInstrumentId)} for live pricing: ${toMessage(error)}`,
+    };
+  }
 }
 
 /**
@@ -206,20 +273,28 @@ interface PricedPosition {
  * calculateUnrealizedPnl("UNITS", ...) formula (calculateRealisedPnl's own live-price sibling, with
  * a live current price standing in for an eventual exit price). A position is left `pricingSource:
  * "unavailable"` (never a guessed/zero/carried-over price) whenever its side is "unknown", its
- * units/entryPrice are missing, the broker can't quote at all, or that specific instrument's own
- * quote fetch fails — every such gap is reported, never silently absorbed into a total that then
- * claims completeness it doesn't have.
+ * units/entryPrice are missing, the broker can't quote at all, its instrument can't be resolved on
+ * this broker instance (see ensureResolvedForPricing above), or its quote fetch itself fails —
+ * every such gap is reported, never silently absorbed into a total that then claims completeness it
+ * doesn't have.
  */
 async function priceOpenPositions(
   broker: PaperBroker,
-  positions: readonly Omit<PricedPosition, "currentPrice" | "unrealisedPnl" | "pricingSource">[],
+  positions: readonly Omit<PricedPosition, "currentPrice" | "unrealisedPnl" | "pricingSource" | "pricingFailureReason">[],
 ): Promise<{ priced: PricedPosition[]; complete: boolean; unavailableReason: string | null }> {
   if (!hasRateQuoting(broker)) {
-    const priced = positions.map((position) => ({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" as const }));
+    const reason = "The connected broker does not support live rate quoting.";
+    const priced = positions.map((position) => ({
+      ...position,
+      currentPrice: null,
+      unrealisedPnl: null,
+      pricingSource: "unavailable" as const,
+      pricingFailureReason: reason,
+    }));
     return {
       priced,
       complete: positions.length === 0,
-      unavailableReason: positions.length === 0 ? null : "The connected broker does not support live rate quoting.",
+      unavailableReason: positions.length === 0 ? null : reason,
     };
   }
 
@@ -228,24 +303,47 @@ async function priceOpenPositions(
 
   for (const position of positions) {
     if (position.side === "unknown" || position.units === null || position.entryPrice === null) {
-      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" });
+      const missing = [
+        position.side === "unknown" ? "side" : null,
+        position.units === null ? "units" : null,
+        position.entryPrice === null ? "entry price" : null,
+      ].filter((field): field is string => field !== null);
+      const reason = `Cannot price ${describeInstrument(position.instrument, position.brokerInstrumentId)}: missing ${missing.join("/")}.`;
+      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable", pricingFailureReason: reason });
       unpriced.push(position.instrument);
       continue;
     }
+
+    const resolution = await ensureResolvedForPricing(broker, position.instrument, position.brokerInstrumentId);
+    if (!resolution.ok) {
+      logger.warn("Hermes Integration API could not resolve an open position's instrument for live pricing — its unrealised P/L will be unavailable", {
+        component: "hermes-integration-broker-snapshot",
+        requestedDisplaySymbol: position.instrument,
+        brokerInstrumentId: position.brokerInstrumentId,
+        reason: resolution.reason,
+      });
+      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable", pricingFailureReason: resolution.reason });
+      unpriced.push(position.instrument);
+      continue;
+    }
+
     try {
       const rate = await broker.getRate(position.instrument);
       // Matches market-decision-runner.ts's own closing-price convention: a BUY/long position is
       // realised by SELLING (at bid); a SELL/short position is realised by BUYING BACK (at ask).
       const currentPrice = position.side === "BUY" ? rate.bid : rate.ask;
       const unrealisedPnl = calculateUnrealizedPnl("UNITS", position.side, position.entryPrice, currentPrice, position.units);
-      priced.push({ ...position, currentPrice, unrealisedPnl, pricingSource: "broker" });
+      priced.push({ ...position, currentPrice, unrealisedPnl, pricingSource: "broker", pricingFailureReason: null });
     } catch (error) {
+      const reason = `Could not fetch a live rate for resolved instrument ${describeInstrument(position.instrument, position.brokerInstrumentId)}: ${toMessage(error)}`;
       logger.warn("Hermes Integration API could not fetch a live rate for an open position — its unrealised P/L will be unavailable", {
         component: "hermes-integration-broker-snapshot",
-        instrument: position.instrument,
-        reason: error instanceof Error ? error.message : String(error),
+        requestedDisplaySymbol: position.instrument,
+        brokerInstrumentId: position.brokerInstrumentId,
+        resolvedQuoteInstrument: position.instrument,
+        reason: toMessage(error),
       });
-      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" });
+      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable", pricingFailureReason: reason });
       unpriced.push(position.instrument);
     }
   }
@@ -294,6 +392,7 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
       const idToSymbol = await resolveInstrumentIdMap(broker, config.hermesAgent.instrumentUniverse);
       const basePositions = raw.clientPortfolio.positions.map((position) => ({
         instrument: idToSymbol.get(position.instrumentID) ?? String(position.instrumentID),
+        brokerInstrumentId: position.instrumentID,
         side: (position.isBuy === undefined ? "unknown" : position.isBuy ? "BUY" : "SELL") as "BUY" | "SELL" | "unknown",
         units: position.units ?? null,
         entryPrice: position.openRate ?? null,
@@ -309,6 +408,7 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
         const price = pricedByInstrument.get(index)!;
         return {
           instrument: base.instrument,
+          brokerInstrumentId: base.brokerInstrumentId,
           side: base.side,
           quantity: base.quantity,
           units: base.units,
@@ -317,6 +417,7 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
           unrealisedPnl: price.unrealisedPnl,
           pricingTimestamp: price.pricingSource === "broker" ? pricingTimestamp : null,
           pricingSource: price.pricingSource,
+          pricingFailureReason: price.pricingFailureReason,
           openedAt: base.openedAt,
           provider,
           accountMode,
@@ -351,6 +452,9 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   // deployment, and is documented as a known limitation rather than silently trusted.
   const fallbackBase = broker.getOpenPositions().map((position) => ({
     instrument: position.instrument,
+    // No separate raw-id concept for a generic PaperBroker — `instrument` already IS its native
+    // identifier, so there is nothing distinct to cross-check against.
+    brokerInstrumentId: null,
     side: position.side as "BUY" | "SELL" | "unknown",
     units: position.quantity, // a non-eToro broker's own quantity already IS the true unit count.
     entryPrice: position.entryPrice,
@@ -367,6 +471,7 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
     const price = fallbackPricedByIndex.get(index)!;
     return {
       instrument: base.instrument,
+      brokerInstrumentId: base.brokerInstrumentId,
       side: base.side,
       quantity: base.quantity,
       units: base.units,
@@ -375,6 +480,7 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
       unrealisedPnl: price.unrealisedPnl,
       pricingTimestamp: price.pricingSource === "broker" ? pricingTimestamp : null,
       pricingSource: price.pricingSource,
+      pricingFailureReason: price.pricingFailureReason,
       openedAt: base.openedAt,
       provider,
       accountMode,
