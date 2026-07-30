@@ -1,6 +1,6 @@
 import { logger } from "@/lib/logger/logger";
 import type { Candle } from "../types";
-import { validateHistoricalCandles, type MarketTimeframe } from "./candle-validation";
+import { diagnoseCandleGaps, validateHistoricalCandles, type MarketTimeframe } from "./candle-validation";
 import { MarketDataProviderError, type MarketDataProvider, type MarketDataSnapshot } from "./market-data-provider";
 
 // Milestone 5 — Live Market Data Integration. The "second implementation suitable for live data"
@@ -133,12 +133,27 @@ export class LiveMarketDataProvider implements MarketDataProvider {
     try {
       validateHistoricalCandles(candles, instrument, { timeframe, maxCandleAgeSeconds });
     } catch (error) {
+      // Candle-gap production incident fix. A structured, full diagnostic pass — every raw
+      // timestamp, the same set normalised (sorted), any duplicates, and every gap found (not just
+      // the single one validateHistoricalCandles itself threw on) — logged alongside the existing
+      // failure line so a future incident (e.g. a provider-side gap affecting several instruments
+      // at once) can be confirmed from a VPS log stream alone, without needing to reproduce it.
+      // Never logs OHLCV values, credentials, or request headers — only timestamps and counts (see
+      // diagnoseCandleGaps's own doc comment).
+      const diagnostics = diagnoseCandleGaps(candles, instrument, timeframe);
       logger.error("Live historical candle validation failed — no fallback attempted", {
         component: "market-data",
         provider: "live",
         instrument,
         timeframe,
-        candleCount: candles.length,
+        requestedCandleCount: candleCount,
+        rawCandleCount: diagnostics.rawCandleCount,
+        rawTimestamps: diagnostics.rawTimestamps,
+        normalisedTimestamps: diagnostics.normalisedTimestamps,
+        duplicateTimestamps: diagnostics.duplicateTimestamps,
+        firstTimestamp: diagnostics.firstTimestamp,
+        lastTimestamp: diagnostics.lastTimestamp,
+        detectedGaps: diagnostics.gaps,
         fallbackOccurred: false,
         reason: toErrorMessage(error),
       });

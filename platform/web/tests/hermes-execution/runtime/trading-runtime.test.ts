@@ -349,15 +349,20 @@ describe("TradingRuntime — approved candidate execution", () => {
 
 describe("TradingRuntime — failed cycle", () => {
   it("records failedRunCount/lastError without throwing, and the scheduler continues afterward", async () => {
-    const inner = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    // Candle-gap production incident fix. A market-data-provider throw is no longer a genuine
+    // cycle failure (see runInstrumentPhaseA's own dedicated try/catch) — it now degrades
+    // gracefully into a completed, HOLD cycle. This test's own purpose (prove the scheduler
+    // survives and continues after a truly unhandled crash) is preserved instead via a broker
+    // failure in reconciliation, which sits outside that try/catch and still propagates exactly
+    // like the pre-fix market-data throw once did.
     let shouldFail = true;
-    const flakyProvider: MarketDataProvider = {
-      getMarketData: async (instrument) => {
-        if (shouldFail) throw new Error("broker unreachable");
-        return inner.getMarketData(instrument);
-      },
+    const broker = makeMockBroker([]);
+    const realGetOpenPositions = broker.getOpenPositions;
+    broker.getOpenPositions = () => {
+      if (shouldFail) throw new Error("broker unreachable");
+      return realGetOpenPositions();
     };
-    const { runtime, clock } = makeRuntime({ marketDataProvider: flakyProvider, intervalMs: 10_000 });
+    const { runtime, clock } = makeRuntime({ broker, intervalMs: 10_000 });
 
     await runtime.start();
     await clock.advance(0);
@@ -377,12 +382,11 @@ describe("TradingRuntime — failed cycle", () => {
   });
 
   it("lastError is a plain serialisable object, never a raw Error instance", async () => {
-    const failingProvider: MarketDataProvider = {
-      getMarketData: async () => {
-        throw new Error("boom");
-      },
+    const broker = makeMockBroker([]);
+    broker.getOpenPositions = () => {
+      throw new Error("boom");
     };
-    const { runtime, clock } = makeRuntime({ marketDataProvider: failingProvider });
+    const { runtime, clock } = makeRuntime({ broker });
     await runtime.start();
     await clock.advance(0);
 

@@ -436,7 +436,33 @@ export type AuditEventType =
   // "BUY" | "SELL" | "HOLD"; `details.confidence`/`details.reasoning` are only ever Hermes's own
   // validated proposal fields for BUY/SELL — never fabricated for HOLD (both are omitted, not
   // defaulted to a guessed value, in that case).
-  | "HERMES_INSTRUMENT_DECISION_RECORDED";
+  | "HERMES_INSTRUMENT_DECISION_RECORDED"
+  // Candle-gap production incident fix. Fired every cycle an instrument's historical candle
+  // history fails validation (e.g. a provider-side gap) — always per-instrument, always alongside
+  // an honest report of exactly which Hermes-independent exit-protection checks (kill switch,
+  // stop-loss, take-profit, strategy-disabled, max-holding) still ran this cycle using an
+  // independently-fetched live quote, and which checks were genuinely unavailable (only
+  // OPPOSING_SIGNAL, which requires a full, candle-based decision). Fresh entry/strategy analysis
+  // is always blocked whenever this fires — never partially trusted. This is a routine, per-cycle
+  // audit record (like BROKER_POSITION_RECONCILED) — never itself rate-limited or Telegrammed; see
+  // MARKET_DATA_INCIDENT_ALERT below for the separate, deduplicated operator notification.
+  | "MARKET_DATA_DEGRADED"
+  // Candle-gap production incident fix. Fired once, the cycle a previously-MARKET_DATA_DEGRADED
+  // instrument's candle history validates successfully again.
+  | "MARKET_DATA_RECOVERED"
+  // Candle-gap production incident fix. Runtime/market-data-incident-tracker.ts's own rate-limited,
+  // cycle-spanning incident view — fired once when one or more instruments first become degraded in
+  // the same cycle (`details.isReminder: false`), then again only after a configured reminder
+  // interval has elapsed while the condition persists (`details.isReminder: true`) — never once per
+  // cycle unconditionally. `details.affectedInstruments` lists every currently-degraded instrument
+  // together, so three instruments failing for the same provider-side reason surface as ONE
+  // incident, not three independent alerts. Wired into Telegram (telegram-alerting-audit-trail.ts).
+  | "MARKET_DATA_INCIDENT_ALERT"
+  // Candle-gap production incident fix. Fired once, when every previously-degraded instrument the
+  // tracker knew about has recovered in the same cycle — also wired into Telegram, so an operator
+  // who received the initial/reminder alert above is explicitly told when it clears, never left to
+  // infer recovery from silence alone.
+  | "MARKET_DATA_INCIDENT_RECOVERED";
 
 export interface AuditEvent {
   timestamp: string;

@@ -28,8 +28,12 @@ import { recordTradePerformanceForExecutedCandidate } from "../trade-performance
 import type { TradePerformanceRepository } from "../trade-performance/trade-performance-repository";
 import { reconcileBrokerPosition } from "./position-reconciliation";
 import { recoverStaleLifecycleRecords } from "./lifecycle-recovery";
-import { evaluateExitTrigger, executeAutomaticExit } from "./exit-monitor";
+import { evaluateExitTrigger, executeAutomaticExit, hasRateFetching } from "./exit-monitor";
 import { OpposingSignalStabilityTracker } from "./opposing-signal-stability";
+import {
+  MarketDataIncidentTracker,
+  DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS,
+} from "./market-data-incident-tracker";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
@@ -121,6 +125,25 @@ interface InstrumentCycleState {
    * though Phase B's own opposing-signal check never runs once the position is already gone. */
   phaseAExitTrigger?: string;
   phaseAExitClosed?: boolean;
+  /** Candle-gap production incident fix. Set only when `buildMarketDecisionContext()` itself threw
+   * this cycle (e.g. invalid/gapped historical candle history) — `context`/`snapshot` are then
+   * undefined and `safeToContinue` remains true regardless (this is deliberately NOT the same
+   * failure class as a reconciliation failure — the broker position itself is still trusted; only
+   * fresh, candle-based analysis is unavailable). Phase B uses this to skip
+   * MarketDecisionEngine.evaluate(), the OPPOSING_SIGNAL re-check, approved-candidate execution,
+   * and fresh candidate creation for this instrument this cycle — never silently proceeding with a
+   * stale or fabricated context. */
+  marketDataUnavailableReason?: string;
+  /** Candle-gap production incident fix. Which Hermes-independent exit-protection checks
+   * (KILL_SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/MAX_HOLDING_DURATION) were actually
+   * evaluated this cycle using an independently-fetched live quote — populated even when
+   * `marketDataUnavailableReason` is set, since these checks never depend on candle history at
+   * all. Empty when no position was open (nothing to protect). */
+  protectionChecksRun: string[];
+  /** Candle-gap production incident fix. Which protection checks were genuinely unavailable this
+   * cycle and why — e.g. OPPOSING_SIGNAL requires a full, candle-based decision and is reported
+   * here (never silently treated as "no opposing signal") whenever candle history is invalid. */
+  protectionChecksSkipped: string[];
 }
 
 export interface TradingRuntimeDeps {
@@ -249,6 +272,11 @@ export interface TradingRuntimeDeps {
    * cycle (see runCycleBody's own call site), never per instrument — this concern is account-wide,
    * not per-instrument. */
   dailyAccountSummary?: DailyAccountSummaryService;
+  /** Candle-gap production incident fix. How long a market-data incident (one or more instruments
+   * with invalid candle history) must persist before a periodic reminder alert is sent again, on
+   * top of the always-sent initial alert. Undefined defaults to
+   * DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS (30 minutes). */
+  marketDataIncidentReminderIntervalMs?: number;
 }
 
 /** Prototype 1.0 — official Hermes Agent decision integration. Only the Hermes-specific pieces —
@@ -321,6 +349,14 @@ export class TradingRuntime {
   private get opposingExitRequiredConfirmations(): number {
     return this.deps.opposingExitRequiredConfirmations ?? DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS;
   }
+
+  // Candle-gap production incident fix. Process-local, in-memory only, same restart-safety
+  // trade-off as opposingSignalStability above (a restart can only reset the reminder cadence,
+  // never skip a real degradation or fabricate a recovery) — never persisted, never shared across
+  // instances.
+  private readonly marketDataIncident = new MarketDataIncidentTracker(
+    this.deps.marketDataIncidentReminderIntervalMs ?? DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS,
+  );
 
   async start(): Promise<void> {
     assertValidRuntimeTransition(this.state, "RUNNING");
@@ -553,9 +589,18 @@ export class TradingRuntime {
             currentRecord: undefined,
             context: undefined,
             snapshot: undefined,
+            protectionChecksRun: [],
+            protectionChecksSkipped: [],
           };
         }
       }
+
+      // Candle-gap production incident fix. One shared, rate-limited incident view across the
+      // whole configured universe — computed once, after every instrument's own Phase A outcome is
+      // known, never per-instrument. Deliberately AFTER the Phase A loop (so it sees this cycle's
+      // final degraded/recovered state for every instrument) and BEFORE the Hermes scan (an
+      // incident alert must never be delayed by a slow/unavailable Hermes call).
+      await this.recordMarketDataIncidentState(now, states);
 
       // Prototype 1.0 — official Hermes Agent decision integration. Exactly ONE Hermes call for
       // the whole cycle (never once per instrument), and only now — after every instrument's own
@@ -669,6 +714,54 @@ export class TradingRuntime {
   }
 
   /**
+   * Candle-gap production incident fix. Feeds this cycle's final per-instrument market-data state
+   * into the shared MarketDataIncidentTracker and records whatever it decides — nothing (already
+   * alerted, not yet time for a reminder), a fresh MARKET_DATA_INCIDENT_ALERT (first detection or a
+   * periodic reminder, `details.isReminder` distinguishes the two), or a MARKET_DATA_INCIDENT_RECOVERED
+   * once every previously-degraded instrument has recovered. Also fires a per-instrument
+   * MARKET_DATA_RECOVERED audit event for each instrument the tracker reports as recovered — the
+   * per-instrument MARKET_DATA_DEGRADED counterpart is already fired directly from
+   * runInstrumentPhaseA, the moment it's detected, never delayed to here. Never throws — a broken
+   * tracker/audit write must never affect trading itself; mirrors persistAnalysis's own "best
+   * effort, log and swallow" discipline.
+   */
+  private async recordMarketDataIncidentState(now: Date, states: Record<string, InstrumentCycleState>): Promise<void> {
+    try {
+      const results = Object.values(states).map((state) => ({
+        instrument: state.instrument,
+        degraded: state.marketDataUnavailableReason !== undefined,
+        reason: state.marketDataUnavailableReason,
+      }));
+      const event = this.marketDataIncident.recordCycleResult(now, results);
+
+      if (event.kind === "none") return;
+
+      if (event.kind === "recovered") {
+        for (const instrument of event.recoveredInstruments) {
+          await this.recordAudit("MARKET_DATA_RECOVERED", {}, instrument);
+        }
+        await this.recordAudit("MARKET_DATA_INCIDENT_RECOVERED", {
+          recoveredInstruments: event.recoveredInstruments,
+          incidentDurationMs: event.incidentDurationMs,
+        });
+        return;
+      }
+
+      await this.recordAudit("MARKET_DATA_INCIDENT_ALERT", {
+        isReminder: event.kind === "reminder",
+        affectedInstruments: event.affectedInstruments.map((d) => d.instrument),
+        reasons: Object.fromEntries(event.affectedInstruments.map((d) => [d.instrument, d.reason])),
+        firstDetectedAt: event.affectedInstruments[0]?.firstDetectedAt,
+      });
+    } catch (error) {
+      logger.error("Market-data incident tracking failed — never affects trading itself", {
+        component: "trading-runtime",
+        reason: toErrorMessage(error),
+      });
+    }
+  }
+
+  /**
    * Prototype 1.0 — official Hermes Agent decision integration. Calls the universe scanner
    * (runtime/universe-scanner.ts) exactly once per cycle when `deps.universeScan` is configured —
    * a no-op otherwise, preserving every non-Hermes caller's behaviour exactly (DEMO-0001 and any
@@ -725,6 +818,18 @@ export class TradingRuntime {
    * structurally deferring OPPOSING_SIGNAL to Phase B, where the real (Hermes-informed) decision is
    * available. No broker ENTRY order is ever submitted here — only a risk-reducing close, via the
    * existing, unmodified executeAutomaticExit.
+   *
+   * Candle-gap production incident fix. The five Hermes-independent exit checks above are
+   * evaluated using a quote fetched INDEPENDENTLY of `buildMarketDecisionContext()` (which also
+   * fetches and validates historical candle history, and throws if that history is invalid/gapped
+   * — see candle-validation.ts). Fixed protection must never depend on candle history at all:
+   * evaluateExitTrigger only ever reads `record` (already reconciled above) and `freshBid` (a
+   * plain live quote). Previously, a single monolithic buildMarketDecisionContext() call meant an
+   * invalid candle history threw BEFORE this exit check ever ran, silently skipping stop-loss/
+   * take-profit/kill-switch protection for an already-open position — exactly the production
+   * incident this fix addresses. buildMarketDecisionContext() is still attempted afterwards, in its
+   * own try/catch, purely to build the full context Phase B needs for fresh analysis — its failure
+   * no longer has any bearing on whether protection above already ran.
    */
   private async runInstrumentPhaseA(instrument: string, now: Date, executionRunId: string): Promise<InstrumentCycleState> {
     await recoverStaleLifecycleRecords({
@@ -770,6 +875,8 @@ export class TradingRuntime {
         currentRecord: undefined,
         context: undefined,
         snapshot: undefined,
+        protectionChecksRun: [],
+        protectionChecksSkipped: [],
       };
     }
 
@@ -806,64 +913,137 @@ export class TradingRuntime {
       now,
     });
 
-    const { snapshot, context: rawContext } = await buildMarketDecisionContext(
-      this.deps.marketDataProvider,
-      this.deps.broker,
-      instrument,
-      this.deps.strategy,
-    );
-    // Overrides buildMarketDecisionContext's own broker.getOpenPositions()-derived positionOpen —
-    // reconciliation.positionOpen is the only value this runtime trusts (see above).
-    const context: MarketDecisionContext = { ...rawContext, positionOpen: currentPositionOpen };
-
     let phaseAExitTrigger: string | undefined;
     let phaseAExitClosed: boolean | undefined;
+    const protectionChecksRun: string[] = [];
+    const protectionChecksSkipped: string[] = [];
+
+    // Candle-gap production incident fix. Attempted FIRST, in its own try/catch that never
+    // rethrows — so its failure can no longer prevent the fixed protection checks below from
+    // running. Still required for Phase B's own fresh analysis (MarketDecisionEngine.evaluate(),
+    // the OPPOSING_SIGNAL re-check, and any new candidate) — all of that remains blocked whenever
+    // this throws, exactly as strictly as before this fix, per the mission's own explicit "do not
+    // weaken validation for new entries" requirement. In the healthy (non-degraded) case this
+    // produces byte-for-byte the same single getRate() call this cycle always made — the exit
+    // check below reuses `context.bid` rather than fetching a second, independent quote, so this
+    // fix changes NO observable behaviour when candle history is valid.
+    let snapshot: MarketDataSnapshot | undefined;
+    let context: MarketDecisionContext | undefined;
+    let marketDataUnavailableReason: string | undefined;
+    try {
+      const result = await buildMarketDecisionContext(this.deps.marketDataProvider, this.deps.broker, instrument, this.deps.strategy);
+      snapshot = result.snapshot;
+      // Overrides buildMarketDecisionContext's own broker.getOpenPositions()-derived positionOpen —
+      // reconciliation.positionOpen is the only value this runtime trusts (see above).
+      context = { ...result.context, positionOpen: currentPositionOpen };
+    } catch (error) {
+      marketDataUnavailableReason = toErrorMessage(error);
+    }
 
     if (currentPositionOpen && currentRecord) {
-      // Restart-Resilient Autonomy Phase — Phase 3. Automatic exits never require human approval
-      // in demo mode — closing an already-open position is always a risk-reduction action, never
-      // gated by the kill switch (which forces this trigger, never blocks it).
-      const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
-      const placeholderDecision: MarketDecision = {
-        action: "HOLD",
-        confidence: 0,
-        reasoning: ["Phase A: pre-Hermes safety check — the opposing-signal trigger is evaluated separately in Phase B."],
-      };
-      const trigger = evaluateExitTrigger({
-        record: currentRecord,
-        freshBid: context.bid,
-        freshDecision: placeholderDecision,
-        killSwitchEnabled: this.deps.killSwitchEnabled,
-        maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
-        strategyStillEnabled,
-        now,
-      });
-
-      if (trigger) {
-        phaseAExitTrigger = trigger;
-        const exitResult = await executeAutomaticExit({
-          broker: this.deps.broker,
-          record: currentRecord,
-          trigger,
-          lifecycleService: this.deps.lifecycleService,
-          auditTrail: this.deps.auditTrail,
-          executionRunId,
-          now,
-        });
-        phaseAExitClosed = exitResult.closed;
-        if (phaseAExitClosed) {
-          // Hardening pass — opposing-signal exit stability. This trigger can never itself be
-          // OPPOSING_SIGNAL (Phase A always evaluates against a neutral HOLD placeholder — see this
-          // method's own doc comment), but the position closing here still means any accumulated
-          // opposing-signal count for THIS SPECIFIC position (keyed by its own lifecycle record id,
-          // never by instrument alone — see finding C1 in opposing-signal-stability.ts) must be
-          // cleared, never carried into whatever opens on this instrument next. Captured before
-          // `currentRecord` is cleared below.
-          this.opposingSignalStability.reset(currentRecord.id);
-          currentPositionOpen = false;
-          currentRecord = undefined;
+      // Candle-gap production incident fix. Prefer the bid `buildMarketDecisionContext()` already
+      // fetched (zero extra broker calls in the common, healthy case) — only fall back to an
+      // independent quote fetch when that call itself failed, duck-typed the same way
+      // executeAutomaticExit's own "fetch fresh price right before closing" step already does (see
+      // exit-monitor.ts's hasRateFetching), so this never depends on a new broker capability.
+      let freshBid: number | undefined = context?.bid;
+      let quoteFetchError: string | undefined;
+      if (freshBid === undefined) {
+        if (hasRateFetching(this.deps.broker)) {
+          try {
+            const rate = await this.deps.broker.getRate(instrument);
+            freshBid = rate.bid;
+          } catch (error) {
+            quoteFetchError = toErrorMessage(error);
+          }
+        } else {
+          quoteFetchError = "Broker does not support independent rate fetching.";
         }
       }
+
+      if (freshBid !== undefined) {
+        // Restart-Resilient Autonomy Phase — Phase 3. Automatic exits never require human approval
+        // in demo mode — closing an already-open position is always a risk-reduction action, never
+        // gated by the kill switch (which forces this trigger, never blocks it).
+        const strategyStillEnabled = await this.isStrategyStillEnabled(executionRunId);
+        const placeholderDecision: MarketDecision = {
+          action: "HOLD",
+          confidence: 0,
+          reasoning: ["Phase A: pre-Hermes safety check — the opposing-signal trigger is evaluated separately in Phase B."],
+        };
+        const trigger = evaluateExitTrigger({
+          record: currentRecord,
+          freshBid,
+          freshDecision: placeholderDecision,
+          killSwitchEnabled: this.deps.killSwitchEnabled,
+          maxHoldingDurationMs: this.deps.maxHoldingDurationMs,
+          strategyStillEnabled,
+          now,
+        });
+        protectionChecksRun.push("KILL_SWITCH", "STOP_LOSS", "TAKE_PROFIT", "STRATEGY_DISABLED", "MAX_HOLDING_DURATION");
+
+        if (trigger) {
+          phaseAExitTrigger = trigger;
+          const exitResult = await executeAutomaticExit({
+            broker: this.deps.broker,
+            record: currentRecord,
+            trigger,
+            lifecycleService: this.deps.lifecycleService,
+            auditTrail: this.deps.auditTrail,
+            executionRunId,
+            now,
+          });
+          phaseAExitClosed = exitResult.closed;
+          if (phaseAExitClosed) {
+            // Hardening pass — opposing-signal exit stability. This trigger can never itself be
+            // OPPOSING_SIGNAL (Phase A always evaluates against a neutral HOLD placeholder — see this
+            // method's own doc comment), but the position closing here still means any accumulated
+            // opposing-signal count for THIS SPECIFIC position (keyed by its own lifecycle record id,
+            // never by instrument alone — see finding C1 in opposing-signal-stability.ts) must be
+            // cleared, never carried into whatever opens on this instrument next. Captured before
+            // `currentRecord` is cleared below.
+            this.opposingSignalStability.reset(currentRecord.id);
+            currentPositionOpen = false;
+            currentRecord = undefined;
+          }
+        }
+      } else {
+        // No quote available at all — a more severe condition than a candle-only gap: fixed
+        // protection genuinely cannot be evaluated this cycle for this instrument. Never silently
+        // treated as "no trigger" — reported plainly (in the single consolidated audit event below)
+        // so an operator can see protection itself was skipped, not merely that nothing needed to
+        // happen.
+        protectionChecksSkipped.push("KILL_SWITCH", "STOP_LOSS", "TAKE_PROFIT", "STRATEGY_DISABLED", "MAX_HOLDING_DURATION");
+        if (marketDataUnavailableReason === undefined) marketDataUnavailableReason = `No live quote available for exit-protection checks: ${quoteFetchError}`;
+      }
+
+      if (marketDataUnavailableReason !== undefined) {
+        // OPPOSING_SIGNAL is the one trigger Phase B alone can evaluate (it needs a fresh,
+        // Hermes-informed decision) — Phase B never runs at all this cycle whenever candle history
+        // is invalid (see runInstrumentPhaseB's own early return), so this is unconditionally
+        // unavailable whenever marketDataUnavailableReason is set, regardless of whether a live
+        // quote happened to be available for the fixed checks above.
+        protectionChecksSkipped.push("OPPOSING_SIGNAL");
+      }
+    }
+
+    // Candle-gap production incident fix. Exactly one MARKET_DATA_DEGRADED audit event per
+    // instrument per cycle, regardless of which of the two conditions above caused it (invalid
+    // candle history, no live quote at all, or both) — consolidated here rather than fired from
+    // two separate branches, so an operator never sees a duplicate/conflicting pair of records for
+    // the same cycle.
+    if (marketDataUnavailableReason !== undefined) {
+      await this.recordAudit(
+        "MARKET_DATA_DEGRADED",
+        {
+          reason: marketDataUnavailableReason,
+          protectionChecksRun: [...protectionChecksRun],
+          protectionChecksSkipped: [...protectionChecksSkipped],
+          quoteAvailable: protectionChecksRun.length > 0,
+          entryAnalysisBlocked: true,
+        },
+        instrument,
+      );
     }
 
     return {
@@ -871,8 +1051,11 @@ export class TradingRuntime {
       safeToContinue: true,
       currentPositionOpen,
       currentRecord,
-      context: { ...context, positionOpen: currentPositionOpen },
+      context: context ? { ...context, positionOpen: currentPositionOpen } : undefined,
       snapshot,
+      marketDataUnavailableReason,
+      protectionChecksRun,
+      protectionChecksSkipped,
       phaseAExitTrigger,
       phaseAExitClosed,
     };
@@ -907,6 +1090,44 @@ export class TradingRuntime {
           reasoning: [state.reconciliationFailureReason ?? "Phase A did not complete safely for this instrument this cycle."],
         },
         reconciliationFailureReason: state.reconciliationFailureReason,
+      };
+    }
+
+    // Candle-gap production incident fix. Phase A's own fixed protection checks (KILL_SWITCH/
+    // STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/MAX_HOLDING_DURATION) already ran independently of
+    // this — see runInstrumentPhaseA's own doc comment — and are carried through via
+    // state.phaseAExitTrigger/phaseAExitClosed below regardless of this branch. What's blocked here
+    // is everything that genuinely NEEDS candle-based analysis: MarketDecisionEngine.evaluate(),
+    // the OPPOSING_SIGNAL re-check (the one exit trigger that reads a fresh decision), approved-
+    // candidate execution, and fresh candidate creation — deliberately ALL deferred to a future,
+    // healthy cycle rather than proceeding on stale/fabricated context. This never weakens
+    // validation for a new entry: no candidate can be created here at all this cycle.
+    if (state.marketDataUnavailableReason !== undefined) {
+      return {
+        summary: {
+          decision: "HOLD",
+          candidateCreated: false,
+          instrument,
+          executedCandidateIds: [],
+          positionOpen: state.currentPositionOpen,
+          exitTrigger: state.phaseAExitTrigger,
+          exitClosed: state.phaseAExitClosed,
+          marketDataUnavailableReason: state.marketDataUnavailableReason,
+          protectionChecksRun: state.protectionChecksRun,
+          protectionChecksSkipped: state.protectionChecksSkipped,
+        },
+        decision: {
+          action: "HOLD",
+          confidence: 0,
+          reasoning: [
+            `Invalid historical candle history — fresh entry/strategy analysis blocked: ${state.marketDataUnavailableReason}`,
+            state.currentPositionOpen
+              ? state.protectionChecksRun.length > 0
+                ? `Fixed exit protection (${state.protectionChecksRun.join(", ")}) still ran using a live quote; opposing-signal exit is unavailable this cycle.`
+                : `No live quote available either — fixed exit protection (${state.protectionChecksSkipped.join(", ")}) could not run this cycle.`
+              : "No open position to protect this cycle.",
+          ],
+        },
       };
     }
 

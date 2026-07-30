@@ -386,7 +386,11 @@ describe("Runtime ordering — one instrument's Phase A failure never blocks ano
     expect(broker.closePosition).toHaveBeenCalledWith("eth-existing", expect.anything(), expect.anything(), expect.anything());
     const status = runtime.getStatus();
     expect(status.failedRunCount).toBe(0);
-    expect(status.lastResult?.perInstrument?.BTC?.reconciliationFailed).toBe(true);
+    // Candle-gap production incident fix. A market-data (candle) failure is no longer conflated
+    // with a reconciliation failure — reconciliation itself succeeded for BTC; only fresh analysis
+    // is blocked. See runInstrumentPhaseA's own doc comment.
+    expect(status.lastResult?.perInstrument?.BTC?.reconciliationFailed).toBeUndefined();
+    expect(status.lastResult?.perInstrument?.BTC?.marketDataUnavailableReason).toBe("simulated BTC market-data outage");
     expect(status.lastResult?.perInstrument?.ETH?.exitTrigger).toBe("STOP_LOSS");
 
     await runtime.stop();

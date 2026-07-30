@@ -79,6 +79,20 @@ export interface TradingCycleResultSummary {
   duplicateEntrySuppressed?: boolean;
   /** Set only when AUTO_DEMO auto-approved the candidate this cycle created. */
   autoApproved?: boolean;
+  /** Candle-gap production incident fix. Set only when this cycle's historical candle history was
+   * invalid for this instrument (e.g. a provider-side gap) — fresh entry/strategy analysis is
+   * always blocked whenever this is set; see protectionChecksRun/protectionChecksSkipped below for
+   * exactly what exit protection still ran despite it. */
+  marketDataUnavailableReason?: string;
+  /** Candle-gap production incident fix. Which Hermes-independent exit-protection checks (KILL_
+   * SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/MAX_HOLDING_DURATION) were evaluated this cycle
+   * using an independently-fetched live quote — populated even when marketDataUnavailableReason is
+   * set, since these checks never depend on candle history. Empty when no position was open. */
+  protectionChecksRun?: string[];
+  /** Candle-gap production incident fix. Which protection checks were genuinely unavailable this
+   * cycle — e.g. OPPOSING_SIGNAL, which requires a full candle-based decision. Never silently
+   * treated as "no opposing signal" when this is non-empty. */
+  protectionChecksSkipped?: string[];
   /** Prototype 1.0 — official Hermes Agent decision integration. Present only when this runtime is
    * configured with more than one instrument (TradingRuntimeDeps.instruments) — the full
    * per-instrument breakdown for this cycle, keyed by instrument. Every top-level field above

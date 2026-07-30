@@ -479,7 +479,11 @@ describe("Multi-instrument runtime — one instrument's failure never blocks ano
     expect(broker.closePosition).toHaveBeenCalledWith("eth-existing", expect.anything(), expect.anything(), expect.anything());
     const status = runtime.getStatus();
     expect(status.failedRunCount).toBe(0); // the cycle itself completed successfully overall — isolation, not a cycle-wide failure
-    expect(status.lastResult?.perInstrument?.BTC?.reconciliationFailed).toBe(true); // BTC's own outcome is marked untrustworthy this cycle
+    // Candle-gap production incident fix. A market-data (candle) failure is no longer conflated
+    // with a reconciliation failure — BTC's reconciliation itself succeeded; only fresh analysis
+    // is blocked, honestly reported via marketDataUnavailableReason instead.
+    expect(status.lastResult?.perInstrument?.BTC?.reconciliationFailed).toBeUndefined();
+    expect(status.lastResult?.perInstrument?.BTC?.marketDataUnavailableReason).toBe("simulated BTC market-data outage");
     expect(status.lastResult?.perInstrument?.ETH?.exitTrigger).toBe("STOP_LOSS"); // ETH's own outcome is entirely unaffected
 
     await runtime.stop();

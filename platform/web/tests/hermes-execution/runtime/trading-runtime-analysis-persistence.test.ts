@@ -263,8 +263,16 @@ describe("TradingRuntime — analysis persistence, BUY decision (Phase 3.5: neve
   });
 });
 
-describe("TradingRuntime — analysis persistence, failed cycle", () => {
-  it("still saves an analysis record (decision ERROR, with the error message) when the cycle throws — never loses the cycle", async () => {
+describe("TradingRuntime — analysis persistence, degraded (invalid market data) cycle", () => {
+  // Candle-gap production incident fix. A market-data/candle-history failure for the only
+  // configured instrument no longer crashes the whole cycle (see runInstrumentPhaseA/PhaseB's own
+  // doc comments) — it now completes with an honest HOLD decision reporting the failure, so fixed
+  // exit protection (evaluated independently in Phase A, before this failure is even known) is
+  // never skipped merely because analysis itself is blocked. No per-instrument analysis record is
+  // persisted for this degraded outcome (there is no real market snapshot to persist) — this is a
+  // deliberate, narrow scope decision, not an oversight: the outer "kind: failure" persistence path
+  // remains reserved for a genuine whole-cycle crash (see persistAnalysis's own doc comment).
+  it("completes (never fails) when the only configured instrument's market data is invalid, and does not persist a fabricated analysis record", async () => {
     const failingProvider: MarketDataProvider = {
       getMarketData: vi.fn(async () => {
         throw new Error("eToro connection refused");
@@ -276,11 +284,12 @@ describe("TradingRuntime — analysis persistence, failed cycle", () => {
 
     const outcome = await runtime.runNow();
 
-    expect(outcome.kind).toBe("failed");
-    expect(repository.saveAnalysis).toHaveBeenCalledTimes(1);
-    expect(repository.savedRuns[0]!.decision).toBe("ERROR");
-    expect(repository.savedRuns[0]!.errorMessage).toBe("eToro connection refused");
-    expect(repository.saveEvents).toHaveBeenCalledTimes(1);
+    expect(outcome.kind).toBe("completed");
+    if (outcome.kind === "completed") {
+      expect(outcome.result.decision.action).toBe("HOLD");
+      expect(outcome.result.decision.reasoning.join(" ")).toContain("eToro connection refused");
+    }
+    expect(repository.saveAnalysis).not.toHaveBeenCalled();
   });
 });
 
@@ -298,7 +307,7 @@ describe("TradingRuntime — analysis persistence never affects the cycle itself
     expect(outcome.kind).toBe("completed");
   });
 
-  it("a genuinely failed cycle still returns 'failed' (with the ORIGINAL error) even when persistence also fails", async () => {
+  it("a market-data failure still completes (never 'failed') even when analysis persistence would also fail", async () => {
     const failingProvider: MarketDataProvider = {
       getMarketData: vi.fn(async () => {
         throw new Error("original cycle failure");
@@ -313,10 +322,12 @@ describe("TradingRuntime — analysis persistence never affects the cycle itself
 
     const outcome = await runtime.runNow();
 
-    expect(outcome.kind).toBe("failed");
-    if (outcome.kind === "failed") {
-      expect(outcome.error).toBeInstanceOf(Error);
-      expect((outcome.error as Error).message).toBe("original cycle failure");
+    // No analysis persistence is even attempted for this degraded outcome (see the describe block
+    // above), so repository.saveAnalysis's own simulated failure has nothing to affect — this test
+    // now proves the cycle completes regardless, not that a persistence failure is swallowed.
+    expect(outcome.kind).toBe("completed");
+    if (outcome.kind === "completed") {
+      expect(outcome.result.decision.reasoning.join(" ")).toContain("original cycle failure");
     }
   });
 

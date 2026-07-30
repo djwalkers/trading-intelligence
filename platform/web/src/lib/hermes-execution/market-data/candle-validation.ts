@@ -167,6 +167,86 @@ function fail(instrument: string, detail: string): never {
   throw new MarketDataProviderError(`Invalid historical candle history for "${instrument}": ${detail}`, "malformed-data");
 }
 
+/** One detected gap between two consecutive (sorted) candles, wider than the timeframe's own
+ * tolerance — whether or not it turned out to be explained by a market closure. Diagnostic only;
+ * never thrown or used to reject anything itself (see diagnoseCandleGaps's own doc comment). */
+export interface CandleGapDiagnostic {
+  prevTimestamp: string;
+  currTimestamp: string;
+  gapMs: number;
+  expectedIntervalMs: number;
+}
+
+export interface CandleGapDiagnosticReport {
+  requestedInstrument: string;
+  requestedTimeframe: MarketTimeframe;
+  rawCandleCount: number;
+  rawTimestamps: string[];
+  normalisedTimestamps: string[];
+  duplicateTimestamps: string[];
+  firstTimestamp: string | undefined;
+  lastTimestamp: string | undefined;
+  gaps: CandleGapDiagnostic[];
+}
+
+/**
+ * Candle-gap production incident fix. A pure, side-effect-free diagnostic pass over a raw candle
+ * array — deliberately NEVER thrown from, NEVER used to reject anything (that remains
+ * validateHistoricalCandles's own, unmodified job) — so callers (LiveMarketDataProvider) can log a
+ * full, structured picture of exactly what was received and where every gap sits, whether or not
+ * the array as a whole ends up passing validation. Reports ALL gaps found, not just the first one
+ * validateHistoricalCandles itself would throw on — deliberately more complete than the thrown
+ * error's own single-gap message, so a genuine multi-gap incident is never under-reported.
+ *
+ * `rawTimestamps` preserves whatever order the candles were supplied in (the provider's own raw
+ * response order); `normalisedTimestamps` is the same set, chronologically sorted — comparing the
+ * two directly shows whether the provider itself returned candles out of order, independent of
+ * whether any candle is missing. Never logs OHLCV values, credentials, or request headers — only
+ * timestamps and counts.
+ */
+export function diagnoseCandleGaps(
+  candles: readonly Candle[],
+  instrument: string,
+  timeframe: MarketTimeframe,
+): CandleGapDiagnosticReport {
+  const rawTimestamps = candles.map((c) => c.timestamp);
+
+  const seen = new Set<string>();
+  const duplicateTimestamps: string[] = [];
+  for (const timestamp of rawTimestamps) {
+    if (seen.has(timestamp)) duplicateTimestamps.push(timestamp);
+    seen.add(timestamp);
+  }
+
+  const normalisedTimestamps = [...rawTimestamps].sort((a, b) => a.localeCompare(b));
+  const expectedIntervalMs = TIMEFRAME_DURATIONS_MS[timeframe];
+
+  const gaps: CandleGapDiagnostic[] = [];
+  for (let i = 1; i < normalisedTimestamps.length; i++) {
+    const prevTimestamp = normalisedTimestamps[i - 1]!;
+    const currTimestamp = normalisedTimestamps[i]!;
+    const prevMs = Date.parse(prevTimestamp);
+    const currMs = Date.parse(currTimestamp);
+    if (!Number.isFinite(prevMs) || !Number.isFinite(currMs)) continue; // malformed timestamps reported by validateHistoricalCandles itself, not duplicated here
+    const gapMs = currMs - prevMs;
+    if (gapMs > expectedIntervalMs * GAP_TOLERANCE_RATIO) {
+      gaps.push({ prevTimestamp, currTimestamp, gapMs, expectedIntervalMs });
+    }
+  }
+
+  return {
+    requestedInstrument: instrument,
+    requestedTimeframe: timeframe,
+    rawCandleCount: candles.length,
+    rawTimestamps,
+    normalisedTimestamps,
+    duplicateTimestamps,
+    firstTimestamp: normalisedTimestamps[0],
+    lastTimestamp: normalisedTimestamps[normalisedTimestamps.length - 1],
+    gaps,
+  };
+}
+
 /**
  * Rejects (throws MarketDataProviderError) rather than silently dropping, trimming, or repairing
  * anything — a caller (LiveMarketDataProvider) that receives no error back may trust the candles

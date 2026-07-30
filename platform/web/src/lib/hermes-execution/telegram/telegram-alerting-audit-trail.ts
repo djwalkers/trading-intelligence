@@ -11,12 +11,13 @@ import { formatExitReasonLabel, formatGbp, formatHoldingDuration, formatLondonTi
 // AuditTrail market-runtime.ts constructs.
 //
 // Telegram alert refinement. Deliberately curated down to ONLY genuinely actionable trading
-// events — TRADE_OPENED, TRADE_CLOSED, and a small, tightly-scoped set of critical operational
+// events — TRADE_OPENED, TRADE_CLOSED, a small, tightly-scoped set of critical operational
 // failures (broker connection lost, an automatic close failing so a position remains unprotected,
-// or the whole trading cycle crashing) — see formatAlertCore's own doc comment for the full list of
-// event types this deliberately does NOT alert on any more, and why. Every other event this pipeline
-// records continues to be written to the (unmodified) inner audit trail/log exactly as before —
-// "no Telegram alert" never means "no record."
+// or the whole trading cycle crashing), and (candle-gap production incident fix) a rate-limited
+// market-data incident alert/recovery pair — see formatAlertCore's own doc comment for the full
+// list of event types this deliberately does NOT alert on any more, and why. Every other event
+// this pipeline records continues to be written to the (unmodified) inner audit trail/log exactly
+// as before — "no Telegram alert" never means "no record."
 //
 // DAILY_PORTFOLIO_SUMMARY is deliberately NOT handled here at all (falls through to `default`,
 // returns undefined) — see daily-account-summary-service.ts's own doc comment: that service sends
@@ -166,6 +167,47 @@ function formatCriticalFailureAlert(event: AuditEvent): string | undefined {
   }
 }
 
+/**
+ * Candle-gap production incident fix. MARKET_DATA_INCIDENT_ALERT is already rate-limited by the
+ * caller (runtime/market-data-incident-tracker.ts, via TradingRuntime.recordMarketDataIncidentState) —
+ * this function only ever formats whatever occurrence it's given, never decides whether to send
+ * one. `details.isReminder` distinguishes the initial alert from a periodic reminder in the message
+ * text itself, so an operator scrolling a chat history can tell the two apart without needing to
+ * cross-reference timestamps.
+ */
+function formatMarketDataIncidentAlert(event: AuditEvent): string | undefined {
+  const affectedInstruments = event.details.affectedInstruments;
+  if (!Array.isArray(affectedInstruments) || affectedInstruments.length === 0) return undefined;
+  const isReminder = event.details.isReminder === true;
+  const reasons = event.details.reasons;
+  const firstReason =
+    reasons && typeof reasons === "object" ? Object.values(reasons as Record<string, unknown>)[0] : undefined;
+
+  return [
+    isReminder ? "⚠️ REMINDER: Market data incident still active" : "⚠️ ALERT: Market data incident detected",
+    "",
+    `Affected instruments: ${affectedInstruments.join(", ")}`,
+    `Reason: ${typeof firstReason === "string" ? firstReason : "Invalid/gapped historical candle history."}`,
+    "Entry/strategy analysis: blocked for affected instruments.",
+    "Exit protection (stop-loss/take-profit/kill-switch): continuing via live quotes where a position is open.",
+    "Opposing-signal exit: unavailable for affected instruments until candle history recovers.",
+  ].join("\n");
+}
+
+/** Candle-gap production incident fix. Sent once, only when the tracker confirms every previously
+ * affected instrument has recovered — an operator who received the alert above is never left to
+ * infer recovery from silence alone. */
+function formatMarketDataIncidentRecoveredAlert(event: AuditEvent): string | undefined {
+  const recoveredInstruments = event.details.recoveredInstruments;
+  if (!Array.isArray(recoveredInstruments) || recoveredInstruments.length === 0) return undefined;
+  return [
+    "✅ RESOLVED: Market data incident cleared",
+    "",
+    `Recovered instruments: ${recoveredInstruments.join(", ")}`,
+    "Valid historical candle history has resumed — entry/strategy analysis and full exit protection are both active again.",
+  ].join("\n");
+}
+
 /** The only place any AuditEventType is decided to be alert-worthy or not — every other event type
  * (runtime started/stopped, scan started/completed, HOLD decisions, candidate created/expired/auto-
  * approved, normal reconciliation, opposing-signal-deferred, routine health events, and every event
@@ -181,6 +223,10 @@ function formatAlertCore(event: AuditEvent): string | undefined {
     case "TRADE_CLOSE_FAILED":
     case "TRADING_CYCLE_FAILED":
       return formatCriticalFailureAlert(event);
+    case "MARKET_DATA_INCIDENT_ALERT":
+      return formatMarketDataIncidentAlert(event);
+    case "MARKET_DATA_INCIDENT_RECOVERED":
+      return formatMarketDataIncidentRecoveredAlert(event);
     default:
       return undefined;
   }
