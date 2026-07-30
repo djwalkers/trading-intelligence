@@ -15,11 +15,21 @@ const ORDER_CURRENCY = "usd"; // Every documented request-body example used "usd
 
 /** A resolved instrument — the numeric id eToro's execution/rates endpoints need, plus the display
  * details the smoke test prints before submitting anything. Keyed internally by the original
- * search term (e.g. "BTC"), mirroring Trading212DemoBroker's ticker-as-key convention. */
+ * search term (e.g. "BTC"), mirroring Trading212DemoBroker's ticker-as-key convention.
+ *
+ * `instrumentTypeID`/`exchangeID` come straight off the same search-result match already used to
+ * build `instrumentId`/`displayName`/`symbol` above — every match today's own resolveInstrument()
+ * produces always has both (see `EtoroInstrumentSearchResult`), they were simply never surfaced
+ * past this point before. Declared optional anyway, deliberately: this keeps the field purely
+ * additive against any future resolution path that might not have this data available, not just
+ * against today's existing callers (which all still destructure only the fields they already
+ * used). */
 export interface EtoroResolvedInstrument {
   instrumentId: number;
   displayName: string;
   symbol: string;
+  instrumentTypeID?: number;
+  exchangeID?: number;
 }
 
 export class EtoroNoInstrumentMatchError extends Error {
@@ -280,6 +290,8 @@ export class EtoroDemoBroker implements PaperBroker {
       instrumentId: match.instrumentID,
       displayName: match.instrumentDisplayName,
       symbol: match.symbolFull,
+      instrumentTypeID: match.instrumentTypeID,
+      exchangeID: match.exchangeID,
     };
     this.resolvedInstruments.set(searchTerm, resolved);
     return resolved;
@@ -290,8 +302,12 @@ export class EtoroDemoBroker implements PaperBroker {
    * against never matched anything real). Throws EtoroRateUnavailableError, distinguishing an
    * instrument genuinely absent from the response from one present but lacking bid/ask (see that
    * class's doc comment). HTTP/API failures never reach here as this error — EtoroClient's
-   * transport layer throws EtoroApiError for those before this method ever sees a response. */
-  async getRate(internalInstrument: string): Promise<{ bid: number; ask: number }> {
+   * transport layer throws EtoroApiError for those before this method ever sees a response.
+   *
+   * `date` is eToro's own rate-response timestamp (`EtoroRate.date`), surfaced here purely
+   * additively (optional, since the underlying field itself is optional) — every existing caller
+   * destructures only `{ bid, ask }` and is unaffected. */
+  async getRate(internalInstrument: string): Promise<{ bid: number; ask: number; date?: string }> {
     const resolved = this.requireResolvedInstrument(internalInstrument);
     const response = await this.client.getRates([resolved.instrumentId]);
     const rate = (response.rates ?? []).find((r) => r.instrumentID === resolved.instrumentId);
@@ -300,7 +316,7 @@ export class EtoroDemoBroker implements PaperBroker {
     if (rate.bid === undefined || rate.ask === undefined) {
       throw new EtoroRateUnavailableError(resolved.instrumentId, "unpriced");
     }
-    return { bid: rate.bid, ask: rate.ask };
+    return { bid: rate.bid, ask: rate.ask, date: rate.date };
   }
 
   /**

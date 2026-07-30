@@ -462,7 +462,19 @@ export type AuditEventType =
   // tracker knew about has recovered in the same cycle — also wired into Telegram, so an operator
   // who received the initial/reminder alert above is explicitly told when it clears, never left to
   // infer recovery from silence alone.
-  | "MARKET_DATA_INCIDENT_RECOVERED";
+  | "MARKET_DATA_INCIDENT_RECOVERED"
+  // Phase 0 — eToro instrument capability probe (etoro-instrument-probe.ts). Read-only, never
+  // placing an order. One event per stage attempt (`details.stage`: "resolution" | "quote" |
+  // "candles", `details.outcome`: "success" | "failure") for every instrument probed this run —
+  // deliberately generic/one-per-stage rather than a dedicated type per stage x outcome
+  // combination, mirroring SMOKE_TEST_*'s own small, outcome-oriented event set.
+  | "INSTRUMENT_PROBE_STAGE_RESULT"
+  // Phase 0 — eToro instrument capability probe. Fired once per instrument, after every stage it
+  // reached has completed, with `details.classification` set to one of the plan's own five
+  // statuses (NOT_TESTED/UNSUPPORTED/PARTIALLY_SUPPORTED/READ_ONLY_VERIFIED — VERIFIED is Stage 4
+  // only and never assigned by this read-only probe) — see
+  // docs/project-status/ETORO_INSTRUMENT_CAPABILITY_PLAN.md §6 for the full classification rules.
+  | "INSTRUMENT_PROBE_CLASSIFIED";
 
 export interface AuditEvent {
   timestamp: string;

@@ -1,6 +1,5 @@
 import * as path from "node:path";
 import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
-import { BrokerFactory } from "@/lib/hermes-execution/broker-factory";
 import {
   EtoroDemoBroker,
   EtoroNoInstrumentMatchError,
@@ -11,6 +10,7 @@ import {
 } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import type { OrderRequest } from "@/lib/hermes-execution/types";
+import { checkEtoroDemoConfig, connectEtoroDemoBroker } from "./etoro-cli-shared";
 
 const SMOKE_AUDIT_LOG_PATH = path.join(process.cwd(), ".data", "hermes-execution", "etoro-smoke-audit-log.json");
 
@@ -44,12 +44,9 @@ export async function main(): Promise<void> {
   const config = getHermesExecutionConfig();
   console.log("Broker provider: etoro-demo (fixed for this command — BROKER_PROVIDER is not consulted)");
 
-  if (config.etoro.env !== "demo") {
-    console.error("ETORO_ENV must be exactly \"demo\" — no live/real route is ever selected by this command.");
-    return finish("FAILED", undefined, "config");
-  }
-  if (!config.etoro.apiKey || !config.etoro.userKey) {
-    console.error("ETORO_API_KEY and ETORO_USER_KEY must both be set.");
+  const demoConfigCheck = checkEtoroDemoConfig(config);
+  if (!demoConfigCheck.ok) {
+    console.error(demoConfigCheck.reason);
     return finish("FAILED", undefined, "config");
   }
   if (!config.etoro.testInstrument.trim()) {
@@ -65,13 +62,9 @@ export async function main(): Promise<void> {
   const auditTrail = await JsonFileAuditTrail.createFresh(SMOKE_AUDIT_LOG_PATH);
   let broker: EtoroDemoBroker;
 
-  // Stage 2 + 3: authenticate, retrieve demo portfolio/account state. BrokerFactory.create's
-  // "etoro-demo" entry constructs EtoroDemoBroker and calls connect() before returning — the cast
-  // is safe because an explicit `provider` was requested, so the concrete type is guaranteed.
+  // Stage 2 + 3: authenticate, retrieve demo portfolio/account state.
   try {
-    broker = (await BrokerFactory.create(config, auditTrail, executionRunId, {
-      provider: "etoro-demo",
-    })) as EtoroDemoBroker;
+    broker = await connectEtoroDemoBroker(config, auditTrail, executionRunId);
     console.log("Connected to eToro (credentials verified via demo portfolio read).");
   } catch (error) {
     console.error("Failed to connect to eToro Demo:", error instanceof Error ? error.message : error);

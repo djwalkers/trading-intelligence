@@ -231,7 +231,7 @@ describe("EtoroDemoBroker — instrument resolution", () => {
     const { broker } = makeBroker();
     await broker.connect();
     const resolved = await broker.resolveInstrument("BTC");
-    expect(resolved).toEqual({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC" });
+    expect(resolved).toEqual({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 });
     expect(broker.hasResolvedInstrument("BTC")).toBe(true);
   });
 
