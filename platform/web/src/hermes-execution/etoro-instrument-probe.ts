@@ -11,6 +11,7 @@ import {
 } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { validateHistoricalCandles, diagnoseCandleGaps, type MarketTimeframe } from "@/lib/hermes-execution/market-data/candle-validation";
+import type { RawRateFieldInspection } from "@/lib/hermes-execution/etoro/etoro-quote-diagnostics";
 import type { Candle } from "@/lib/hermes-execution/types";
 import { checkEtoroDemoConfig, connectEtoroDemoBroker } from "./etoro-cli-shared";
 
@@ -101,11 +102,14 @@ function redactDeep<T>(value: T, secrets: readonly string[]): T {
  * everything else EtoroDemoBroker exposes. `connectEtoroDemoBroker` still returns the full,
  * concrete EtoroDemoBroker (broker-etoro-smoke.ts's Stage 4 needs the wider surface) — this file
  * narrows the value to this interface the moment it's connected (see main()), so every line past
- * that point is type-checked against read-only methods only. */
+ * that point is type-checked against read-only methods only. `getRateFieldDiagnostics` is itself
+ * still read-only (one more GET .../rates call) — included here only so the opt-in
+ * `--diagnose-quote-fields` flag can reach it; the default probe run never calls it. */
 export interface EtoroReadOnlyProbeBroker {
   resolveInstrument(searchTerm: string): Promise<EtoroResolvedInstrument>;
   getRate(instrument: string): Promise<{ bid: number; ask: number; date?: string }>;
   getHistoricalCandles(instrument: string, timeframe: MarketTimeframe, count: number): Promise<Candle[]>;
+  getRateFieldDiagnostics(instrument: string): Promise<RawRateFieldInspection>;
 }
 
 export type ResolutionOutcome =
@@ -173,6 +177,7 @@ interface InstrumentProbeResult {
   candles?: CandleOutcome;
   classification: Classification;
   classificationReasons: string[];
+  quoteFieldDiagnostics?: RawRateFieldInspection;
 }
 
 /** The non-secret configuration snapshot captured into every evidence document — never apiKey/
@@ -212,6 +217,10 @@ interface InstrumentEvidenceDocument {
   /** Machine-readable codes explaining why `classification` isn't READ_ONLY_VERIFIED — always
    * empty when it is. See classificationReasons()'s own doc comment. */
   classificationReasons: string[];
+  /** Only present when this run was invoked with `--diagnose-quote-fields` AND resolution
+   * succeeded. Quote-timestamp-semantics investigation — see etoro-quote-diagnostics.ts's own
+   * top-of-file comment. Never influences `classification` itself. */
+  quoteFieldDiagnostics: RawRateFieldInspection | undefined;
 }
 
 interface ProbeDeps {
@@ -222,6 +231,10 @@ interface ProbeDeps {
   candleCount: number;
   maxCandleAgeSeconds: number;
   secrets: readonly string[];
+  /** Opt-in only (`--diagnose-quote-fields`) — never enabled by a default probe run. See
+   * EtoroDemoBroker.getRateFieldDiagnostics's own doc comment for why this issues a second,
+   * separate eToro call when enabled. */
+  diagnoseQuoteFields: boolean;
 }
 
 async function recordStageResult(
@@ -558,6 +571,34 @@ async function writeInstrumentEvidence(doc: InstrumentEvidenceDocument, secrets:
   return filePath;
 }
 
+/**
+ * Quote-timestamp-semantics investigation (probe-etoro-1785448658984) — opt-in only
+ * (`--diagnose-quote-fields`), never called during a default probe run. Issues its own, separate
+ * eToro call (EtoroDemoBroker.getRateFieldDiagnostics) and records the curated field inspection;
+ * never lets a diagnostic failure affect the instrument's own classification or abort the rest of
+ * the probe.
+ */
+async function probeQuoteFieldDiagnostics(deps: ProbeDeps, instrument: string): Promise<RawRateFieldInspection | undefined> {
+  try {
+    const inspection = await deps.broker.getRateFieldDiagnostics(instrument);
+    await recordStageResult(deps, instrument, "quote", {
+      outcome: "diagnostic",
+      diagnostic: "quote-field-inspection",
+      selectedRowFound: inspection.selectedRowFound,
+      availableFieldNames: inspection.availableFieldNames,
+      timestampLikeFields: inspection.timestampLikeFields,
+    });
+    return inspection;
+  } catch (error) {
+    await recordStageResult(deps, instrument, "quote", {
+      outcome: "diagnostic-failed",
+      diagnostic: "quote-field-inspection",
+      message: toErrorMessage(error),
+    });
+    return undefined;
+  }
+}
+
 async function probeInstrument(
   deps: ProbeDeps,
   instrument: string,
@@ -570,9 +611,13 @@ async function probeInstrument(
 
   let quote: QuoteOutcome | undefined;
   let candles: CandleOutcome | undefined;
+  let quoteFieldDiagnostics: RawRateFieldInspection | undefined;
   if (resolution.kind === "success") {
     quote = await probeQuote(deps, instrument);
     candles = await probeCandles(deps, instrument);
+    if (deps.diagnoseQuoteFields) {
+      quoteFieldDiagnostics = await probeQuoteFieldDiagnostics(deps, instrument);
+    }
   }
 
   const classification = classify(resolution, quote, candles);
@@ -594,6 +639,7 @@ async function probeInstrument(
       candles,
       classification,
       classificationReasons: reasons,
+      quoteFieldDiagnostics,
     },
     deps.secrets,
   );
@@ -611,7 +657,10 @@ async function probeInstrument(
     details: { classification, classificationReasons: reasons, evidenceFile },
   });
 
-  return { result: { instrument, resolution, quote, candles, classification, classificationReasons: reasons }, evidenceFile };
+  return {
+    result: { instrument, resolution, quote, candles, classification, classificationReasons: reasons, quoteFieldDiagnostics },
+    evidenceFile,
+  };
 }
 
 function describeResolution(outcome: ResolutionOutcome): string {
@@ -679,6 +728,7 @@ function printUsage(): void {
   console.log("  npm run broker:etoro-probe -- BTC");
   console.log("  npm run broker:etoro-probe -- ETH SOL");
   console.log("  npm run broker:etoro-probe -- --all");
+  console.log("  npm run broker:etoro-probe -- BTC --diagnose-quote-fields   (opt-in, one extra read-only call per instrument)");
   console.log("");
   console.log(
     "No default instrument is probed when no argument is given — this tool never silently probes " +
@@ -697,8 +747,12 @@ export async function main(): Promise<void> {
 
   const rawArgs = process.argv.slice(2);
   const wantsAll = rawArgs.some((arg) => arg.trim().toLowerCase() === "--all");
+  // Quote-timestamp-semantics investigation. Opt-in only, off by default: an ordinary probe run's
+  // request count/behaviour is completely unchanged unless this flag is explicitly given.
+  const wantsQuoteFieldDiagnostics = rawArgs.some((arg) => arg.trim().toLowerCase() === "--diagnose-quote-fields");
+  const KNOWN_FLAGS = new Set(["--all", "--diagnose-quote-fields"]);
   const cliInstruments = rawArgs
-    .filter((arg) => arg.trim().toLowerCase() !== "--all")
+    .filter((arg) => !KNOWN_FLAGS.has(arg.trim().toLowerCase()))
     .map((s) => s.trim().toUpperCase())
     .filter((s) => s.length > 0);
 
@@ -760,6 +814,13 @@ export async function main(): Promise<void> {
     currency: null,
   };
 
+  if (wantsQuoteFieldDiagnostics) {
+    console.log(
+      "--diagnose-quote-fields enabled: one EXTRA read-only rates call per instrument will inspect " +
+        "the raw response's own field names (quote-timestamp-semantics investigation).",
+    );
+  }
+
   const deps: ProbeDeps = {
     broker,
     auditTrail,
@@ -768,6 +829,7 @@ export async function main(): Promise<void> {
     candleCount: config.marketData.candleCount,
     maxCandleAgeSeconds: config.marketData.maxCandleAgeSeconds,
     secrets: [config.etoro.apiKey, config.etoro.userKey].filter((s): s is string => typeof s === "string" && s.length > 0),
+    diagnoseQuoteFields: wantsQuoteFieldDiagnostics,
   };
 
   const results: InstrumentProbeResult[] = [];
@@ -782,6 +844,13 @@ export async function main(): Promise<void> {
       `  Classification:       ${result.classification}` +
         (result.classificationReasons.length > 0 ? ` (${result.classificationReasons.join(", ")})` : ""),
     );
+    if (result.quoteFieldDiagnostics) {
+      const d = result.quoteFieldDiagnostics;
+      console.log(
+        `  Quote field diagnostics: rowFound=${d.selectedRowFound}, fields=[${d.availableFieldNames.join(", ")}], ` +
+          `timestampLikeFields=${JSON.stringify(d.timestampLikeFields)}`,
+      );
+    }
     console.log(`  Evidence:             ${evidenceFile}`);
     console.log("");
     results.push(result);

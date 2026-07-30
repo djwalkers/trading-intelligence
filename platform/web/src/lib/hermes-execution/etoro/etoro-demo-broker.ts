@@ -5,6 +5,7 @@ import {
   type EtoroInstrumentSearchResult,
   type EtoroPosition,
 } from "./etoro-client";
+import { inspectRawRate, type RawRateFieldInspection } from "./etoro-quote-diagnostics";
 import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
 import type { EtoroDemoConfig } from "../config";
@@ -317,6 +318,22 @@ export class EtoroDemoBroker implements PaperBroker {
       throw new EtoroRateUnavailableError(resolved.instrumentId, "unpriced");
     }
     return { bid: rate.bid, ask: rate.ask, date: rate.date };
+  }
+
+  /**
+   * Quote-timestamp-semantics investigation (probe-etoro-1785448658984) — diagnostic only, never
+   * called by getRate()/the trading path/the capability probe's own default run. Issues its OWN,
+   * separate GET .../instruments/rates call (never reuses getRate()'s own request) and inspects the
+   * RAW response for the selected instrument's row — see etoro-quote-diagnostics.ts's own top-of-
+   * file comment for exactly why this can reveal fields EtoroRate itself never declared
+   * (`lastExecution`, `priceRateID`, ...) without changing that type or getRate()'s behaviour at
+   * all. Intended to be invoked only via an explicit, operator-approved one-off diagnostic run (see
+   * etoro-instrument-probe.ts's own `--diagnose-quote-fields` flag), never automatically.
+   */
+  async getRateFieldDiagnostics(internalInstrument: string): Promise<RawRateFieldInspection> {
+    const resolved = this.requireResolvedInstrument(internalInstrument);
+    const response = await this.client.getRates([resolved.instrumentId]);
+    return inspectRawRate(response, resolved.instrumentId);
   }
 
   /**

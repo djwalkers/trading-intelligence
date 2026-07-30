@@ -738,6 +738,138 @@ describe("etoro-instrument-probe — main()", () => {
     await expect(fs.access(secondEvidencePath)).resolves.toBeUndefined();
   });
 
+  // Quote-timestamp-semantics investigation (probe-etoro-1785448658984). --diagnose-quote-fields is
+  // opt-in only — a default probe run must never issue this extra call, and enabling it must never
+  // affect classification, which stays gated purely on quote freshness (never on field-name
+  // curiosity).
+  describe("--diagnose-quote-fields (opt-in quote-timestamp-semantics diagnostic)", () => {
+    function makeDiagnosableBroker(behaviors: Record<string, FakeInstrumentBehavior>, diagnostics: Record<string, unknown>) {
+      const base = makeFakeBroker(behaviors);
+      return {
+        ...base,
+        getRateFieldDiagnostics: vi.fn(async () => diagnostics),
+      };
+    }
+
+    it("never calls getRateFieldDiagnostics during a default run (flag omitted)", async () => {
+      const broker = makeDiagnosableBroker(
+        {
+          BTC: {
+            resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+            rate: () => Promise.resolve({ bid: 64712.47, ask: 64712.48, date: new Date().toISOString() }),
+            candles: () => Promise.resolve(validCandles(60, 0)),
+          },
+        },
+        { selectedRowFound: true, availableFieldNames: ["instrumentID", "bid", "ask", "date"], bid: 64712.47, ask: 64712.48, timestampLikeFields: {} },
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      expect(broker.getRateFieldDiagnostics).not.toHaveBeenCalled();
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      expect(evidence[0]!.details.quoteFieldDiagnostics).toBeUndefined();
+    });
+
+    it("calls getRateFieldDiagnostics exactly once per instrument when the flag is given, and records it in evidence without affecting classification", async () => {
+      const rawInspection = {
+        selectedRowFound: true,
+        availableFieldNames: ["instrumentID", "bid", "ask", "date", "lastExecution", "priceRateID"],
+        bid: 64712.47,
+        ask: 64712.48,
+        timestampLikeFields: { date: "2026-07-30T19:57:23.1261349Z" },
+      };
+      const staleDate = new Date(Date.now() - 7_217_177).toISOString();
+      const broker = makeDiagnosableBroker(
+        {
+          BTC: {
+            resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+            rate: () => Promise.resolve({ bid: 64712.47, ask: 64712.48, date: staleDate }),
+            candles: () => Promise.resolve(validCandles(60, 0)),
+          },
+        },
+        rawInspection,
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-fields"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      expect(broker.getRateFieldDiagnostics).toHaveBeenCalledTimes(1);
+      expect(broker.getRateFieldDiagnostics).toHaveBeenCalledWith("BTC");
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      // Still gated purely on quote freshness — the diagnostic never upgrades or downgrades it.
+      expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(classified?.details.classificationReasons).toEqual(["QUOTE_STALE"]);
+
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      expect(evidence[0]!.details.quoteFieldDiagnostics).toEqual(rawInspection);
+    });
+
+    it("never persists a non-timestamp field's raw value from the diagnostic (only curated names/timestamps/bid/ask)", async () => {
+      const rawInspection = {
+        selectedRowFound: true,
+        availableFieldNames: ["instrumentID", "bid", "ask", "date", "unitMargin"],
+        bid: 100,
+        ask: 101,
+        timestampLikeFields: { date: new Date().toISOString() },
+      };
+      const broker = makeDiagnosableBroker(
+        {
+          BTC: {
+            resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+            rate: () => Promise.resolve({ bid: 100, ask: 101, date: new Date().toISOString() }),
+            candles: () => Promise.resolve(validCandles(60, 0)),
+          },
+        },
+        rawInspection,
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-fields"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      const evidenceText = await fs.readFile(classified!.details.evidenceFile as string, "utf-8");
+      // "unitMargin" the NAME may appear (it's in availableFieldNames); no numeric value from it
+      // (e.g. a would-be secret-shaped number) is ever surfaced anywhere outside bid/ask/timestamps.
+      expect(evidenceText).toContain("unitMargin");
+      const doc = (await readEvidenceFile(classified!.details.evidenceFile as string))[0]!.details;
+      expect((doc.quoteFieldDiagnostics as Record<string, unknown>).timestampLikeFields).toEqual({ date: expect.any(String) });
+    });
+
+    it("never lets a diagnostic-call failure affect classification or abort the run", async () => {
+      const broker = makeFakeBroker({
+        BTC: {
+          resolve: () => Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 }),
+          rate: () => Promise.resolve({ bid: 100, ask: 101, date: new Date().toISOString() }),
+          candles: () => Promise.resolve(validCandles(60, 0)),
+        },
+      });
+      const brokerWithFailingDiagnostics = { ...broker, getRateFieldDiagnostics: vi.fn().mockRejectedValue(new Error("diagnostic transport failure")) };
+      createMock.mockResolvedValue(brokerWithFailingDiagnostics);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-fields"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await expect(main()).resolves.not.toThrow();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      expect(classified?.details.classification).toBe("READ_ONLY_VERIFIED");
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      expect(evidence[0]!.details.quoteFieldDiagnostics).toBeUndefined();
+    });
+  });
+
   describe("evidence safety — secret redaction", () => {
     it("never persists the configured apiKey/userKey, even when an error message would otherwise echo them", async () => {
       const leakyError = new Error(`upstream rejected request with header x-api-key: ${TEST_API_KEY} and x-user-key: ${TEST_USER_KEY}`);

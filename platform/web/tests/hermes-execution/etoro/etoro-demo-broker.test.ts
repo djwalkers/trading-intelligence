@@ -9,6 +9,7 @@ import {
   EtoroCandleHistoryUnavailableError,
 } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
+import { LiveMarketDataProvider } from "@/lib/hermes-execution/market-data/live-market-data-provider";
 import type { EtoroDemoConfig } from "@/lib/hermes-execution/config";
 import type { OrderRequest } from "@/lib/hermes-execution/types";
 
@@ -360,6 +361,80 @@ describe("EtoroDemoBroker — rate retrieval", () => {
     await broker.connect();
     await broker.resolveInstrument("BTC");
     await expect(broker.getRate("BTC")).rejects.toMatchObject({ reason: "unpriced" });
+  });
+});
+
+// Quote-timestamp-semantics investigation (probe-etoro-1785448658984). getRateFieldDiagnostics is
+// diagnostic-only — a SEPARATE eToro call from getRate() — never invoked by the trading path or a
+// default probe run.
+describe("EtoroDemoBroker — quote field diagnostics (getRateFieldDiagnostics)", () => {
+  it("surfaces every raw field name on the selected instrument's row, including ones EtoroRate never declares", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        rates: () =>
+          jsonResponse(200, {
+            rates: [
+              {
+                instrumentID: 100000,
+                bid: 64712.47,
+                ask: 64712.48,
+                date: "2026-07-30T19:57:23.1261349Z",
+                lastExecution: 64712.475,
+                priceRateID: 987654,
+                conversionRateAsk: 1,
+                conversionRateBid: 1,
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    const diagnostics = await broker.getRateFieldDiagnostics("BTC");
+
+    expect(diagnostics.selectedRowFound).toBe(true);
+    expect(diagnostics.bid).toBe(64712.47);
+    expect(diagnostics.ask).toBe(64712.48);
+    expect(diagnostics.availableFieldNames.sort()).toEqual(
+      ["instrumentID", "bid", "ask", "date", "lastExecution", "priceRateID", "conversionRateAsk", "conversionRateBid"].sort(),
+    );
+    // Only the timestamp-NAMED field's value is surfaced — lastExecution/priceRateID/
+    // conversionRate* values are never persisted, even though their NAMES appear above.
+    expect(diagnostics.timestampLikeFields).toEqual({ date: "2026-07-30T19:57:23.1261349Z" });
+  });
+
+  it("selects the row matching the resolved instrument id, never a different row present in the same response", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        rates: () =>
+          jsonResponse(200, {
+            rates: [
+              { instrumentID: 999999, bid: 1, ask: 2, date: "2020-01-01T00:00:00.0000000Z" },
+              { instrumentID: 100000, bid: 64712.47, ask: 64712.48, date: "2026-07-30T19:57:23.1261349Z" },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    const diagnostics = await broker.getRateFieldDiagnostics("BTC");
+    expect(diagnostics.selectedRowFound).toBe(true);
+    expect(diagnostics.bid).toBe(64712.47);
+    expect(diagnostics.timestampLikeFields.date).toBe("2026-07-30T19:57:23.1261349Z");
+  });
+
+  it("issues its own, separate rates request rather than reusing getRate()'s own call", async () => {
+    const ratesSpy = vi.fn(() => jsonResponse(200, { rates: [{ instrumentID: 100000, bid: 64712.47, ask: 64712.48, date: "2026-07-30T19:57:23.1261349Z" }] }));
+    const { broker } = makeBroker(defaultRoutes({ rates: ratesSpy }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    await broker.getRate("BTC");
+    expect(ratesSpy).toHaveBeenCalledTimes(1);
+    await broker.getRateFieldDiagnostics("BTC");
+    expect(ratesSpy).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -937,5 +1012,50 @@ describe("EtoroDemoBroker — position close", () => {
     await expect(broker.closePosition("no-such-position", 100, "2026-01-01T00:05:00Z", "test")).rejects.toThrow(
       /no open position/i,
     );
+  });
+});
+
+// Quote-timestamp-semantics investigation (probe-etoro-1785448658984) — requirement 4: confirm
+// every quote-consuming path (the trading runtime's own LiveMarketDataProvider, and the read-only
+// capability probe) reads the exact same, unmodified EtoroDemoBroker.getRate() — never a
+// divergent/duplicated quote-fetching implementation that could silently disagree.
+describe("EtoroDemoBroker — the trading runtime and the capability probe consume the identical getRate() result", () => {
+  function hourlyCandlesEndingNow(count: number) {
+    const now = Date.now();
+    return Array.from({ length: count }, (_, i) => ({
+      instrumentID: 100000,
+      fromDate: new Date(now - (count - i) * 3_600_000).toISOString(),
+      open: 100 + i,
+      high: 101 + i,
+      low: 99 + i,
+      close: 100 + i,
+      volume: 10,
+    }));
+  }
+
+  it("LiveMarketDataProvider.getMarketData() (the real trading path) and a direct getRate() call (the probe's own path) return identical bid/ask, sourced from the same broker instance", async () => {
+    const rateFixture = { instrumentID: 100000, bid: 64712.47, ask: 64712.48, date: new Date().toISOString() };
+    const { broker } = makeBroker(
+      defaultRoutes({
+        rates: () => jsonResponse(200, { rates: [rateFixture] }),
+        history: () => jsonResponse(200, { interval: "OneHour", candles: [{ instrumentId: 100000, candles: hourlyCandlesEndingNow(60) }] }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    // The probe's own consumption path — a direct getRate() call.
+    const probeRate = await broker.getRate("BTC");
+
+    // The trading runtime's own consumption path — LiveMarketDataProvider wraps the SAME broker
+    // instance and reads its bid/ask via the SAME getRate() method, never a parallel
+    // implementation.
+    const provider = new LiveMarketDataProvider(broker, { timeframe: "1h", candleCount: 60, maxCandleAgeSeconds: 7_200 });
+    const snapshot = await provider.getMarketData("BTC");
+
+    expect(snapshot.bid).toBe(probeRate.bid);
+    expect(snapshot.ask).toBe(probeRate.ask);
+    expect(snapshot.bid).toBe(rateFixture.bid);
+    expect(snapshot.ask).toBe(rateFixture.ask);
   });
 });
