@@ -10,23 +10,33 @@ export interface HermesPortfolioData {
   investedValue: number;
   realisedPnl: number | null;
   realisedPnlScope: string;
+  realisedTradeCount: number;
+  unreconciledClosedTradeCount: number;
   unrealisedPnl: number | null;
+  unrealisedPnlComplete: boolean;
+  unrealisedPnlUnavailableReason: string | null;
   equity: number | null;
+  equitySource: "BROKER" | "CALCULATED" | "UNAVAILABLE";
   openPositionCount: number;
-  timestamp: string;
+  currency: "USD";
   positionsAreLiveGroundTruth: boolean;
+  timestamp: string;
 }
 
 export interface HermesPositionItem {
   instrument: string;
   side: "BUY" | "SELL" | "unknown";
   quantity: number | null;
+  units: number | null;
   entryPrice: number | null;
   currentPrice: number | null;
   unrealisedPnl: number | null;
+  pricingTimestamp: string | null;
+  pricingSource: "broker" | "unavailable";
   openedAt: string | null;
   provider: string;
   accountMode: string;
+  brokerPositionId: string | null;
 }
 
 export interface HermesPositionsData {

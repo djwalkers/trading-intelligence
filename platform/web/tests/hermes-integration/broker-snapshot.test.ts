@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getBrokerSnapshot, resetInstrumentIdToSymbolCacheForTests } from "@/lib/hermes-integration/broker-snapshot";
 
 // Never calls a real broker/API — BrokerFactory.create is mocked below so this suite exercises
-// only broker-snapshot.ts's own mapping/error-handling logic, deterministically and offline.
+// only broker-snapshot.ts's own mapping/pricing/error-handling logic, deterministically and
+// offline.
 const mockCreate = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-execution/broker-factory", () => ({
   BrokerFactory: { create: mockCreate },
@@ -40,7 +41,7 @@ describe("getBrokerSnapshot", () => {
     expect(result).toEqual({ ok: false, message: "eToro connection refused" });
   });
 
-  it("uses live getRawPortfolio() ground truth when the broker exposes it (eToro-demo)", async () => {
+  it("uses live getRawPortfolio() ground truth when the broker exposes it (eToro-demo), with no rate-quoting capability", async () => {
     mockGetConfig.mockReturnValue(BASE_CONFIG);
     mockCreate.mockResolvedValue({
       getAccount: () => ({ cashBalance: 1234.5, startingCashBalance: 1234.5 }),
@@ -51,7 +52,15 @@ describe("getBrokerSnapshot", () => {
         clientPortfolio: {
           credit: 1234.5,
           positions: [
-            { instrumentID: 1001, isBuy: true, amount: 50, openRate: 100, openDateTime: "2026-01-01T00:00:00.000Z" },
+            {
+              positionID: 5001,
+              instrumentID: 1001,
+              isBuy: true,
+              amount: 50,
+              units: 2,
+              openRate: 100,
+              openDateTime: "2026-01-01T00:00:00.000Z",
+            },
             { instrumentID: 1002, isBuy: false, amount: 20 },
           ],
         },
@@ -63,28 +72,41 @@ describe("getBrokerSnapshot", () => {
     if (!result.ok) return;
     expect(result.positionsAreLiveGroundTruth).toBe(true);
     expect(result.cash).toBe(1234.5);
+    // No getRate() on this fake broker at all — every position must come back genuinely
+    // unavailable for pricing, never a fabricated/zero price, and the total must be marked
+    // incomplete rather than silently summing to a partial (here: zero-position) total.
+    expect(result.unrealisedPnlComplete).toBe(false);
+    expect(result.unrealisedPnlUnavailableReason).toBe("The connected broker does not support live rate quoting.");
     expect(result.positions).toEqual([
       {
         instrument: "1001",
         side: "BUY",
         quantity: 50,
+        units: 2,
         entryPrice: 100,
         currentPrice: null,
         unrealisedPnl: null,
+        pricingTimestamp: null,
+        pricingSource: "unavailable",
         openedAt: "2026-01-01T00:00:00.000Z",
         provider: "etoro-demo",
         accountMode: "demo",
+        brokerPositionId: "5001",
       },
       {
         instrument: "1002",
         side: "SELL",
         quantity: 20,
+        units: null,
         entryPrice: null,
         currentPrice: null,
         unrealisedPnl: null,
+        pricingTimestamp: null,
+        pricingSource: "unavailable",
         openedAt: null,
         provider: "etoro-demo",
         accountMode: "demo",
+        brokerPositionId: null,
       },
     ]);
   });
@@ -107,12 +129,16 @@ describe("getBrokerSnapshot", () => {
         instrument: "BTC",
         side: "BUY",
         quantity: 1,
+        units: 1,
         entryPrice: 100,
         currentPrice: null,
         unrealisedPnl: null,
+        pricingTimestamp: null,
+        pricingSource: "unavailable",
         openedAt: "2026-01-01T00:00:00.000Z",
         provider: "local",
         accountMode: "paper",
+        brokerPositionId: null,
       },
     ]);
   });
@@ -198,5 +224,166 @@ describe("getBrokerSnapshot", () => {
 
     const result = await getBrokerSnapshot();
     expect(result).toEqual({ ok: false, message: "eToro portfolio read timed out" });
+  });
+
+  // Missing-financial-data fix — unrealised P/L computation. A broker that also implements
+  // getRate() (EtoroDemoBroker's real shape) is priced position-by-position, using the position's
+  // TRUE underlying units (never the notional/margin `amount`) and the side-correct quote (bid for
+  // a long/BUY position, ask for a short/SELL position — the price that would actually be realised
+  // by closing right now).
+  describe("unrealised P/L — live pricing", () => {
+    function makeQuotingBroker(
+      positions: Array<{ positionID?: number; instrumentID: number; isBuy?: boolean; amount?: number; units?: number; openRate?: number }>,
+      rates: Record<string, { bid: number; ask: number }>,
+      cashBalance = 1000,
+    ) {
+      const getRate = vi.fn(async (instrument: string) => {
+        const rate = rates[instrument];
+        if (!rate) throw new Error(`no fixture rate for ${instrument}`);
+        return rate;
+      });
+      return {
+        getAccount: () => ({ cashBalance, startingCashBalance: cashBalance }),
+        getOpenPositions: () => [],
+        getRawPortfolio: async () => ({ clientPortfolio: { credit: cashBalance, positions } }),
+        getRate,
+      };
+    }
+
+    it("computes a long (BUY) position's unrealised P/L from the BID price and true units, not the notional amount", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      // amount (notional) is 500 — a leveraged figure deliberately different from units x price, to
+      // prove the calculation uses `units` (2), never `amount`.
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker(
+          [{ instrumentID: 1001, isBuy: true, amount: 500, units: 2, openRate: 100 }],
+          { "1001": { bid: 110, ask: 111 } },
+        ),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.unrealisedPnlComplete).toBe(true);
+      expect(result.unrealisedPnlUnavailableReason).toBeNull();
+      expect(result.positions[0]?.currentPrice).toBe(110);
+      expect(result.positions[0]?.pricingSource).toBe("broker");
+      expect(result.positions[0]?.unrealisedPnl).toBeCloseTo((110 - 100) * 2, 6);
+    });
+
+    it("computes a short (SELL) position's unrealised P/L from the ASK price", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker([{ instrumentID: 1002, isBuy: false, amount: 200, units: 5, openRate: 50 }], { "1002": { bid: 45, ask: 48 } }),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.currentPrice).toBe(48);
+      expect(result.positions[0]?.unrealisedPnl).toBeCloseTo((50 - 48) * 5, 6);
+    });
+
+    it("aggregates multiple positions' unrealised P/L correctly when all are priced", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker(
+          [
+            { instrumentID: 1001, isBuy: true, amount: 500, units: 2, openRate: 100 },
+            { instrumentID: 1002, isBuy: false, amount: 200, units: 5, openRate: 50 },
+          ],
+          { "1001": { bid: 110, ask: 111 }, "1002": { bid: 45, ask: 48 } },
+        ),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.unrealisedPnlComplete).toBe(true);
+      const total = result.positions.reduce((sum, p) => sum + (p.unrealisedPnl ?? 0), 0);
+      expect(total).toBeCloseTo((110 - 100) * 2 + (50 - 48) * 5, 6);
+    });
+
+    it("marks the total incomplete (never silently zero/partial) when one position's live price cannot be fetched", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker(
+          [
+            { instrumentID: 1001, isBuy: true, amount: 500, units: 2, openRate: 100 },
+            { instrumentID: 1002, isBuy: false, amount: 200, units: 5, openRate: 50 }, // no fixture rate below — getRate() throws
+          ],
+          { "1001": { bid: 110, ask: 111 } },
+        ),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.unrealisedPnlComplete).toBe(false);
+      expect(result.unrealisedPnlUnavailableReason).toContain("1002");
+      const priced = result.positions.find((p) => p.instrument === "1001");
+      const unpriced = result.positions.find((p) => p.instrument === "1002");
+      expect(priced?.pricingSource).toBe("broker");
+      expect(priced?.unrealisedPnl).not.toBeNull();
+      // The successfully-priced position's own figure is still reported — only the AGGREGATE is
+      // marked incomplete — but the unpriced one is never defaulted to zero.
+      expect(unpriced?.pricingSource).toBe("unavailable");
+      expect(unpriced?.currentPrice).toBeNull();
+      expect(unpriced?.unrealisedPnl).toBeNull();
+    });
+
+    it("treats a position with no known units as unpriceable — never silently treated as zero", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker([{ instrumentID: 1001, isBuy: true, amount: 500, openRate: 100 }], { "1001": { bid: 110, ask: 111 } }),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.unrealisedPnlComplete).toBe(false);
+      expect(result.positions[0]?.pricingSource).toBe("unavailable");
+      expect(result.positions[0]?.unrealisedPnl).toBeNull();
+    });
+
+    it("treats an ambiguous ('unknown') side as unpriceable", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker([{ instrumentID: 1001, amount: 500, units: 2, openRate: 100 }], { "1001": { bid: 110, ask: 111 } }),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.side).toBe("unknown");
+      expect(result.positions[0]?.pricingSource).toBe("unavailable");
+      expect(result.unrealisedPnlComplete).toBe(false);
+    });
+
+    it("unrealisedPnlComplete is vacuously true when there are no open positions at all", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(makeQuotingBroker([], {}));
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.unrealisedPnlComplete).toBe(true);
+      expect(result.unrealisedPnlUnavailableReason).toBeNull();
+      expect(result.positions).toEqual([]);
+    });
+
+    it("exposes the broker's own positionID as brokerPositionId, stringified", async () => {
+      mockGetConfig.mockReturnValue(BASE_CONFIG);
+      mockCreate.mockResolvedValue(
+        makeQuotingBroker([{ positionID: 42, instrumentID: 1001, isBuy: true, amount: 500, units: 2, openRate: 100 }], {
+          "1001": { bid: 110, ask: 111 },
+        }),
+      );
+
+      const result = await getBrokerSnapshot();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.positions[0]?.brokerPositionId).toBe("42");
+    });
   });
 });

@@ -167,6 +167,25 @@ describe("InMemoryTradeLifecycleStore — list/listOpen/listClosed", () => {
     expect(await store.listClosed()).toEqual([]);
     expect((await store.list()).map((r) => r.id)).toEqual(["a"]);
   });
+
+  // Missing-financial-data fix. Realised P/L must never fold an unreconciled closure in as if it
+  // were a confirmed $0 trade — but the count of how many were excluded still matters, so
+  // listUnreconciled() exists as its own, explicit query rather than a byproduct of list().
+  it("listUnreconciled() returns CLOSED_UNRECONCILED records only", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "OPEN", { symbol: "BTC" }));
+    await store.create(makeRecord("b", "CLOSED", { symbol: "ETH" }));
+    await store.create(makeRecord("c", "CLOSED_UNRECONCILED", { symbol: "SOL" }));
+    await store.create(makeRecord("d", "EXECUTION_ABANDONED", { symbol: "XRP" }));
+    const unreconciled = await store.listUnreconciled();
+    expect(unreconciled.map((r) => r.id)).toEqual(["c"]);
+  });
+
+  it("listUnreconciled() returns an empty array when there are none", async () => {
+    const store = new InMemoryTradeLifecycleStore();
+    await store.create(makeRecord("a", "CLOSED"));
+    expect(await store.listUnreconciled()).toEqual([]);
+  });
 });
 
 // Restart-Resilient Autonomy Phase — reconciliation hardening. Mirrors migration 0026's own two

@@ -4,6 +4,7 @@ import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import { BrokerFactory } from "@/lib/hermes-execution/broker-factory";
 import type { PaperBroker } from "@/lib/hermes-execution/paper-broker";
 import { hasInstrumentResolution } from "@/lib/hermes-execution/runtime/position-reconciliation";
+import { calculateUnrealizedPnl } from "@/lib/hermes-execution/trade-lifecycle/calculations";
 import { logger } from "@/lib/logger/logger";
 
 // Hermes Integration API v1. Reuses the existing broker abstraction (BrokerFactory + the PaperBroker
@@ -17,6 +18,15 @@ import { logger } from "@/lib/logger/logger";
 // writing the same JSON file is a genuine corruption risk this API must never introduce. This
 // endpoint only ever needs a broker connection's own live response, never to contribute an entry to
 // that file — see docs/hermes-integration-api.md's "Architecture" section.
+//
+// Missing-financial-data fix. Unrealised P/L is now computed HERE, once, from broker-ground-truth
+// data only — never from a locally-tracked lifecycle record's own quantity/sizingMode (which, for
+// eToro, represents the NOTIONAL/invested amount, not the actual leveraged unit exposure a correct
+// P/L calculation needs — see EtoroPosition's own `units` field, confirmed present on eToro's real
+// position response but previously not modelled by this file's own narrower RawPortfolioBroker
+// type). Both /api/hermes/portfolio and /api/hermes/positions call this SAME function, so both see
+// one coherent snapshot (one broker connection, one set of live rates, one timestamp) rather than
+// two independently-fetched, potentially-mismatched prices.
 
 export interface HermesPositionDto {
   /** eToro exposes no human-readable symbol on a raw position (only a numeric instrumentID). Main
@@ -27,17 +37,42 @@ export interface HermesPositionDto {
    * resolution capability at all) — see this module's own EtoroDemoBroker branch below. */
   instrument: string;
   side: "BUY" | "SELL" | "unknown";
+  /** The notional/invested amount in the account's own currency (eToro's own "amount" field, or a
+   * non-eToro broker's own quantity where that IS the true unit count) — the pre-existing "display
+   * value" concept used for `investedValue` aggregation. NEVER used for P/L math — see `units`. */
   quantity: number | null;
+  /** Missing-financial-data fix. The actual quantity of the underlying instrument this position
+   * represents (eToro's own "units" field) — the CORRECT figure for unrealised P/L math, since it
+   * already reflects any leverage (unlike `quantity`/"amount" above, which is the pre-leverage
+   * invested/margin amount). For a broker without a raw ground-truth read (the fallback branch
+   * below), `quantity` already IS the true unit count, so `units` simply equals it there. Null only
+   * when genuinely unknown. */
+  units: number | null;
   entryPrice: number | null;
-  /** Not available without an additional live rates lookup per position (eToro's raw portfolio
-   * response carries no current price) — always `null`, never fabricated. See "Known limitations"
-   * in docs/hermes-integration-api.md. */
-  currentPrice: null;
-  /** Undeterminable without `currentPrice` above — always `null` for the same reason. */
-  unrealisedPnl: null;
+  /** Missing-financial-data fix. A genuinely fetched live price for this position's own instrument
+   * — the bid for a BUY/long position, the ask for a SELL/short position (the side that would
+   * actually be realised by closing right now — matches market-decision-runner.ts's own
+   * closing-price convention). Null when a live price could not be fetched/mapped for this specific
+   * position — see `pricingSource`; never fabricated or carried over from a stale read. */
+  currentPrice: number | null;
+  /** calculateUnrealizedPnl("UNITS", side, entryPrice, currentPrice, units) — the exact formula this
+   * codebase already trusts for a CLOSED trade's own realised P/L, applied here with the live
+   * current price standing in for an eventual exit price. Null whenever entryPrice/units/
+   * currentPrice aren't ALL available for this position — never partially estimated. */
+  unrealisedPnl: number | null;
+  /** When `currentPrice`/`unrealisedPnl` were computed — always the same instant across every
+   * position in one snapshot (one batch of live rate fetches, not one per position over time). */
+  pricingTimestamp: string | null;
+  /** "broker" — a genuine live rate fetch from the connected broker succeeded. "unavailable" — it
+   * did not (fetch failure, unmapped instrument, or a broker with no rate-fetching capability at
+   * all) — never conflated with a successful zero-valued fetch. */
+  pricingSource: "broker" | "unavailable";
   openedAt: string | null;
   provider: string;
   accountMode: string;
+  /** The broker's own durable position identifier — safe for internal dashboard display (never a
+   * credential, never a broker/account secret). Null when the broker doesn't expose one. */
+  brokerPositionId: string | null;
 }
 
 interface HermesBrokerSnapshotOk {
@@ -54,6 +89,14 @@ interface HermesBrokerSnapshotOk {
    * state. See the `hasRawPortfolio` branch below.
    */
   positionsAreLiveGroundTruth: boolean;
+  /** Missing-financial-data fix. True when EVERY open position in `positions` above was
+   * successfully priced (pricingSource: "broker" on all of them) — the only condition under which
+   * summing `positions[].unrealisedPnl` is a genuinely complete total, never a partial one silently
+   * presented as whole. True (vacuously) when there are no open positions at all. */
+  unrealisedPnlComplete: boolean;
+  /** Non-null exactly when `unrealisedPnlComplete` is false — names which instrument(s) could not
+   * be priced, so a caller/reader can see WHY the total is incomplete, never just that it is. */
+  unrealisedPnlUnavailableReason: string | null;
 }
 
 interface HermesBrokerSnapshotFailure {
@@ -73,8 +116,15 @@ interface RawPortfolioBroker {
         instrumentID: number;
         isBuy?: boolean;
         amount?: number;
+        /** Missing-financial-data fix. Confirmed present on eToro's real position response
+         * (EtoroPosition's own doc comment) — simply not previously modelled by this narrower,
+         * hand-picked type. The actual underlying-asset quantity this position represents, already
+         * reflecting any leverage — see HermesPositionDto.units's own doc comment for why this
+         * (never `amount`) is the correct figure for P/L math. */
+        units?: number;
         openRate?: number;
         openDateTime?: string;
+        positionID?: number;
       }>;
       credit: number;
     };
@@ -83,6 +133,19 @@ interface RawPortfolioBroker {
 
 function hasRawPortfolio(broker: PaperBroker): broker is PaperBroker & RawPortfolioBroker {
   return typeof (broker as Partial<RawPortfolioBroker>).getRawPortfolio === "function";
+}
+
+/** Missing-financial-data fix. The minimal live-quote capability this module needs — deliberately
+ * the same narrow shape live-market-data-provider.ts's own RateSource already declares (structurally
+ * compatible, EtoroDemoBroker.getRate satisfies both with no adaptation), declared locally rather
+ * than imported to keep this file's own "narrowest shape needed, no concrete broker/provider import"
+ * convention consistent with hasRawPortfolio/hasInstrumentResolution above. */
+interface RateQuotingBroker {
+  getRate(instrument: string): Promise<{ bid: number; ask: number }>;
+}
+
+function hasRateQuoting(broker: unknown): broker is RateQuotingBroker {
+  return typeof (broker as Partial<RateQuotingBroker>).getRate === "function";
 }
 
 // Main Dashboard Hermes/eToro fix — instrument-ID-to-symbol mapping. eToro's own instrument search
@@ -126,6 +189,74 @@ export function resetInstrumentIdToSymbolCacheForTests(): void {
   instrumentIdToSymbolCache = undefined;
 }
 
+interface PricedPosition {
+  instrument: string;
+  side: "BUY" | "SELL" | "unknown";
+  units: number | null;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  unrealisedPnl: number | null;
+  pricingSource: "broker" | "unavailable";
+}
+
+/**
+ * Missing-financial-data fix. Prices every position in ONE pass — a single shared `pricingTimestamp`
+ * for the whole batch (requirement 7's own "one coherent snapshot," never one fetch per position
+ * spread over time) — and computes each one's own unrealised P/L via the exact same
+ * calculateUnrealizedPnl("UNITS", ...) formula (calculateRealisedPnl's own live-price sibling, with
+ * a live current price standing in for an eventual exit price). A position is left `pricingSource:
+ * "unavailable"` (never a guessed/zero/carried-over price) whenever its side is "unknown", its
+ * units/entryPrice are missing, the broker can't quote at all, or that specific instrument's own
+ * quote fetch fails — every such gap is reported, never silently absorbed into a total that then
+ * claims completeness it doesn't have.
+ */
+async function priceOpenPositions(
+  broker: PaperBroker,
+  positions: readonly Omit<PricedPosition, "currentPrice" | "unrealisedPnl" | "pricingSource">[],
+): Promise<{ priced: PricedPosition[]; complete: boolean; unavailableReason: string | null }> {
+  if (!hasRateQuoting(broker)) {
+    const priced = positions.map((position) => ({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" as const }));
+    return {
+      priced,
+      complete: positions.length === 0,
+      unavailableReason: positions.length === 0 ? null : "The connected broker does not support live rate quoting.",
+    };
+  }
+
+  const priced: PricedPosition[] = [];
+  const unpriced: string[] = [];
+
+  for (const position of positions) {
+    if (position.side === "unknown" || position.units === null || position.entryPrice === null) {
+      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" });
+      unpriced.push(position.instrument);
+      continue;
+    }
+    try {
+      const rate = await broker.getRate(position.instrument);
+      // Matches market-decision-runner.ts's own closing-price convention: a BUY/long position is
+      // realised by SELLING (at bid); a SELL/short position is realised by BUYING BACK (at ask).
+      const currentPrice = position.side === "BUY" ? rate.bid : rate.ask;
+      const unrealisedPnl = calculateUnrealizedPnl("UNITS", position.side, position.entryPrice, currentPrice, position.units);
+      priced.push({ ...position, currentPrice, unrealisedPnl, pricingSource: "broker" });
+    } catch (error) {
+      logger.warn("Hermes Integration API could not fetch a live rate for an open position — its unrealised P/L will be unavailable", {
+        component: "hermes-integration-broker-snapshot",
+        instrument: position.instrument,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      priced.push({ ...position, currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" });
+      unpriced.push(position.instrument);
+    }
+  }
+
+  return {
+    priced,
+    complete: unpriced.length === 0,
+    unavailableReason: unpriced.length === 0 ? null : `Could not fetch a live price for: ${unpriced.join(", ")}.`,
+  };
+}
+
 export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   let config;
   try {
@@ -155,23 +286,54 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   }
 
   const account = broker.getAccount();
+  const pricingTimestamp = new Date().toISOString();
 
   if (hasRawPortfolio(broker)) {
     try {
       const raw = await broker.getRawPortfolio();
       const idToSymbol = await resolveInstrumentIdMap(broker, config.hermesAgent.instrumentUniverse);
-      const positions: HermesPositionDto[] = raw.clientPortfolio.positions.map((position) => ({
+      const basePositions = raw.clientPortfolio.positions.map((position) => ({
         instrument: idToSymbol.get(position.instrumentID) ?? String(position.instrumentID),
-        side: position.isBuy === undefined ? "unknown" : position.isBuy ? "BUY" : "SELL",
-        quantity: position.amount ?? null,
+        side: (position.isBuy === undefined ? "unknown" : position.isBuy ? "BUY" : "SELL") as "BUY" | "SELL" | "unknown",
+        units: position.units ?? null,
         entryPrice: position.openRate ?? null,
-        currentPrice: null,
-        unrealisedPnl: null,
+        quantity: position.amount ?? null,
         openedAt: position.openDateTime ?? null,
+        brokerPositionId: position.positionID !== undefined ? String(position.positionID) : null,
+      }));
+
+      const { priced, complete, unavailableReason } = await priceOpenPositions(broker, basePositions);
+      const pricedByInstrument = new Map(priced.map((p, index) => [index, p]));
+
+      const positions: HermesPositionDto[] = basePositions.map((base, index) => {
+        const price = pricedByInstrument.get(index)!;
+        return {
+          instrument: base.instrument,
+          side: base.side,
+          quantity: base.quantity,
+          units: base.units,
+          entryPrice: base.entryPrice,
+          currentPrice: price.currentPrice,
+          unrealisedPnl: price.unrealisedPnl,
+          pricingTimestamp: price.pricingSource === "broker" ? pricingTimestamp : null,
+          pricingSource: price.pricingSource,
+          openedAt: base.openedAt,
+          provider,
+          accountMode,
+          brokerPositionId: base.brokerPositionId,
+        };
+      });
+
+      return {
+        ok: true,
         provider,
         accountMode,
-      }));
-      return { ok: true, provider, accountMode, cash: account.cashBalance, positions, positionsAreLiveGroundTruth: true };
+        cash: account.cashBalance,
+        positions,
+        positionsAreLiveGroundTruth: true,
+        unrealisedPnlComplete: complete,
+        unrealisedPnlUnavailableReason: unavailableReason,
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to read the broker's live portfolio.";
       logger.warn("Hermes Integration API could not read the live broker portfolio", {
@@ -187,16 +349,46 @@ export async function getBrokerSnapshot(): Promise<HermesBrokerSnapshot> {
   // positions opened by a separate long-running runtime process. Prototype V1 is fixed to
   // eToro-demo (the branch above); this path exists for completeness, not for the current
   // deployment, and is documented as a known limitation rather than silently trusted.
-  const positions: HermesPositionDto[] = broker.getOpenPositions().map((position) => ({
+  const fallbackBase = broker.getOpenPositions().map((position) => ({
     instrument: position.instrument,
-    side: position.side,
-    quantity: position.quantity,
+    side: position.side as "BUY" | "SELL" | "unknown",
+    units: position.quantity, // a non-eToro broker's own quantity already IS the true unit count.
     entryPrice: position.entryPrice,
-    currentPrice: null,
-    unrealisedPnl: null,
+    quantity: position.quantity,
     openedAt: position.entryTimestamp,
+    brokerPositionId: position.brokerPositionId ?? null,
+  }));
+  const { priced: fallbackPriced, complete: fallbackComplete, unavailableReason: fallbackUnavailableReason } = await priceOpenPositions(
+    broker,
+    fallbackBase,
+  );
+  const fallbackPricedByIndex = new Map(fallbackPriced.map((p, index) => [index, p]));
+  const positions: HermesPositionDto[] = fallbackBase.map((base, index) => {
+    const price = fallbackPricedByIndex.get(index)!;
+    return {
+      instrument: base.instrument,
+      side: base.side,
+      quantity: base.quantity,
+      units: base.units,
+      entryPrice: base.entryPrice,
+      currentPrice: price.currentPrice,
+      unrealisedPnl: price.unrealisedPnl,
+      pricingTimestamp: price.pricingSource === "broker" ? pricingTimestamp : null,
+      pricingSource: price.pricingSource,
+      openedAt: base.openedAt,
+      provider,
+      accountMode,
+      brokerPositionId: base.brokerPositionId,
+    };
+  });
+  return {
+    ok: true,
     provider,
     accountMode,
-  }));
-  return { ok: true, provider, accountMode, cash: account.cashBalance, positions, positionsAreLiveGroundTruth: false };
+    cash: account.cashBalance,
+    positions,
+    positionsAreLiveGroundTruth: false,
+    unrealisedPnlComplete: fallbackComplete,
+    unrealisedPnlUnavailableReason: fallbackUnavailableReason,
+  };
 }

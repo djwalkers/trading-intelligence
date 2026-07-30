@@ -14,12 +14,16 @@ function makePosition(overrides: Partial<HermesPositionItem> = {}): HermesPositi
     instrument: "BTC",
     side: "BUY",
     quantity: 9.95,
+    units: 9.95,
     entryPrice: 64_208.29,
     currentPrice: null,
     unrealisedPnl: null,
+    pricingTimestamp: null,
+    pricingSource: "unavailable",
     openedAt: "2026-07-29T15:18:00.000Z",
     provider: "etoro-demo",
     accountMode: "demo",
+    brokerPositionId: null,
     ...overrides,
   };
 }
@@ -52,12 +56,23 @@ describe("HermesPositionsTable", () => {
     expect(screen.getByTestId("hermes-position-row")).toHaveTextContent("999999");
   });
 
-  it("shows 'Unavailable' for null currentPrice/unrealisedPnl — never £0.00 or $0.00", () => {
-    render(<HermesPositionsTable positions={[makePosition({ currentPrice: null, unrealisedPnl: null })]} />);
+  it("shows 'Unavailable' for a position whose live price could not be fetched — never £0.00 or $0.00", () => {
+    render(<HermesPositionsTable positions={[makePosition({ currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" })]} />);
     const row = screen.getByTestId("hermes-position-row");
     expect(row).toHaveTextContent("Unavailable");
     expect(row.textContent).not.toContain("$0.00");
     expect(row.textContent).not.toContain("£");
+  });
+
+  it("shows the real current price and unrealised P/L when the position was successfully priced", () => {
+    render(
+      <HermesPositionsTable
+        positions={[makePosition({ currentPrice: 65_000, unrealisedPnl: 78.71, pricingSource: "broker" })]}
+      />,
+    );
+    const row = screen.getByTestId("hermes-position-row");
+    expect(row).toHaveTextContent("$65,000.00");
+    expect(row).toHaveTextContent("$78.71");
   });
 
   it("renders multiple positions as multiple rows", () => {

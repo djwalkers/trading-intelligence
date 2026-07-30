@@ -17,10 +17,12 @@ export interface AuditLogReadResult {
   events: AuditEvent[];
   /**
    * `false` only when the file could not be read/parsed at all (a genuine I/O or corruption
-   * problem) — distinct from "read successfully but empty" (a runtime that has never started, or
-   * was very recently restarted — `JsonFileAuditTrail.createFresh()` truncates this file on every
-   * process start, so an empty-but-readable file is an expected, normal state, not an outage).
-   * Callers must report "unknown", never "zero"/"stopped", when this is false.
+   * problem) — distinct from "read successfully but empty" (a runtime that has genuinely never
+   * started yet, so no audit file has been written at all). Missing-financial-data fix: production's
+   * market-runtime.ts loads this file via `JsonFileAuditTrail.loadExisting()`, not `createFresh()`,
+   * so the file itself IS durable across restarts — an empty-but-readable file here means "no
+   * history has ever been recorded," not "was just truncated by a restart." Callers must report
+   * "unknown", never "zero"/"stopped", when this is false.
    */
   available: boolean;
 }

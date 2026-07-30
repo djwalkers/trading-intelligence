@@ -198,6 +198,19 @@ describe("SupabaseTradeLifecycleStore — user scoping and persistence", () => {
     expect(builder.eq).toHaveBeenCalledWith("status", "CLOSED");
   });
 
+  // Missing-financial-data fix. Realised P/L aggregation (GET /api/hermes/portfolio) must be able
+  // to count unreconciled closures separately from confirmed-closed ones — never conflating the two.
+  it("listUnreconciled() filters by status = CLOSED_UNRECONCILED scoped to the userId", async () => {
+    const { client, builder } = makeFakeClient({ data: [makeRow({ status: "CLOSED_UNRECONCILED" })], error: null });
+    const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+    const results = await store.listUnreconciled();
+
+    expect(builder.eq).toHaveBeenCalledWith("user_id", USER_ID);
+    expect(builder.eq).toHaveBeenCalledWith("status", "CLOSED_UNRECONCILED");
+    expect(results).toHaveLength(1);
+  });
+
   it("update() throws when no row was updated (unknown record, fails closed rather than silently no-op-ing)", async () => {
     const { client } = makeFakeClient({ data: null, error: null, count: 0 });
     const store = new SupabaseTradeLifecycleStore(client, USER_ID);

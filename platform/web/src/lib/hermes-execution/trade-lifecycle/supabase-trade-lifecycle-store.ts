@@ -281,4 +281,14 @@ export class SupabaseTradeLifecycleStore implements TradeLifecycleStore {
     if (error) throw toPersistenceError(error);
     return ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
   }
+
+  async listUnreconciled(): Promise<TradeLifecycleRecord[]> {
+    const { data, error } = await this.client
+      .from("trade_lifecycle_records")
+      .select("*")
+      .eq("user_id", this.userId)
+      .eq("status", "CLOSED_UNRECONCILED");
+    if (error) throw toPersistenceError(error);
+    return ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
+  }
 }

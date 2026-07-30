@@ -10,13 +10,47 @@ const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 const mockGetBrokerSnapshot = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-integration/broker-snapshot", () => ({ getBrokerSnapshot: mockGetBrokerSnapshot }));
 
-const mockReadAuditLog = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/hermes-integration/audit-log-reader", () => ({ readHermesRuntimeAuditLog: mockReadAuditLog }));
+const { getServiceRoleClientMock, buildAnalysisPersistenceConfigMock, listClosedMock, listUnreconciledMock } = vi.hoisted(() => ({
+  getServiceRoleClientMock: vi.fn(),
+  buildAnalysisPersistenceConfigMock: vi.fn(),
+  listClosedMock: vi.fn(),
+  listUnreconciledMock: vi.fn(),
+}));
 
-import { GET } from "@/app/api/hermes/portfolio/route";
+vi.mock("@/lib/supabase/service-role-client", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
+vi.mock("@/lib/hermes-execution/analysis/analysis-persistence-config", () => ({
+  buildAnalysisPersistenceConfig: buildAnalysisPersistenceConfigMock,
+}));
+vi.mock("@/lib/hermes-execution/trade-lifecycle/supabase-trade-lifecycle-store", () => ({
+  // A `function` expression, not an arrow function — the route calls `new SupabaseTradeLifecycleStore(...)`.
+  SupabaseTradeLifecycleStore: vi.fn().mockImplementation(function SupabaseTradeLifecycleStore() {
+    return { listClosed: listClosedMock, listUnreconciled: listUnreconciledMock };
+  }),
+}));
+
+const { GET } = await import("@/app/api/hermes/portfolio/route");
 
 function makeRequest(): NextRequest {
   return new NextRequest("http://127.0.0.1:3000/api/hermes/portfolio", { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+}
+
+function makePosition(overrides: Record<string, unknown> = {}) {
+  return {
+    instrument: "1001",
+    side: "BUY",
+    quantity: 50,
+    units: 2,
+    entryPrice: 100,
+    currentPrice: 110,
+    unrealisedPnl: 20,
+    pricingTimestamp: "2026-01-01T00:00:00.000Z",
+    pricingSource: "broker",
+    openedAt: null,
+    provider: "etoro-demo",
+    accountMode: "demo",
+    brokerPositionId: "5001",
+    ...overrides,
+  };
 }
 
 describe("GET /api/hermes/portfolio", () => {
@@ -25,18 +59,25 @@ describe("GET /api/hermes/portfolio", () => {
     process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
     resetHermesIntegrationConfigCacheForTests();
     vi.clearAllMocks();
+
     mockGetBrokerSnapshot.mockResolvedValue({
       ok: true,
       provider: "etoro-demo",
       accountMode: "demo",
       cash: 900,
-      positions: [{ instrument: "1001", side: "BUY", quantity: 50, entryPrice: 100, currentPrice: null, unrealisedPnl: null, openedAt: null, provider: "etoro-demo", accountMode: "demo" }],
+      positions: [makePosition()],
       positionsAreLiveGroundTruth: true,
+      unrealisedPnlComplete: true,
+      unrealisedPnlUnavailableReason: null,
     });
-    mockReadAuditLog.mockResolvedValue({
-      events: [{ timestamp: "2026-01-01T00:00:00.000Z", eventType: "TRADE_CLOSED", executionRunId: "run-1", details: { realisedPnl: 25 } }],
-      available: true,
-    });
+
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: true, ownerUserId: "owner-1" });
+    getServiceRoleClientMock.mockReturnValue({});
+    listClosedMock.mockResolvedValue([
+      { id: "t1", status: "CLOSED", realisedPnl: 25 },
+      { id: "t2", status: "CLOSED", realisedPnl: -5 },
+    ]);
+    listUnreconciledMock.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -47,7 +88,7 @@ describe("GET /api/hermes/portfolio", () => {
     resetHermesIntegrationConfigCacheForTests();
   });
 
-  it("returns cash, investedValue, and realisedPnl in the standard success envelope", async () => {
+  it("returns cash, investedValue, realisedPnl (durable, aggregated), unrealisedPnl, and calculated equity", async () => {
     const response = await GET(makeRequest());
     expect(response.status).toBe(200);
     const body = await response.json();
@@ -56,18 +97,105 @@ describe("GET /api/hermes/portfolio", () => {
       provider: "etoro-demo",
       cash: 900,
       investedValue: 50,
-      realisedPnl: 25,
-      unrealisedPnl: null,
-      equity: null,
+      realisedPnl: 20, // 25 + (-5)
+      realisedTradeCount: 2,
+      unreconciledClosedTradeCount: 0,
+      unrealisedPnl: 20,
+      unrealisedPnlComplete: true,
+      unrealisedPnlUnavailableReason: null,
+      equity: 900 + 50 + 20,
+      equitySource: "CALCULATED",
       openPositionCount: 1,
+      currency: "USD",
+      positionsAreLiveGroundTruth: true,
     });
+    expect(typeof body.data.realisedPnlScope).toBe("string");
+    expect(body.data.realisedPnlScope).not.toContain("audit log is not durable");
   });
 
-  it("returns realisedPnl: null when the audit log is unavailable, never fabricating zero", async () => {
-    mockReadAuditLog.mockResolvedValue({ events: [], available: false });
+  it("excludes CLOSED_UNRECONCILED trades from the realised P/L sum but reports their count separately", async () => {
+    listClosedMock.mockResolvedValue([{ id: "t1", status: "CLOSED", realisedPnl: 25 }]);
+    listUnreconciledMock.mockResolvedValue([{ id: "t2", status: "CLOSED_UNRECONCILED" }, { id: "t3", status: "CLOSED_UNRECONCILED" }]);
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.realisedPnl).toBe(25);
+    expect(body.data.realisedTradeCount).toBe(1);
+    expect(body.data.unreconciledClosedTradeCount).toBe(2);
+  });
+
+  it("never counts a CLOSED record with no confirmed realisedPnl as a zero-P/L trade", async () => {
+    listClosedMock.mockResolvedValue([
+      { id: "t1", status: "CLOSED", realisedPnl: 25 },
+      { id: "t2", status: "CLOSED" }, // realisedPnl missing — must be excluded, never treated as 0
+    ]);
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.realisedPnl).toBe(25);
+    expect(body.data.realisedTradeCount).toBe(1);
+  });
+
+  it("returns realisedPnl: null with a clear scope message when trade lifecycle persistence is not configured", async () => {
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: false, ownerUserId: undefined });
     const response = await GET(makeRequest());
     const body = await response.json();
     expect(body.data.realisedPnl).toBeNull();
+    expect(body.data.realisedTradeCount).toBe(0);
+    expect(body.data.unreconciledClosedTradeCount).toBe(0);
+    expect(body.data.realisedPnlScope).toContain("not configured");
+  });
+
+  it("returns realisedPnl: null (never throws) when the trade lifecycle store query fails", async () => {
+    listClosedMock.mockRejectedValue(new Error("connection reset"));
+    const response = await GET(makeRequest());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.data.realisedPnl).toBeNull();
+    expect(body.data.realisedPnlScope).toContain("connection reset");
+  });
+
+  it("reports unrealisedPnl: null and equity: UNAVAILABLE when the broker snapshot's own total is incomplete", async () => {
+    mockGetBrokerSnapshot.mockResolvedValue({
+      ok: true,
+      provider: "etoro-demo",
+      accountMode: "demo",
+      cash: 900,
+      positions: [makePosition({ currentPrice: null, unrealisedPnl: null, pricingSource: "unavailable" })],
+      positionsAreLiveGroundTruth: true,
+      unrealisedPnlComplete: false,
+      unrealisedPnlUnavailableReason: "Could not fetch a live price for: 1001.",
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.unrealisedPnl).toBeNull();
+    expect(body.data.unrealisedPnlComplete).toBe(false);
+    expect(body.data.unrealisedPnlUnavailableReason).toBe("Could not fetch a live price for: 1001.");
+    expect(body.data.equity).toBeNull();
+    expect(body.data.equitySource).toBe("UNAVAILABLE");
+  });
+
+  it("aggregates unrealisedPnl across multiple positions correctly", async () => {
+    mockGetBrokerSnapshot.mockResolvedValue({
+      ok: true,
+      provider: "etoro-demo",
+      accountMode: "demo",
+      cash: 900,
+      positions: [
+        makePosition({ instrument: "1001", quantity: 50, unrealisedPnl: 20 }),
+        makePosition({ instrument: "1002", quantity: 30, unrealisedPnl: -8 }),
+      ],
+      positionsAreLiveGroundTruth: true,
+      unrealisedPnlComplete: true,
+      unrealisedPnlUnavailableReason: null,
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.investedValue).toBe(80);
+    expect(body.data.unrealisedPnl).toBe(12);
+    expect(body.data.equity).toBe(900 + 80 + 12);
   });
 
   it("returns 503 when the broker is unavailable", async () => {

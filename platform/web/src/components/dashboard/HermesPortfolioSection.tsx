@@ -98,21 +98,36 @@ export function HermesPortfolioSection() {
               <StatCard
                 label="Realised P/L"
                 value={formatMaybeBrokerAmount(portfolio.realisedPnl)}
-                subValueClassName={portfolio.realisedPnl !== null ? plToneClass(portfolio.realisedPnl) : undefined}
-                sublabel={portfolio.realisedPnlScope}
+                valueClassName={portfolio.realisedPnl !== null ? plToneClass(portfolio.realisedPnl) : undefined}
+                sublabel={
+                  portfolio.unreconciledClosedTradeCount > 0
+                    ? `${portfolio.realisedPnlScope} — ${portfolio.unreconciledClosedTradeCount} closed trade(s) excluded (unreconciled, exit price unknown)`
+                    : portfolio.realisedPnlScope
+                }
               />
+              {/* Requirement 6: an amount only when the total is genuinely COMPLETE — "Unavailable"
+                  plus its reason otherwise, never a silently-partial sum presented as whole. */}
               <StatCard
                 label="Unrealised P/L"
-                value={formatMaybeBrokerAmount(portfolio.unrealisedPnl)}
-                subValueClassName={portfolio.unrealisedPnl !== null ? plToneClass(portfolio.unrealisedPnl) : undefined}
+                value={portfolio.unrealisedPnlComplete ? formatMaybeBrokerAmount(portfolio.unrealisedPnl) : "Unavailable"}
+                valueClassName={
+                  portfolio.unrealisedPnlComplete && portfolio.unrealisedPnl !== null ? plToneClass(portfolio.unrealisedPnl) : undefined
+                }
+                sublabel={!portfolio.unrealisedPnlComplete ? (portfolio.unrealisedPnlUnavailableReason ?? undefined) : undefined}
               />
-              {/* Requirement 3: equity is shown ONLY when the API genuinely supplies a value — never
-                  calculated here (e.g. cash + investedValue), which would be an invented figure the
-                  API itself has not confirmed. */}
-              {portfolio.equity !== null ? (
+              {/* Requirement 3/6: equity is either genuinely broker-supplied, internally calculated
+                  (clearly labelled "Calculated equity" — never presented as if the broker supplied
+                  it), or unavailable — never invented, never mislabelled. */}
+              {portfolio.equitySource === "BROKER" ? (
                 <StatCard label="Equity" value={formatMaybeBrokerAmount(portfolio.equity)} />
+              ) : portfolio.equitySource === "CALCULATED" ? (
+                <StatCard
+                  label="Calculated equity"
+                  value={formatMaybeBrokerAmount(portfolio.equity)}
+                  sublabel="Cash + invested value + unrealised P/L"
+                />
               ) : (
-                <StatCard label="Equity" value="Unavailable" sublabel="Not supplied by the broker API" />
+                <StatCard label="Equity" value="Unavailable" sublabel="Requires a complete unrealised P/L" />
               )}
             </div>
 

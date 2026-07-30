@@ -17,10 +17,16 @@ const PORTFOLIO_BODY = {
     cash: 77_191.35,
     investedValue: 14.96,
     realisedPnl: -0.06,
-    realisedPnlScope: "since last runtime start",
+    realisedPnlScope: "Since trade lifecycle tracking began — aggregated from durable, Supabase-backed trade lifecycle records.",
+    realisedTradeCount: 3,
+    unreconciledClosedTradeCount: 0,
     unrealisedPnl: null,
+    unrealisedPnlComplete: false,
+    unrealisedPnlUnavailableReason: "Could not fetch a live price for: BTC.",
     equity: null,
+    equitySource: "UNAVAILABLE",
     openPositionCount: 1,
+    currency: "USD",
     timestamp: "2026-07-29T21:00:00.000Z",
     positionsAreLiveGroundTruth: true,
   },
@@ -33,12 +39,16 @@ const POSITIONS_BODY = {
         instrument: "BTC",
         side: "BUY",
         quantity: 9.95,
+        units: 9.95,
         entryPrice: 64_208.29,
         currentPrice: null,
         unrealisedPnl: null,
+        pricingTimestamp: null,
+        pricingSource: "unavailable",
         openedAt: "2026-07-29T15:18:00.000Z",
         provider: "etoro-demo",
         accountMode: "demo",
+        brokerPositionId: null,
       },
     ],
     count: 1,
@@ -139,6 +149,39 @@ describe("HermesPortfolioSection", () => {
     const kpis = screen.getByTestId("hermes-portfolio-kpis");
     expect(kpis).toHaveTextContent("Unavailable");
     expect(kpis.textContent).not.toContain("$0.00");
+  });
+
+  it("labels an internally-computed equity figure 'Calculated equity' — never presenting it as broker-supplied", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-portfolio")) {
+        return jsonResponse({
+          ok: true,
+          data: { ...PORTFOLIO_BODY.data, unrealisedPnl: 42.5, unrealisedPnlComplete: true, unrealisedPnlUnavailableReason: null, equity: 77_248.81, equitySource: "CALCULATED" },
+        });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    expect(kpis).toHaveTextContent("Calculated equity");
+    expect(kpis).toHaveTextContent("$77,248.81");
+    expect(kpis).toHaveTextContent("$42.50");
+  });
+
+  it("shows the unreconciled closed-trade count alongside realised P/L when non-zero", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-portfolio")) {
+        return jsonResponse({ ok: true, data: { ...PORTFOLIO_BODY.data, unreconciledClosedTradeCount: 2 } });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    expect(kpis).toHaveTextContent("2 closed trade(s) excluded");
   });
 
   it("never prefixes a broker-native amount with £ — uses $ / USD until currency handling is resolved", async () => {

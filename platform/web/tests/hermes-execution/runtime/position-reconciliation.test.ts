@@ -426,6 +426,9 @@ function makeFixedRecordsStore(records: TradeLifecycleRecord[]) {
     async listClosed() {
       return records.filter((r) => r.status === "CLOSED");
     },
+    async listUnreconciled() {
+      return records.filter((r) => r.status === "CLOSED_UNRECONCILED");
+    },
   };
 }
 

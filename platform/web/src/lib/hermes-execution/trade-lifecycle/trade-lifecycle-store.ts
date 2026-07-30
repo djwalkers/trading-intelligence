@@ -23,6 +23,13 @@ export interface TradeLifecycleStore {
    * must ever be picked up by trade-performance reporting (which requires a real entry/exit price)
    * as if it were. */
   listClosed(): Promise<TradeLifecycleRecord[]>;
+  /** Missing-financial-data fix. Records whose close was submitted to the broker but never
+   * confirmed reconciled — status CLOSED_UNRECONCILED only. These have NO trustworthy exit price/
+   * realisedPnl (that is exactly why they're unreconciled), so realised-P/L aggregation must never
+   * fold them in as if they were zero-P/L closed trades — but the count still matters, so a reader
+   * can see that some closed positions are excluded from the realised-P/L total rather than
+   * concluding there simply were none. */
+  listUnreconciled(): Promise<TradeLifecycleRecord[]>;
 }
 
 const OPEN_STATUSES = new Set(["OPEN", "CLOSE_REQUESTED"]);
@@ -140,5 +147,9 @@ export class InMemoryTradeLifecycleStore implements TradeLifecycleStore {
 
   async listClosed(): Promise<TradeLifecycleRecord[]> {
     return (await this.list()).filter((record) => record.status === "CLOSED");
+  }
+
+  async listUnreconciled(): Promise<TradeLifecycleRecord[]> {
+    return (await this.list()).filter((record) => record.status === "CLOSED_UNRECONCILED");
   }
 }
