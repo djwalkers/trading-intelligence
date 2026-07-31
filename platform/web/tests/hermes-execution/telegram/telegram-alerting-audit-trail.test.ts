@@ -160,6 +160,105 @@ describe("formatAlert — critical operational failures only", () => {
   });
 });
 
+// Repeated-Telegram-alert fix. Market-data incident OPENED/CHANGED/RECOVERED — the deduplicated
+// replacement for the old MARKET_DATA_INCIDENT_ALERT/isReminder design. See
+// market-data-incident-tracker.ts for the fingerprint/state-machine details these events surface.
+describe("formatAlert — market-data incident OPENED", () => {
+  it("includes every affected instrument, its reason, and the missing-candle window when one is present", () => {
+    const text = formatAlert(
+      makeEvent("MARKET_DATA_INCIDENT_OPENED", {
+        instruments: [
+          {
+            instrument: "ETH",
+            fingerprint: "ETH|missing-candles|1h|123|456",
+            category: "missing-candles",
+            reason: 'Invalid historical candle history for "ETH": missing candle(s) between 14:00 and 16:00.',
+            timeframe: "1h",
+            missingIntervalStartMs: Date.parse("2026-07-30T14:00:00.000Z"),
+            missingIntervalEndMs: Date.parse("2026-07-30T16:00:00.000Z"),
+            openedAt: "2026-07-30T16:00:00.000Z",
+            observationCount: 1,
+          },
+        ],
+      }),
+    );
+    expect(text).toContain("Market data incident opened");
+    expect(text).toContain("Affected instruments: ETH");
+    expect(text).toContain("2026-07-30T14:00:00.000Z to 2026-07-30T16:00:00.000Z");
+    expect(text).toContain("expected interval 1h");
+    expect(text).toContain("Entry/strategy analysis: blocked");
+    expect(text).toContain("Exit protection (stop-loss/take-profit/kill-switch): continuing via live quotes");
+    expect(text).toContain("Opposing-signal exit: unavailable");
+  });
+
+  it("aggregates multiple simultaneously-affected instruments into a single message", () => {
+    const text = formatAlert(
+      makeEvent("MARKET_DATA_INCIDENT_OPENED", {
+        instruments: [
+          { instrument: "BTC", fingerprint: "f1", category: "unknown", reason: "provider unreachable", openedAt: "t", observationCount: 1 },
+          { instrument: "ETH", fingerprint: "f2", category: "unknown", reason: "provider unreachable", openedAt: "t", observationCount: 1 },
+          { instrument: "SOL", fingerprint: "f3", category: "unknown", reason: "provider unreachable", openedAt: "t", observationCount: 1 },
+        ],
+      }),
+    );
+    expect(text).toContain("Affected instruments: BTC, ETH, SOL");
+  });
+
+  it("returns undefined when there are no instruments at all — never an empty/misleading alert", () => {
+    expect(formatAlert(makeEvent("MARKET_DATA_INCIDENT_OPENED", { instruments: [] }))).toBeUndefined();
+    expect(formatAlert(makeEvent("MARKET_DATA_INCIDENT_OPENED", {}))).toBeUndefined();
+  });
+});
+
+describe("formatAlert — market-data incident CHANGED", () => {
+  it("surfaces the updated reason and makes clear this is the same open incident, not a new one", () => {
+    const text = formatAlert(
+      makeEvent("MARKET_DATA_INCIDENT_CHANGED", {
+        instruments: [
+          {
+            instrument: "ETH",
+            fingerprint: "ETH|missing-candles|1h|999|1000",
+            previousFingerprint: "ETH|missing-candles|1h|123|456",
+            category: "missing-candles",
+            reason: 'Invalid historical candle history for "ETH": missing candle(s) between 18:00 and 20:00.',
+            timeframe: "1h",
+            openedAt: "2026-07-30T16:00:00.000Z",
+            observationCount: 3,
+          },
+        ],
+      }),
+    );
+    expect(text).toContain("Market data incident reason changed");
+    expect(text).toContain("Affected instruments: ETH");
+    expect(text).toContain("same open incident with an updated cause");
+    expect(text).toContain("still blocked");
+  });
+
+  it("returns undefined when there are no instruments at all", () => {
+    expect(formatAlert(makeEvent("MARKET_DATA_INCIDENT_CHANGED", { instruments: [] }))).toBeUndefined();
+  });
+});
+
+describe("formatAlert — market-data incident RECOVERED", () => {
+  it("names every recovered instrument and confirms both entry and exit protection are fully active again", () => {
+    const text = formatAlert(
+      makeEvent("MARKET_DATA_INCIDENT_RECOVERED", {
+        instruments: [
+          { instrument: "ETH", previousFingerprint: "f1", openedAt: "t0", recoveredAt: "t1" },
+          { instrument: "SOL", previousFingerprint: "f2", openedAt: "t0", recoveredAt: "t1" },
+        ],
+      }),
+    );
+    expect(text).toContain("RESOLVED");
+    expect(text).toContain("Recovered instruments: ETH, SOL");
+    expect(text).toContain("entry/strategy analysis and full exit protection are both active again");
+  });
+
+  it("returns undefined when there are no instruments at all", () => {
+    expect(formatAlert(makeEvent("MARKET_DATA_INCIDENT_RECOVERED", { instruments: [] }))).toBeUndefined();
+  });
+});
+
 // Requirement 4 — noisy/routine events must never produce a Telegram message. Every one of these
 // still gets recorded to the (unmodified) inner audit trail — see the TelegramAlertingAuditTrail
 // describe block below for that separate assertion — only the ALERT dispatch is suppressed here.
@@ -189,6 +288,11 @@ describe("formatAlert — noisy/routine events send no Telegram message", () => 
     ["CANDLE_PROCESSED", {}],
     ["STRATEGY_LOADED", {}],
     ["AUTO_APPROVAL_FAILED", { reason: "x" }],
+    // Repeated-Telegram-alert fix. These two are the entire fix for the original bug — an
+    // unresolved, unchanged market-data incident (or an in-progress recovery) must NEVER itself
+    // produce a Telegram message, no matter how many cycles it persists.
+    ["MARKET_DATA_INCIDENT_UNCHANGED", { instruments: [{ instrument: "BTC", fingerprint: "f", observationCount: 50, openedAt: "t", lastObservedAt: "t" }] }],
+    ["MARKET_DATA_INCIDENT_RECOVERY_PENDING", { instruments: [{ instrument: "BTC", fingerprint: "f", consecutiveHealthyCount: 1, requiredConsecutiveHealthy: 2 }] }],
   ];
 
   it.each(noisyEvents)("%s sends nothing", (eventType, details) => {

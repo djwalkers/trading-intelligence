@@ -1,8 +1,11 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { TradingRuntime } from "@/lib/hermes-execution/runtime/trading-runtime";
 import { AlwaysOpenMarketHoursPolicy } from "@/lib/hermes-execution/runtime/market-hours-policy";
 import { MockMarketDataProvider } from "@/lib/hermes-execution/market-data/mock-market-data-provider";
-import type { MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
+import { MarketDataProviderError, type MarketDataFailureDetail, type MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
 import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
@@ -192,7 +195,8 @@ function makeRuntime(
     marketDataProvider?: MarketDataProvider;
     lifecycleStore?: InMemoryTradeLifecycleStore;
     intervalMs?: number;
-    marketDataIncidentReminderIntervalMs?: number;
+    marketDataIncidentRecoveryThreshold?: number;
+    marketDataIncidentStatePath?: string;
   } = {},
 ): RuntimeHarness {
   const instruments = overrides.instruments ?? ["BTC"];
@@ -227,7 +231,8 @@ function makeRuntime(
     autoDemoMinConfidence: 0.75,
     killSwitchEnabled: false,
     recoveryThresholdMs: 5 * 60_000,
-    marketDataIncidentReminderIntervalMs: overrides.marketDataIncidentReminderIntervalMs,
+    marketDataIncidentRecoveryThreshold: overrides.marketDataIncidentRecoveryThreshold,
+    marketDataIncidentStatePath: overrides.marketDataIncidentStatePath,
   });
 
   return { runtime, broker, clock, auditTrail, tradeCandidateRepository, lifecycleStore };
@@ -239,6 +244,55 @@ function throwingProvider(message = GAP_ERROR_MESSAGE): MarketDataProvider {
       throw new Error(message);
     },
   };
+}
+
+// Repeated-Telegram-alert fix. A plain Error (throwingProvider above) carries no structured
+// MarketDataFailureDetail at all — every fingerprint built from it therefore falls back to the
+// same "unknown" category for a given instrument, which is sufficient for most of the tests in
+// this file (they only need "the same failure persists" / "recovers", never "the reason changes").
+// Testing an actual fingerprint CHANGE (a materially different reason) requires a real
+// MarketDataProviderError with distinct structured detail — message text alone is deliberately
+// EXCLUDED from the fingerprint (see market-data-incident-tracker.ts's own doc comment), so two
+// throwingProvider() calls with different strings would still count as the SAME incident.
+function structuredThrowingProvider(detail: MarketDataFailureDetail, message = GAP_ERROR_MESSAGE): MarketDataProvider {
+  return {
+    getMarketData: async () => {
+      throw new MarketDataProviderError(message, "malformed-data", { detail });
+    },
+  };
+}
+
+const MISSING_CANDLES_DETAIL_A: MarketDataFailureDetail = {
+  category: "missing-candles",
+  timeframe: "1h",
+  missingIntervalStartMs: Date.parse("2026-07-30T14:00:00.000Z"),
+  missingIntervalEndMs: Date.parse("2026-07-30T16:00:00.000Z"),
+};
+
+const MISSING_CANDLES_DETAIL_B: MarketDataFailureDetail = {
+  category: "missing-candles",
+  timeframe: "1h",
+  missingIntervalStartMs: Date.parse("2026-07-30T18:00:00.000Z"),
+  missingIntervalEndMs: Date.parse("2026-07-30T20:00:00.000Z"),
+};
+
+interface OpenedInstrumentDetail {
+  instrument: string;
+  fingerprint: string;
+}
+interface ChangedInstrumentDetail {
+  instrument: string;
+  fingerprint: string;
+  previousFingerprint: string;
+}
+interface RecoveredInstrumentDetail {
+  instrument: string;
+  previousFingerprint: string;
+}
+interface UnchangedInstrumentDetail {
+  instrument: string;
+  fingerprint: string;
+  observationCount: number;
 }
 
 describe("Candle-gap incident — missing candle blocks new entry analysis", () => {
@@ -384,8 +438,8 @@ describe("Candle-gap incident — a failed quote never claims protection ran", (
   });
 });
 
-describe("Candle-gap incident — a shared provider gap across instruments is a single classified incident", () => {
-  it("BTC, ETH and SOL all failing with the same provider gap in one cycle produce exactly one MARKET_DATA_INCIDENT_ALERT naming all three", async () => {
+describe("Candle-gap incident — a shared provider gap across instruments is a single aggregated incident", () => {
+  it("BTC, ETH and SOL all failing with the same provider gap in one cycle produce exactly one MARKET_DATA_INCIDENT_OPENED naming all three", async () => {
     const { runtime, clock, auditTrail } = makeRuntime({
       instruments: ["BTC", "ETH", "SOL"],
       marketDataProvider: throwingProvider(),
@@ -394,49 +448,94 @@ describe("Candle-gap incident — a shared provider gap across instruments is a 
     await runtime.start();
     await clock.advance(0);
 
-    const events = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_ALERT");
+    const events = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
     expect(events).toHaveLength(1);
-    const details = events[0]!.details as { isReminder: boolean; affectedInstruments: string[] };
-    expect(details.isReminder).toBe(false);
-    expect(details.affectedInstruments.slice().sort()).toEqual(["BTC", "ETH", "SOL"]);
+    const instruments = events[0]!.details.instruments as OpenedInstrumentDetail[];
+    expect(instruments.map((i) => i.instrument).slice().sort()).toEqual(["BTC", "ETH", "SOL"]);
+    // Deterministic aggregation: fingerprints are stable and distinct per instrument even though
+    // the underlying failure/category is identical for all three.
+    expect(new Set(instruments.map((i) => i.fingerprint)).size).toBe(3);
 
     // Per-instrument MARKET_DATA_DEGRADED still fires for every one of them, independent of the
-    // shared/rate-limited incident alert above.
+    // shared/aggregated incident event above.
     const degradedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_DEGRADED");
     expect(degradedEvents.map((e) => e.instrument).sort()).toEqual(["BTC", "ETH", "SOL"]);
   });
 });
 
-describe("Candle-gap incident — no duplicate alerts every cycle, a reminder only after the configured interval", () => {
-  it("sends exactly one initial alert, stays silent through many short-interval cycles, then sends exactly one reminder once the interval elapses", async () => {
-    const reminderIntervalMs = 30 * 60_000;
+describe("Candle-gap incident — no duplicate alerts every cycle, silence persists no matter how long the incident lasts", () => {
+  it("fires MARKET_DATA_INCIDENT_OPENED exactly once, then only ever MARKET_DATA_INCIDENT_UNCHANGED (never a repeat OPENED) across many subsequent cycles", async () => {
     const { runtime, clock, auditTrail } = makeRuntime({
       instruments: ["BTC", "ETH", "SOL"],
       marketDataProvider: throwingProvider(),
       intervalMs: 60_000,
-      marketDataIncidentReminderIntervalMs: reminderIntervalMs,
     });
 
     await runtime.start();
-    await clock.advance(0); // cycle 1 (t=0) — new incident
+    await clock.advance(0); // cycle 1 — new incident
 
-    // Fires every scheduled tick between now and the target time — 30 more cycles land in this one
-    // call (t=60_000 .. 1_800_000), the last one exactly at the reminder threshold.
-    await clock.advance(reminderIntervalMs);
+    // 50 further scheduled ticks of the exact same persistent gap — comfortably more than enough
+    // to prove this never degrades into a periodic resend of any kind.
+    await clock.advance(50 * 60_000);
 
     const status = runtime.getStatus();
-    expect(status.successfulRunCount).toBe(31); // 1 immediate + 30 scheduled ticks
+    expect(status.successfulRunCount).toBe(51);
     expect(status.failedRunCount).toBe(0);
 
-    const events = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_ALERT");
-    expect(events).toHaveLength(2);
-    expect((events[0]!.details as { isReminder: boolean }).isReminder).toBe(false);
-    expect((events[1]!.details as { isReminder: boolean }).isReminder).toBe(true);
+    const openedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+    expect(openedEvents).toHaveLength(1);
+
+    const changedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_CHANGED");
+    expect(changedEvents).toHaveLength(0);
+
+    // The condition is still tracked (quietly) every cycle — this is what used to be resent as a
+    // Telegram alert every cycle; it now only ever appears as a non-Telegrammed UNCHANGED event,
+    // and its own observationCount keeps growing, proving the tracker really did observe every
+    // cycle rather than going silent by accident.
+    const unchangedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_UNCHANGED");
+    expect(unchangedEvents.length).toBe(50);
+    const lastUnchanged = unchangedEvents[unchangedEvents.length - 1]!.details.instruments as UnchangedInstrumentDetail[];
+    const btcEntry = lastUnchanged.find((i) => i.instrument === "BTC");
+    expect(btcEntry?.observationCount).toBe(51);
   });
 });
 
-describe("Candle-gap incident — recovered candle history clears the incident state", () => {
-  it("sends exactly one MARKET_DATA_INCIDENT_RECOVERED once every instrument's candle history is valid again, and a later new outage raises a fresh incident", async () => {
+describe("Candle-gap incident — a materially changed reason produces exactly one CHANGED alert, never a duplicate OPENED", () => {
+  it("fires MARKET_DATA_INCIDENT_CHANGED (not a second OPENED) when the missing-candle window itself shifts to a different gap", async () => {
+    let detail = MISSING_CANDLES_DETAIL_A;
+    const provider: MarketDataProvider = {
+      getMarketData: async () => {
+        throw new MarketDataProviderError(GAP_ERROR_MESSAGE, "malformed-data", { detail });
+      },
+    };
+
+    const { runtime, clock, auditTrail } = makeRuntime({ marketDataProvider: provider, intervalMs: 10_000 });
+
+    await runtime.start();
+    await clock.advance(0); // cycle 1 — opens with gap A
+
+    detail = MISSING_CANDLES_DETAIL_B;
+    await clock.advance(10_000); // cycle 2 — same instrument, still invalid, but a DIFFERENT gap
+
+    const openedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+    expect(openedEvents).toHaveLength(1);
+
+    const changedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_CHANGED");
+    expect(changedEvents).toHaveLength(1);
+    const changed = (changedEvents[0]!.details.instruments as ChangedInstrumentDetail[])[0]!;
+    expect(changed.instrument).toBe("BTC");
+    expect(changed.previousFingerprint).toBe((openedEvents[0]!.details.instruments as OpenedInstrumentDetail[])[0]!.fingerprint);
+    expect(changed.fingerprint).not.toBe(changed.previousFingerprint);
+
+    // No spurious recovery: swapping from one open incident straight to another must never emit a
+    // RECOVERED event for the instrument in between.
+    const recoveredEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_RECOVERED");
+    expect(recoveredEvents).toHaveLength(0);
+  });
+});
+
+describe("Candle-gap incident — recovery hysteresis: pending until consecutive healthy cycles, then exactly one RECOVERED, then a fresh OPENED on re-failure", () => {
+  it("requires two consecutive healthy cycles (the default threshold) before declaring recovery, and never delays entry unblocking on the first healthy cycle", async () => {
     const goodProvider = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
     let healthy = false;
     const flakyProvider: MarketDataProvider = {
@@ -447,35 +546,182 @@ describe("Candle-gap incident — recovered candle history clears the incident s
     };
 
     const { runtime, clock, auditTrail } = makeRuntime({
-      instruments: ["BTC", "ETH", "SOL"],
       marketDataProvider: flakyProvider,
       intervalMs: 10_000,
     });
 
     await runtime.start();
-    await clock.advance(0); // cycle 1 — new incident, all three degraded
-
-    let alertEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_ALERT");
-    expect(alertEvents).toHaveLength(1);
+    await clock.advance(0); // cycle 1 — opens
+    expect((await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED")).toHaveLength(1);
 
     healthy = true;
-    await clock.advance(10_000); // cycle 2 — candles recover for every instrument
+    await clock.advance(10_000); // cycle 2 — first healthy cycle: pending, not yet recovered
+
+    expect((await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_RECOVERED")).toHaveLength(0);
+    const pendingEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_RECOVERY_PENDING");
+    expect(pendingEvents).toHaveLength(1);
+    // Trading safety is never gated by the tracker's own hysteresis — this cycle's market data
+    // genuinely validated, so a fresh candidate is created exactly as it would be on any other
+    // healthy cycle, entirely independent of whether the incident tracker has "forgiven" it yet.
+    expect(runtime.getStatus().lastResult?.marketDataUnavailableReason).toBeUndefined();
+    expect(runtime.getStatus().lastResult?.candidateCreated).toBe(true);
+
+    await clock.advance(10_000); // cycle 3 — second consecutive healthy cycle: recovered
 
     const recoveredEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_RECOVERED");
     expect(recoveredEvents).toHaveLength(1);
     const perInstrumentRecovered = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_RECOVERED");
-    expect(perInstrumentRecovered.map((e) => e.instrument).sort()).toEqual(["BTC", "ETH", "SOL"]);
+    expect(perInstrumentRecovered).toHaveLength(1);
+    expect(perInstrumentRecovered[0]!.instrument).toBe("BTC");
 
-    const statusAfterRecovery = runtime.getStatus();
-    expect(statusAfterRecovery.lastResult?.marketDataUnavailableReason).toBeUndefined();
-
-    // A brand new outage after recovery is treated as a genuinely NEW incident (isReminder: false),
-    // proving the tracker's state was actually cleared rather than merely staying silent.
+    // A later re-failure is a BRAND NEW incident (fresh OPENED), never silently treated as a
+    // continuation of the one that already recovered.
     healthy = false;
-    await clock.advance(10_000); // cycle 3 — degrades again
+    await clock.advance(10_000); // cycle 4 — fails again
 
-    alertEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_ALERT");
-    expect(alertEvents).toHaveLength(2);
-    expect((alertEvents[1]!.details as { isReminder: boolean }).isReminder).toBe(false);
+    const openedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+    expect(openedEvents).toHaveLength(2);
+  });
+});
+
+describe("Candle-gap incident — independent per-instrument tracking", () => {
+  it("ETH opening an incident never affects SOL's independent healthy state, and each instrument's fingerprint is scoped to itself", async () => {
+    const goodProvider = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    const provider: MarketDataProvider = {
+      getMarketData: async (instrument: string) => {
+        if (instrument === "ETH") throw new Error(GAP_ERROR_MESSAGE);
+        return goodProvider.getMarketData(instrument);
+      },
+    };
+
+    const { runtime, clock, auditTrail } = makeRuntime({ instruments: ["ETH", "SOL"], marketDataProvider: provider });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    const openedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+    expect(openedEvents).toHaveLength(1);
+    const instruments = openedEvents[0]!.details.instruments as OpenedInstrumentDetail[];
+    expect(instruments.map((i) => i.instrument)).toEqual(["ETH"]);
+
+    const degradedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_DEGRADED");
+    expect(degradedEvents.map((e) => e.instrument)).toEqual(["ETH"]);
+  });
+
+  it("one instrument recovering while another remains invalid in the same cycle produces independent, correctly-classified transitions for each", async () => {
+    const goodProvider = new MockMarketDataProvider({ bias: "bullish", seed: 42, now: NOW });
+    let ethHealthy = false;
+    const provider: MarketDataProvider = {
+      getMarketData: async (instrument: string) => {
+        if (instrument === "ETH" && ethHealthy) return goodProvider.getMarketData(instrument);
+        if (instrument === "ETH") throw new Error(GAP_ERROR_MESSAGE);
+        if (instrument === "SOL") throw new Error(GAP_ERROR_MESSAGE);
+        return goodProvider.getMarketData(instrument);
+      },
+    };
+
+    const { runtime, clock, auditTrail } = makeRuntime({
+      instruments: ["ETH", "SOL"],
+      marketDataProvider: provider,
+      marketDataIncidentRecoveryThreshold: 1,
+      intervalMs: 10_000,
+    });
+
+    await runtime.start();
+    await clock.advance(0); // cycle 1 — both ETH and SOL open
+
+    ethHealthy = true;
+    await clock.advance(10_000); // cycle 2 — ETH recovers (threshold 1), SOL remains invalid (unchanged)
+
+    const recoveredEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_RECOVERED");
+    expect(recoveredEvents).toHaveLength(1);
+    const recoveredInstruments = recoveredEvents[0]!.details.instruments as RecoveredInstrumentDetail[];
+    expect(recoveredInstruments.map((i) => i.instrument)).toEqual(["ETH"]);
+
+    const unchangedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_UNCHANGED");
+    const lastUnchanged = unchangedEvents[unchangedEvents.length - 1]!.details.instruments as UnchangedInstrumentDetail[];
+    expect(lastUnchanged.map((i) => i.instrument)).toEqual(["SOL"]);
+
+    // ETH's own recovery never generated a stray OPENED/CHANGED event for SOL, and vice versa.
+    const openedThisCycle = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+    expect(openedThisCycle).toHaveLength(1); // only the original cycle-1 opening (both instruments)
+  });
+});
+
+describe("Candle-gap incident — durable persistence survives a restart without resending an unchanged incident", () => {
+  it("a fresh TradingRuntime instance pointed at the same state file recognises an already-open incident as UNCHANGED, never a new OPENED", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "market-data-incident-state-test-"));
+    const statePath = path.join(stateDir, "incident-state.json");
+    try {
+      const first = makeRuntime({ marketDataProvider: throwingProvider(), marketDataIncidentStatePath: statePath });
+      await first.runtime.start();
+      await first.clock.advance(0);
+
+      expect((await first.auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED")).toHaveLength(1);
+      // Persistence is fire-and-forget from a cycle's own perspective (never awaited inline, so a
+      // slow disk never delays trading) — stop() is the documented, explicit flush point that
+      // guarantees any in-flight write has landed before we inspect the file or simulate a restart.
+      await first.runtime.stop();
+      const persisted = JSON.parse(await fs.readFile(statePath, "utf-8"));
+      expect(persisted.schemaVersion).toBe(1);
+      expect(Object.keys(persisted.incidents)).toEqual(["BTC"]);
+
+      // Simulate a process restart: a brand new TradingRuntime/tracker instance, same file.
+      const second = makeRuntime({ marketDataProvider: throwingProvider(), marketDataIncidentStatePath: statePath });
+      await second.runtime.start();
+      await second.clock.advance(0);
+
+      expect((await second.auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED")).toHaveLength(0);
+      expect((await second.auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_UNCHANGED")).toHaveLength(1);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a corrupted state file fails safe to an empty state — the next incident is still correctly reported as newly OPENED, never a crash", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "market-data-incident-state-corrupt-test-"));
+    const statePath = path.join(stateDir, "incident-state.json");
+    try {
+      await fs.writeFile(statePath, "{ this is not valid json at all", "utf-8");
+
+      const { runtime, clock, auditTrail } = makeRuntime({ marketDataProvider: throwingProvider(), marketDataIncidentStatePath: statePath });
+      await expect(runtime.start()).resolves.toBeUndefined();
+      await clock.advance(0);
+
+      const openedEvents = (await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED");
+      expect(openedEvents).toHaveLength(1);
+      expect(runtime.getStatus().failedRunCount).toBe(0);
+
+      await runtime.stop(); // flush any in-flight persist before the temp directory is removed below.
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("without a configured persistence path, the tracker works correctly in-memory but a restart would lose dedup state (documented limitation, not exercised here beyond confirming normal in-memory behaviour)", async () => {
+    const { runtime, clock, auditTrail } = makeRuntime({ marketDataProvider: throwingProvider() });
+    await runtime.start();
+    await clock.advance(0);
+    await clock.advance(10_000);
+
+    expect((await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_OPENED")).toHaveLength(1);
+    expect((await auditTrail.getEvents()).filter((e) => e.eventType === "MARKET_DATA_INCIDENT_UNCHANGED")).toHaveLength(1);
+  });
+});
+
+describe("Candle-gap incident — incident tracking itself never calls the broker or the market-data provider beyond the one call the cycle already makes", () => {
+  it("no extra placeMarketOrder/closePosition/getRate calls are attributable to incident bookkeeping across many cycles of a persistent, unresolved incident", async () => {
+    const broker = makeMockBroker([]);
+    const { runtime, clock } = makeRuntime({ broker, marketDataProvider: throwingProvider(), intervalMs: 10_000 });
+
+    await runtime.start();
+    await clock.advance(0);
+    await clock.advance(50_000); // 5 more cycles of the same unresolved incident
+
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    expect(broker.closePosition).not.toHaveBeenCalled();
+    // No open position this whole scenario, so the fallback getRate() quote path (used only to
+    // protect an OPEN position when candles are invalid) is never reached either.
+    expect(broker.getRate).not.toHaveBeenCalled();
   });
 });

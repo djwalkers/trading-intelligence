@@ -5,7 +5,7 @@ import {
   TIMEFRAME_DURATIONS_MS,
   validateHistoricalCandles,
 } from "@/lib/hermes-execution/market-data/candle-validation";
-import { MarketDataProviderError } from "@/lib/hermes-execution/market-data/market-data-provider";
+import { MarketDataProviderError, type MarketDataFailureDetail } from "@/lib/hermes-execution/market-data/market-data-provider";
 import type { Candle } from "@/lib/hermes-execution/types";
 
 const HOUR_MS = TIMEFRAME_DURATIONS_MS["1h"];
@@ -422,5 +422,89 @@ describe("validateHistoricalCandles — never silently repairs, always throws Ma
       expect(error).toBeInstanceOf(MarketDataProviderError);
       expect((error as MarketDataProviderError).reason).toBe("malformed-data");
     }
+  });
+});
+
+// Repeated-Telegram-alert fix — every rejection now also carries a stable, structured `.detail`
+// (see market-data-provider.ts's own MarketDataFailureDetail doc comment) that a downstream
+// incident tracker can fingerprint on directly, without ever parsing the free-text message.
+describe("validateHistoricalCandles — structured MarketDataProviderError.detail", () => {
+  function expectDetail(run: () => void): MarketDataFailureDetail {
+    try {
+      run();
+      expect.unreachable("expected validateHistoricalCandles to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarketDataProviderError);
+      const detail = (error as MarketDataProviderError).detail;
+      expect(detail).toBeDefined();
+      return detail!;
+    }
+    throw new Error("unreachable");
+  }
+
+  it("insufficient-candle-count", () => {
+    const candles = makeValidCandles(MIN_REQUIRED_CANDLES - 1);
+    const detail = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    );
+    expect(detail).toEqual({ category: "insufficient-candle-count", timeframe: "1h" });
+  });
+
+  it("duplicate-timestamp", () => {
+    const candles = makeValidCandles();
+    candles[10] = { ...candles[10]!, timestamp: candles[11]!.timestamp };
+    const detail = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    );
+    expect(detail).toEqual({ category: "duplicate-timestamp", timeframe: "1h" });
+  });
+
+  it("malformed-candle (non-positive OHLC)", () => {
+    const candles = makeValidCandles();
+    candles[5] = { ...candles[5]!, close: -1 };
+    const detail = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    );
+    expect(detail).toEqual({ category: "malformed-candle", timeframe: "1h" });
+  });
+
+  it("missing-candles carries the exact missing-interval boundary, matching the bug report's own shape (a gap between two specific candle timestamps)", () => {
+    const candles = makeValidCandles(60);
+    const prevTimestamp = candles[29]!.timestamp;
+    const currTimestamp = candles[31]!.timestamp;
+    candles.splice(30, 1);
+    const detail = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    );
+    expect(detail).toEqual({
+      category: "missing-candles",
+      timeframe: "1h",
+      missingIntervalStartMs: Date.parse(prevTimestamp),
+      missingIntervalEndMs: Date.parse(currTimestamp),
+    });
+  });
+
+  it("missing-candles fingerprint-relevant fields are IDENTICAL across two independent validation runs of the exact same persistent gap — the exact property an incident tracker relies on for deduplication", () => {
+    const candles = makeValidCandles(60);
+    candles.splice(30, 1);
+    const detailA = expectDetail(() =>
+      validateHistoricalCandles([...candles], "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: NOW }),
+    );
+    const detailB = expectDetail(() =>
+      validateHistoricalCandles([...candles], "BTC", { timeframe: "1h", maxCandleAgeSeconds: 7_200, now: new Date(NOW.getTime() + 3_600_000) }),
+    );
+    expect(detailA).toEqual(detailB);
+  });
+
+  it("stale-data — deliberately excludes ageSeconds/now so the same stalled feed fingerprints identically no matter how long it has been stale", () => {
+    const candles = makeValidCandles(MIN_REQUIRED_CANDLES, new Date(NOW.getTime() - 5 * HOUR_MS));
+    const detailAt5h = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 3_600, now: NOW }),
+    );
+    const detailAt10h = expectDetail(() =>
+      validateHistoricalCandles(candles, "BTC", { timeframe: "1h", maxCandleAgeSeconds: 3_600, now: new Date(NOW.getTime() + 5 * HOUR_MS) }),
+    );
+    expect(detailAt5h).toEqual({ category: "stale-data", timeframe: "1h" });
+    expect(detailAt5h).toEqual(detailAt10h);
   });
 });

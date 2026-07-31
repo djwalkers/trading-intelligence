@@ -445,23 +445,45 @@ export type AuditEventType =
   // OPPOSING_SIGNAL, which requires a full, candle-based decision). Fresh entry/strategy analysis
   // is always blocked whenever this fires — never partially trusted. This is a routine, per-cycle
   // audit record (like BROKER_POSITION_RECONCILED) — never itself rate-limited or Telegrammed; see
-  // MARKET_DATA_INCIDENT_ALERT below for the separate, deduplicated operator notification.
+  // MARKET_DATA_INCIDENT_OPENED/CHANGED/RECOVERED below for the separate, deduplicated operator
+  // notification.
   | "MARKET_DATA_DEGRADED"
   // Candle-gap production incident fix. Fired once, the cycle a previously-MARKET_DATA_DEGRADED
   // instrument's candle history validates successfully again.
   | "MARKET_DATA_RECOVERED"
-  // Candle-gap production incident fix. Runtime/market-data-incident-tracker.ts's own rate-limited,
-  // cycle-spanning incident view — fired once when one or more instruments first become degraded in
-  // the same cycle (`details.isReminder: false`), then again only after a configured reminder
-  // interval has elapsed while the condition persists (`details.isReminder: true`) — never once per
-  // cycle unconditionally. `details.affectedInstruments` lists every currently-degraded instrument
-  // together, so three instruments failing for the same provider-side reason surface as ONE
-  // incident, not three independent alerts. Wired into Telegram (telegram-alerting-audit-trail.ts).
-  | "MARKET_DATA_INCIDENT_ALERT"
-  // Candle-gap production incident fix. Fired once, when every previously-degraded instrument the
-  // tracker knew about has recovered in the same cycle — also wired into Telegram, so an operator
-  // who received the initial/reminder alert above is explicitly told when it clears, never left to
-  // infer recovery from silence alone.
+  // Repeated-Telegram-alert fix. Runtime/market-data-incident-tracker.ts's own deterministic,
+  // fingerprint-based incident view — fired once, per instrument, the cycle its market-data
+  // validation failure is first observed (healthy -> invalid). `details.instrument`,
+  // `details.fingerprint`, `details.category`, `details.reason` (the canonical, non-volatile
+  // failure summary), `details.openedAt`, and `details.observationCount` are always included.
+  // Aggregated into a single Telegram message per cycle when more than one instrument opens
+  // together — see telegram-alerting-audit-trail.ts's own formatter. Superseded the old
+  // time-based "reminder every 30 minutes" design (MARKET_DATA_INCIDENT_ALERT), which could still
+  // resend the same unresolved incident indefinitely across process restarts.
+  | "MARKET_DATA_INCIDENT_OPENED"
+  // Repeated-Telegram-alert fix. Fired every cycle an already-ACTIVE incident is observed again
+  // with the SAME fingerprint — i.e. the exact same underlying failure persists. Deliberately quiet
+  // (may log at a lower level than OPENED/CHANGED/RECOVERED) and NEVER wired into Telegram — this is
+  // precisely the event that used to cause a repeated alert every cycle; it now only ever updates
+  // `details.observationCount`/`details.lastObservedAt` for observability.
+  | "MARKET_DATA_INCIDENT_UNCHANGED"
+  // Repeated-Telegram-alert fix. Fired when an ACTIVE incident's fingerprint changes while the
+  // instrument remains invalid (e.g. a missing-candle gap widens, or the failure category itself
+  // changes) — a single in-place transition, `details.openedAt` preserved from the original
+  // incident (this is the same overall incident, evolved), `details.previousFingerprint` and
+  // `details.fingerprint` both included so the change is auditable. Wired into Telegram.
+  | "MARKET_DATA_INCIDENT_CHANGED"
+  // Repeated-Telegram-alert fix. Fired on each consecutive healthy validation cycle for an
+  // instrument whose incident hasn't yet cleared the configured recovery hysteresis threshold
+  // (`details.consecutiveHealthyCount` / `details.requiredConsecutiveHealthy`) — never itself wired
+  // into Telegram; exists purely so an operator can see recovery is progressing, not stalled.
+  | "MARKET_DATA_INCIDENT_RECOVERY_PENDING"
+  // Fired once an ACTIVE incident's recovery hysteresis threshold is met (consecutive healthy
+  // validation cycles — see MARKET_DATA_INCIDENT_RECOVERY_PENDING above). Also wired into Telegram,
+  // so an operator who received the original OPENED/CHANGED alert is explicitly told when it
+  // clears, never left to infer recovery from silence alone. A later re-failure of the same
+  // instrument after this fires always produces a brand new MARKET_DATA_INCIDENT_OPENED, never
+  // silently treated as a continuation of the recovered incident.
   | "MARKET_DATA_INCIDENT_RECOVERED"
   // Phase 0 — eToro instrument capability probe (etoro-instrument-probe.ts). Read-only, never
   // placing an order. One event per stage attempt (`details.stage`: "resolution" | "quote" |

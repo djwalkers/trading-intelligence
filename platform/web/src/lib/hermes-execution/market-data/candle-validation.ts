@@ -1,5 +1,5 @@
 import type { Candle } from "../types";
-import { MarketDataProviderError } from "./market-data-provider";
+import { MarketDataProviderError, type MarketDataFailureDetail } from "./market-data-provider";
 import { resolveMarketSession } from "../market-session";
 import { WeekdaySessionMarketHoursPolicy, type MarketHoursPolicy } from "../runtime/market-hours-policy";
 import {
@@ -163,8 +163,14 @@ function isGapExplainedByMarketClosure(
   return { explained: true };
 }
 
-function fail(instrument: string, detail: string): never {
-  throw new MarketDataProviderError(`Invalid historical candle history for "${instrument}": ${detail}`, "malformed-data");
+/**
+ * Repeated-Telegram-alert fix. `structuredDetail` carries the same canonical facts
+ * (category/timeframe/gap boundaries) the message text below describes in prose — the ONE place
+ * every validation failure attaches identity data an incident tracker can fingerprint on, without
+ * ever having to parse this function's own free-text message back apart.
+ */
+function fail(instrument: string, detail: string, structuredDetail?: MarketDataFailureDetail): never {
+  throw new MarketDataProviderError(`Invalid historical candle history for "${instrument}": ${detail}`, "malformed-data", { detail: structuredDetail });
 }
 
 /** One detected gap between two consecutive (sorted) candles, wider than the timeframe's own
@@ -267,7 +273,10 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
   const now = options.now ?? new Date();
 
   if (candles.length < MIN_REQUIRED_CANDLES) {
-    fail(instrument, `received ${candles.length} candle(s), need at least ${MIN_REQUIRED_CANDLES}.`);
+    fail(instrument, `received ${candles.length} candle(s), need at least ${MIN_REQUIRED_CANDLES}.`, {
+      category: "insufficient-candle-count",
+      timeframe: options.timeframe,
+    });
   }
 
   const seenTimestamps = new Set<string>();
@@ -275,7 +284,7 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
     const { timestamp, open, high, low, close, volume } = candle;
 
     if (seenTimestamps.has(timestamp)) {
-      fail(instrument, `duplicate candle timestamp "${timestamp}".`);
+      fail(instrument, `duplicate candle timestamp "${timestamp}".`, { category: "duplicate-timestamp", timeframe: options.timeframe });
     }
     seenTimestamps.add(timestamp);
 
@@ -285,7 +294,7 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
     // see isGapExplainedByMarketClosure's own malformed-timestamp guard, kept as defence in depth,
     // never the only check).
     if (!Number.isFinite(Date.parse(timestamp))) {
-      fail(instrument, `unparseable timestamp "${timestamp}".`);
+      fail(instrument, `unparseable timestamp "${timestamp}".`, { category: "malformed-candle", timeframe: options.timeframe });
     }
 
     // OHLC — always mandatory and finite, unlike volume below.
@@ -296,27 +305,33 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
       ["close", close],
     ] as const) {
       if (!Number.isFinite(value)) {
-        fail(instrument, `non-finite ${name} (${value}) at ${timestamp}.`);
+        fail(instrument, `non-finite ${name} (${value}) at ${timestamp}.`, { category: "malformed-candle", timeframe: options.timeframe });
       }
     }
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0) {
-      fail(instrument, `non-positive OHLC price at ${timestamp} (open=${open}, high=${high}, low=${low}, close=${close}).`);
+      fail(instrument, `non-positive OHLC price at ${timestamp} (open=${open}, high=${high}, low=${low}, close=${close}).`, {
+        category: "malformed-candle",
+        timeframe: options.timeframe,
+      });
     }
     if (high < low) {
-      fail(instrument, `high (${high}) below low (${low}) at ${timestamp}.`);
+      fail(instrument, `high (${high}) below low (${low}) at ${timestamp}.`, { category: "malformed-candle", timeframe: options.timeframe });
     }
     if (open > high || open < low || close > high || close < low) {
-      fail(instrument, `open/close outside the [low, high] range at ${timestamp} (open=${open}, close=${close}, low=${low}, high=${high}).`);
+      fail(instrument, `open/close outside the [low, high] range at ${timestamp} (open=${open}, close=${close}, low=${low}, high=${high}).`, {
+        category: "malformed-candle",
+        timeframe: options.timeframe,
+      });
     }
 
     // Volume — optional. Only validated when present; absence is never an error and is never
     // filled in with a substitute value (see this function's own doc comment above).
     if (volume !== undefined) {
       if (!Number.isFinite(volume)) {
-        fail(instrument, `non-finite volume (${volume}) at ${timestamp}.`);
+        fail(instrument, `non-finite volume (${volume}) at ${timestamp}.`, { category: "malformed-candle", timeframe: options.timeframe });
       }
       if (volume < 0) {
-        fail(instrument, `negative volume (${volume}) at ${timestamp}.`);
+        fail(instrument, `negative volume (${volume}) at ${timestamp}.`, { category: "malformed-candle", timeframe: options.timeframe });
       }
     }
   }
@@ -359,6 +374,7 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
           `gap too large to validate as an ordinary market closure — a ${gapMs}ms gap between ${prevTimestamp} and ` +
             `${currTimestamp} (${closureCheck.reason}). Treating this as a likely data-quality problem rather than ` +
             `attempting to verify it interval-by-interval.`,
+          { category: "missing-candles", timeframe: options.timeframe, missingIntervalStartMs: prevMs, missingIntervalEndMs: currMs },
         );
       }
     }
@@ -366,15 +382,20 @@ export function validateHistoricalCandles(candles: Candle[], instrument: string,
     fail(
       instrument,
       `missing candle(s) — a ${gapMs}ms gap between ${prevTimestamp} and ${currTimestamp} exceeds the expected ${options.timeframe} interval (${expectedIntervalMs}ms).`,
+      { category: "missing-candles", timeframe: options.timeframe, missingIntervalStartMs: prevMs, missingIntervalEndMs: currMs },
     );
   }
 
   const latest = sorted[sorted.length - 1]!;
   const ageSeconds = (now.getTime() - Date.parse(latest.timestamp)) / 1000;
   if (ageSeconds > options.maxCandleAgeSeconds) {
+    // Deliberately does NOT include `ageSeconds`/`now` in the structured detail — age grows every
+    // cycle even while the underlying cause (a stalled feed) is completely unchanged, which would
+    // otherwise make every cycle's fingerprint different and defeat incident deduplication entirely.
     fail(
       instrument,
       `stale data — the latest candle (${latest.timestamp}) is ${Math.round(ageSeconds)}s old, exceeding the configured max age of ${options.maxCandleAgeSeconds}s.`,
+      { category: "stale-data", timeframe: options.timeframe },
     );
   }
 }

@@ -3,7 +3,7 @@ import { buildMarketDecisionContext } from "../build-market-decision-context";
 import type { AuditTrail } from "../audit-trail";
 import type { AuditEventType, InternalStrategy, OrderSizingMode } from "../types";
 import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, RuntimeMode } from "../config";
-import type { MarketDataProvider } from "../market-data/market-data-provider";
+import { MarketDataProviderError, type MarketDataFailureDetail, type MarketDataProvider } from "../market-data/market-data-provider";
 import { MarketDecisionEngine, type MarketDecision } from "../market-decision-engine";
 import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
 import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
@@ -30,10 +30,7 @@ import { reconcileBrokerPosition } from "./position-reconciliation";
 import { recoverStaleLifecycleRecords } from "./lifecycle-recovery";
 import { evaluateExitTrigger, executeAutomaticExit, hasRateFetching } from "./exit-monitor";
 import { OpposingSignalStabilityTracker } from "./opposing-signal-stability";
-import {
-  MarketDataIncidentTracker,
-  DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS,
-} from "./market-data-incident-tracker";
+import { MarketDataIncidentTracker, type CanonicalIncidentReason, type InstrumentObservation } from "./market-data-incident-tracker";
 import type { SchedulerClock } from "./scheduler-clock";
 import type { MarketHoursPolicy } from "./market-hours-policy";
 import { TradingScheduler } from "./trading-scheduler";
@@ -134,6 +131,13 @@ interface InstrumentCycleState {
    * and fresh candidate creation for this instrument this cycle — never silently proceeding with a
    * stale or fabricated context. */
   marketDataUnavailableReason?: string;
+  /** Repeated-Telegram-alert fix. The structured MarketDataFailureDetail carried on the
+   * MarketDataProviderError caught above, when there is one — undefined for a plain Error (e.g.
+   * throwingProvider()-style test doubles, or a MarketDataProvider that doesn't populate it) or
+   * whenever marketDataUnavailableReason itself is undefined. This is the ONLY thing
+   * recordMarketDataIncidentState fingerprints on; the free-text marketDataUnavailableReason above
+   * is never parsed for identity, only ever shown to a human. */
+  marketDataFailureDetail?: MarketDataFailureDetail;
   /** Candle-gap production incident fix. Which Hermes-independent exit-protection checks
    * (KILL_SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/MAX_HOLDING_DURATION) were actually
    * evaluated this cycle using an independently-fetched live quote — populated even when
@@ -272,11 +276,20 @@ export interface TradingRuntimeDeps {
    * cycle (see runCycleBody's own call site), never per instrument — this concern is account-wide,
    * not per-instrument. */
   dailyAccountSummary?: DailyAccountSummaryService;
-  /** Candle-gap production incident fix. How long a market-data incident (one or more instruments
-   * with invalid candle history) must persist before a periodic reminder alert is sent again, on
-   * top of the always-sent initial alert. Undefined defaults to
-   * DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS (30 minutes). */
-  marketDataIncidentReminderIntervalMs?: number;
+  /** Repeated-Telegram-alert fix. Consecutive HEALTHY validation cycles required before an ACTIVE
+   * market-data incident is declared RECOVERED — see market-data-incident-tracker.ts's own
+   * DEFAULT_MARKET_DATA_INCIDENT_RECOVERY_THRESHOLD (2). Opening an incident always remains
+   * immediate regardless of this value; it only ever gates the RECOVERED transition, so a single
+   * anomalous successful fetch can never clear a genuine incident on its own. */
+  marketDataIncidentRecoveryThreshold?: number;
+  /** Repeated-Telegram-alert fix. Durable persistence path for market-data incident state — when
+   * set, the tracker survives a process restart (e.g. a PM2 restart) without re-announcing an
+   * already-open, unchanged incident as brand new (see market-data-incident-tracker.ts's own
+   * atomic-write persistence). Undefined (the default) keeps the tracker fully in-memory: still
+   * correct within one continuous process lifetime, but a restart mid-incident loses the tracker's
+   * state and may resend one OPENED alert for a condition that was already known — a documented
+   * dedup limitation, never a trading-safety regression. */
+  marketDataIncidentStatePath?: string;
 }
 
 /** Prototype 1.0 — official Hermes Agent decision integration. Only the Hermes-specific pieces —
@@ -350,13 +363,16 @@ export class TradingRuntime {
     return this.deps.opposingExitRequiredConfirmations ?? DEFAULT_OPPOSING_EXIT_REQUIRED_CONFIRMATIONS;
   }
 
-  // Candle-gap production incident fix. Process-local, in-memory only, same restart-safety
-  // trade-off as opposingSignalStability above (a restart can only reset the reminder cadence,
-  // never skip a real degradation or fabricate a recovery) — never persisted, never shared across
-  // instances.
-  private readonly marketDataIncident = new MarketDataIncidentTracker(
-    this.deps.marketDataIncidentReminderIntervalMs ?? DEFAULT_MARKET_DATA_INCIDENT_REMINDER_INTERVAL_MS,
-  );
+  // Repeated-Telegram-alert fix. Fingerprint-based, hysteresis-gated incident tracking — see
+  // market-data-incident-tracker.ts's own top-of-file comment. Durable only when
+  // deps.marketDataIncidentStatePath is configured (start() below loads any persisted state before
+  // the scheduler's first tick); otherwise behaves exactly like opposingSignalStability above
+  // (process-local, in-memory only — a restart can only re-announce an already-known incident,
+  // never skip a real one or fabricate a recovery).
+  private readonly marketDataIncident = new MarketDataIncidentTracker({
+    recoveryThreshold: this.deps.marketDataIncidentRecoveryThreshold,
+    persistencePath: this.deps.marketDataIncidentStatePath,
+  });
 
   async start(): Promise<void> {
     assertValidRuntimeTransition(this.state, "RUNNING");
@@ -365,6 +381,13 @@ export class TradingRuntime {
     this.startedAt = now.toISOString();
     this.stoppedAt = null;
     this.executionRunId = `trading-runtime-${now.getTime()}`;
+
+    // Repeated-Telegram-alert fix. Loaded BEFORE the scheduler's first tick so a durable, already-
+    // open incident is recognised on the very first post-restart cycle — never treated as brand new
+    // merely because this process just started. A no-op when marketDataIncidentStatePath was never
+    // configured (see MarketDataIncidentTracker.loadPersistedState's own doc comment) — never
+    // throws, never delays start() meaningfully long.
+    await this.marketDataIncident.loadPersistedState();
 
     this.scheduler = new TradingScheduler({
       clock: this.deps.clock,
@@ -414,6 +437,13 @@ export class TradingRuntime {
     this.scheduler = null;
 
     const timedOut = await this.awaitActiveCycleWithTimeout(this.deps.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+
+    // Repeated-Telegram-alert fix. Best-effort durability flush — a normal cycle never awaits this
+    // (see market-data-incident-tracker.ts's own `pendingPersist` doc comment), but a graceful stop
+    // is a natural point to catch up any still-in-flight write, maximising the odds that the next
+    // start() sees fully up-to-date state. Never throws (persist failures are already swallowed
+    // internally) and never blocks stop() beyond whatever write was already in flight.
+    await this.marketDataIncident.waitForPendingPersistence();
 
     this.state = "STOPPED";
     this.stoppedAt = this.deps.clock.now().toISOString();
@@ -714,45 +744,109 @@ export class TradingRuntime {
   }
 
   /**
-   * Candle-gap production incident fix. Feeds this cycle's final per-instrument market-data state
-   * into the shared MarketDataIncidentTracker and records whatever it decides — nothing (already
-   * alerted, not yet time for a reminder), a fresh MARKET_DATA_INCIDENT_ALERT (first detection or a
-   * periodic reminder, `details.isReminder` distinguishes the two), or a MARKET_DATA_INCIDENT_RECOVERED
-   * once every previously-degraded instrument has recovered. Also fires a per-instrument
-   * MARKET_DATA_RECOVERED audit event for each instrument the tracker reports as recovered — the
-   * per-instrument MARKET_DATA_DEGRADED counterpart is already fired directly from
+   * Repeated-Telegram-alert fix. Feeds this cycle's final per-instrument market-data state into the
+   * shared, fingerprint-based MarketDataIncidentTracker and records whatever transitions it
+   * reports, aggregated into at most one audit event PER TRANSITION KIND per cycle (never one per
+   * instrument) — so e.g. ETH and SOL both opening a new incident in the same cycle produces one
+   * MARKET_DATA_INCIDENT_OPENED event carrying both, and therefore one Telegram message, not two.
+   * MARKET_DATA_INCIDENT_UNCHANGED/RECOVERY_PENDING are recorded the same way for observability but
+   * are never wired into Telegram (see telegram-alerting-audit-trail.ts) — this is precisely the
+   * transition that used to cause a repeated alert every cycle for an unchanged condition. Also
+   * fires the existing per-instrument MARKET_DATA_RECOVERED audit event for each instrument that
+   * recovered — the per-instrument MARKET_DATA_DEGRADED counterpart is already fired directly from
    * runInstrumentPhaseA, the moment it's detected, never delayed to here. Never throws — a broken
    * tracker/audit write must never affect trading itself; mirrors persistAnalysis's own "best
    * effort, log and swallow" discipline.
    */
   private async recordMarketDataIncidentState(now: Date, states: Record<string, InstrumentCycleState>): Promise<void> {
     try {
-      const results = Object.values(states).map((state) => ({
-        instrument: state.instrument,
-        degraded: state.marketDataUnavailableReason !== undefined,
-        reason: state.marketDataUnavailableReason,
-      }));
-      const event = this.marketDataIncident.recordCycleResult(now, results);
-
-      if (event.kind === "none") return;
-
-      if (event.kind === "recovered") {
-        for (const instrument of event.recoveredInstruments) {
-          await this.recordAudit("MARKET_DATA_RECOVERED", {}, instrument);
+      const observations: InstrumentObservation[] = Object.values(states).map((state) => {
+        if (state.marketDataUnavailableReason === undefined) {
+          return { instrument: state.instrument, valid: true };
         }
-        await this.recordAudit("MARKET_DATA_INCIDENT_RECOVERED", {
-          recoveredInstruments: event.recoveredInstruments,
-          incidentDurationMs: event.incidentDurationMs,
-        });
-        return;
+        const detail = state.marketDataFailureDetail;
+        const reason: CanonicalIncidentReason = {
+          category: detail?.category ?? "unknown",
+          timeframe: detail?.timeframe,
+          missingIntervalStartMs: detail?.missingIntervalStartMs,
+          missingIntervalEndMs: detail?.missingIntervalEndMs,
+          summary: state.marketDataUnavailableReason,
+        };
+        return { instrument: state.instrument, valid: false, reason };
+      });
+
+      const outcome = await this.marketDataIncident.recordCycleObservations(now, observations);
+
+      for (const transition of outcome.recovered) {
+        await this.recordAudit("MARKET_DATA_RECOVERED", {}, transition.instrument);
       }
 
-      await this.recordAudit("MARKET_DATA_INCIDENT_ALERT", {
-        isReminder: event.kind === "reminder",
-        affectedInstruments: event.affectedInstruments.map((d) => d.instrument),
-        reasons: Object.fromEntries(event.affectedInstruments.map((d) => [d.instrument, d.reason])),
-        firstDetectedAt: event.affectedInstruments[0]?.firstDetectedAt,
-      });
+      if (outcome.opened.length > 0) {
+        await this.recordAudit("MARKET_DATA_INCIDENT_OPENED", {
+          instruments: outcome.opened.map((t) => ({
+            instrument: t.instrument,
+            fingerprint: t.fingerprint,
+            category: t.reason.category,
+            reason: t.reason.summary,
+            timeframe: t.reason.timeframe,
+            missingIntervalStartMs: t.reason.missingIntervalStartMs,
+            missingIntervalEndMs: t.reason.missingIntervalEndMs,
+            openedAt: t.openedAt,
+            observationCount: t.observationCount,
+          })),
+        });
+      }
+
+      if (outcome.changed.length > 0) {
+        await this.recordAudit("MARKET_DATA_INCIDENT_CHANGED", {
+          instruments: outcome.changed.map((t) => ({
+            instrument: t.instrument,
+            fingerprint: t.fingerprint,
+            previousFingerprint: t.previousFingerprint,
+            category: t.reason.category,
+            reason: t.reason.summary,
+            timeframe: t.reason.timeframe,
+            missingIntervalStartMs: t.reason.missingIntervalStartMs,
+            missingIntervalEndMs: t.reason.missingIntervalEndMs,
+            openedAt: t.openedAt,
+            observationCount: t.observationCount,
+          })),
+        });
+      }
+
+      if (outcome.recovered.length > 0) {
+        await this.recordAudit("MARKET_DATA_INCIDENT_RECOVERED", {
+          instruments: outcome.recovered.map((t) => ({
+            instrument: t.instrument,
+            previousFingerprint: t.previousFingerprint,
+            openedAt: t.openedAt,
+            recoveredAt: t.recoveredAt,
+          })),
+        });
+      }
+
+      if (outcome.unchanged.length > 0) {
+        await this.recordAudit("MARKET_DATA_INCIDENT_UNCHANGED", {
+          instruments: outcome.unchanged.map((t) => ({
+            instrument: t.instrument,
+            fingerprint: t.fingerprint,
+            observationCount: t.observationCount,
+            openedAt: t.openedAt,
+            lastObservedAt: t.lastObservedAt,
+          })),
+        });
+      }
+
+      if (outcome.recoveryPending.length > 0) {
+        await this.recordAudit("MARKET_DATA_INCIDENT_RECOVERY_PENDING", {
+          instruments: outcome.recoveryPending.map((t) => ({
+            instrument: t.instrument,
+            fingerprint: t.fingerprint,
+            consecutiveHealthyCount: t.consecutiveHealthyCount,
+            requiredConsecutiveHealthy: t.requiredConsecutiveHealthy,
+          })),
+        });
+      }
     } catch (error) {
       logger.error("Market-data incident tracking failed — never affects trading itself", {
         component: "trading-runtime",
@@ -930,6 +1024,11 @@ export class TradingRuntime {
     let snapshot: MarketDataSnapshot | undefined;
     let context: MarketDecisionContext | undefined;
     let marketDataUnavailableReason: string | undefined;
+    // Repeated-Telegram-alert fix. Captured alongside the free-text reason above whenever the
+    // thrown error is a MarketDataProviderError with a populated `.detail` — undefined for a plain
+    // Error (a test double, or a provider that doesn't populate it), which
+    // recordMarketDataIncidentState treats as an "unknown" category rather than crashing.
+    let marketDataFailureDetail: MarketDataFailureDetail | undefined;
     try {
       const result = await buildMarketDecisionContext(this.deps.marketDataProvider, this.deps.broker, instrument, this.deps.strategy);
       snapshot = result.snapshot;
@@ -938,6 +1037,7 @@ export class TradingRuntime {
       context = { ...result.context, positionOpen: currentPositionOpen };
     } catch (error) {
       marketDataUnavailableReason = toErrorMessage(error);
+      if (error instanceof MarketDataProviderError) marketDataFailureDetail = error.detail;
     }
 
     if (currentPositionOpen && currentRecord) {
@@ -1054,6 +1154,7 @@ export class TradingRuntime {
       context: context ? { ...context, positionOpen: currentPositionOpen } : undefined,
       snapshot,
       marketDataUnavailableReason,
+      marketDataFailureDetail,
       protectionChecksRun,
       protectionChecksSkipped,
       phaseAExitTrigger,

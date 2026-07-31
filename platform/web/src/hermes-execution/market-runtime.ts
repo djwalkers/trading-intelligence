@@ -2,6 +2,7 @@ import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
 import { HERMES_RUNTIME_AUDIT_LOG_PATH } from "@/lib/hermes-execution/audit-log-path";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { SystemSchedulerClock } from "@/lib/hermes-execution/runtime/scheduler-clock";
+import { DEFAULT_MARKET_DATA_INCIDENT_STATE_PATH } from "@/lib/hermes-execution/runtime/market-data-incident-tracker";
 import { TradingRuntime, type AnalysisIntegrationDeps } from "@/lib/hermes-execution/runtime/trading-runtime";
 import { buildHermesRuntimeWiring, buildRuntimeDependencies } from "@/lib/hermes-execution/runtime-config/runtime-dependency-factory";
 import { buildRedactedStartupSummary } from "@/lib/hermes-execution/runtime-config/startup-summary";
@@ -353,6 +354,20 @@ export async function main(): Promise<void> {
       })
     : undefined;
 
+  // Repeated-Telegram-alert fix — production wiring. Without this, the market-data incident
+  // tracker runs in-memory only: correct within one continuous process lifetime, but a PM2 restart
+  // mid-incident would lose all dedup state and resend one OPENED alert for an already-known
+  // condition. Reuses the exact same `.data/hermes-execution/` convention as the audit log and
+  // daily-account-summary state files (see market-data-incident-tracker.ts's own doc comment on
+  // this constant). Logged from the SAME value actually passed to TradingRuntime below, never a
+  // separate hardcoded claim, so this can never drift out of sync with what's really configured.
+  const marketDataIncidentStatePath: string | undefined = DEFAULT_MARKET_DATA_INCIDENT_STATE_PATH;
+  console.log(
+    marketDataIncidentStatePath
+      ? `Market-data incident persistence: DURABLE (${marketDataIncidentStatePath}) — an unresolved incident survives a PM2 restart without resending an unchanged alert.`
+      : "Market-data incident persistence: IN_MEMORY_ONLY — a PM2 restart mid-incident may resend one OPENED alert for an already-known condition.",
+  );
+
   const runtime = new TradingRuntime({
     broker: deps.broker,
     marketDataProvider: deps.marketDataProvider,
@@ -388,6 +403,7 @@ export async function main(): Promise<void> {
     registryClient,
     demoExecutionModeEnabled: config.demoExecutionModeEnabled,
     dailyAccountSummary,
+    marketDataIncidentStatePath,
   });
 
   let telegramBot: TelegramBot | undefined;

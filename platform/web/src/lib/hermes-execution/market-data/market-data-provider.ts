@@ -48,18 +48,52 @@ export interface MarketDataProvider {
 }
 
 /**
+ * Repeated-Telegram-alert fix. Stable, structured facts about WHY a MarketDataProviderError was
+ * thrown — deliberately separate from `message` (free text, safe for a human, never safe as a
+ * dedup/identity key: two failures with the exact same underlying cause can still render slightly
+ * different wording). Populated by candle-validation.ts's own `fail()` for every validation
+ * failure; left `undefined` for a bare fetch failure a MarketDataProvider implementation
+ * constructs itself without this detail (still safely handled — see
+ * market-data-incident-tracker.ts's own fallback for an error with no structured detail at all).
+ *
+ * Deliberately excludes anything volatile or unbounded: no live bid/ask, no stack trace, no
+ * request ID, no current-time-relative computation — only facts that identify WHICH gap/failure
+ * this is, so the exact same missing-candle incident produces the exact same detail across cycles.
+ */
+export interface MarketDataFailureDetail {
+  category:
+    | "insufficient-candle-count"
+    | "malformed-candle"
+    | "duplicate-timestamp"
+    | "missing-candles"
+    | "stale-data"
+    | "fetch-failed";
+  /** The configured timeframe this validation ran against (e.g. "1h") — a string, not the branded
+   * MarketTimeframe type, so this module never needs to depend on candle-validation.ts. */
+  timeframe?: string;
+  /** Only set for `category: "missing-candles"` — the exact boundary of the missing span, taken
+   * directly from the two candle timestamps either side of the gap. Never a rolling/relative value
+   * — the same underlying gap reports the same two timestamps on every cycle it remains present. */
+  missingIntervalStartMs?: number;
+  missingIntervalEndMs?: number;
+}
+
+/**
  * The one error type every MarketDataProvider implementation throws for both a failed fetch (a
  * live source unreachable or erroring) and malformed data (an implausible bid/ask/candle result) —
  * callers can distinguish "which" via `reason`, without needing to know which concrete provider
  * produced it.
  */
 export class MarketDataProviderError extends Error {
+  public readonly detail?: MarketDataFailureDetail;
+
   constructor(
     message: string,
     public readonly reason: "fetch-failed" | "malformed-data",
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; detail?: MarketDataFailureDetail },
   ) {
     super(message, options);
     this.name = "MarketDataProviderError";
+    this.detail = options?.detail;
   }
 }

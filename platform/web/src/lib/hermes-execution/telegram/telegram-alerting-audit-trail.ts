@@ -13,9 +13,10 @@ import { formatExitReasonLabel, formatGbp, formatHoldingDuration, formatLondonTi
 // Telegram alert refinement. Deliberately curated down to ONLY genuinely actionable trading
 // events — TRADE_OPENED, TRADE_CLOSED, a small, tightly-scoped set of critical operational
 // failures (broker connection lost, an automatic close failing so a position remains unprotected,
-// or the whole trading cycle crashing), and (candle-gap production incident fix) a rate-limited
-// market-data incident alert/recovery pair — see formatAlertCore's own doc comment for the full
-// list of event types this deliberately does NOT alert on any more, and why. Every other event
+// or the whole trading cycle crashing), and (repeated-Telegram-alert fix) a deduplicated,
+// fingerprint-based market-data incident opened/changed/recovered set — see formatAlertCore's own
+// doc comment for the full list of event types this deliberately does NOT alert on any more, and
+// why. Every other event
 // this pipeline records continues to be written to the (unmodified) inner audit trail/log exactly
 // as before — "no Telegram alert" never means "no record."
 //
@@ -167,43 +168,112 @@ function formatCriticalFailureAlert(event: AuditEvent): string | undefined {
   }
 }
 
+interface IncidentDetailEntry {
+  instrument: string;
+  fingerprint: string;
+  category: string;
+  reason: string;
+  timeframe?: string;
+  missingIntervalStartMs?: number;
+  missingIntervalEndMs?: number;
+  openedAt: string;
+  observationCount: number;
+}
+
+interface RecoveredDetailEntry {
+  instrument: string;
+  previousFingerprint: string;
+  openedAt: string;
+  recoveredAt: string;
+}
+
+function isIncidentDetailEntry(value: unknown): value is IncidentDetailEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.instrument === "string" && typeof v.fingerprint === "string" && typeof v.category === "string" && typeof v.reason === "string";
+}
+
+function isRecoveredDetailEntry(value: unknown): value is RecoveredDetailEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.instrument === "string" && typeof v.previousFingerprint === "string";
+}
+
+function formatGapWindow(entry: IncidentDetailEntry): string | undefined {
+  if (entry.missingIntervalStartMs === undefined || entry.missingIntervalEndMs === undefined) return undefined;
+  return `${new Date(entry.missingIntervalStartMs).toISOString()} to ${new Date(entry.missingIntervalEndMs).toISOString()}`;
+}
+
+function formatIncidentLine(entry: IncidentDetailEntry): string {
+  const gapWindow = formatGapWindow(entry);
+  const parts = [`${entry.instrument}: ${entry.reason}`];
+  if (gapWindow !== undefined) parts.push(`(missing candle window: ${gapWindow}${entry.timeframe ? `, expected interval ${entry.timeframe}` : ""})`);
+  else if (entry.timeframe !== undefined) parts.push(`(timeframe ${entry.timeframe})`);
+  return parts.join(" ");
+}
+
 /**
- * Candle-gap production incident fix. MARKET_DATA_INCIDENT_ALERT is already rate-limited by the
- * caller (runtime/market-data-incident-tracker.ts, via TradingRuntime.recordMarketDataIncidentState) —
- * this function only ever formats whatever occurrence it's given, never decides whether to send
- * one. `details.isReminder` distinguishes the initial alert from a periodic reminder in the message
- * text itself, so an operator scrolling a chat history can tell the two apart without needing to
- * cross-reference timestamps.
+ * Repeated-Telegram-alert fix. Fired at most once per cycle (runtime/market-data-incident-tracker.ts
+ * dedupes by fingerprint before this ever runs) for every instrument whose market-data validation
+ * just failed for the FIRST time (healthy -> invalid) — never repeated for the same unresolved
+ * incident on a later cycle (that is MARKET_DATA_INCIDENT_UNCHANGED, deliberately never wired into
+ * Telegram at all — see formatAlertCore's own switch below).
  */
-function formatMarketDataIncidentAlert(event: AuditEvent): string | undefined {
-  const affectedInstruments = event.details.affectedInstruments;
-  if (!Array.isArray(affectedInstruments) || affectedInstruments.length === 0) return undefined;
-  const isReminder = event.details.isReminder === true;
-  const reasons = event.details.reasons;
-  const firstReason =
-    reasons && typeof reasons === "object" ? Object.values(reasons as Record<string, unknown>)[0] : undefined;
+function formatMarketDataIncidentOpenedAlert(event: AuditEvent): string | undefined {
+  const instruments = event.details.instruments;
+  if (!Array.isArray(instruments) || instruments.length === 0) return undefined;
+  const entries = instruments.filter(isIncidentDetailEntry);
+  if (entries.length === 0) return undefined;
 
   return [
-    isReminder ? "⚠️ REMINDER: Market data incident still active" : "⚠️ ALERT: Market data incident detected",
+    "⚠️ ALERT: Market data incident opened",
     "",
-    `Affected instruments: ${affectedInstruments.join(", ")}`,
-    `Reason: ${typeof firstReason === "string" ? firstReason : "Invalid/gapped historical candle history."}`,
+    `Affected instruments: ${entries.map((e) => e.instrument).join(", ")}`,
+    ...entries.map(formatIncidentLine),
     "Entry/strategy analysis: blocked for affected instruments.",
     "Exit protection (stop-loss/take-profit/kill-switch): continuing via live quotes where a position is open.",
     "Opposing-signal exit: unavailable for affected instruments until candle history recovers.",
   ].join("\n");
 }
 
-/** Candle-gap production incident fix. Sent once, only when the tracker confirms every previously
- * affected instrument has recovered — an operator who received the alert above is never left to
- * infer recovery from silence alone. */
+/**
+ * Repeated-Telegram-alert fix. Fired only when an ALREADY-open incident's material reason changes
+ * (e.g. a missing-candle gap widens, or the failure category itself changes) — never for the same
+ * fingerprint persisting unchanged. `previousFingerprint`/new `fingerprint` are both surfaced so an
+ * operator can see this is an evolution of a known incident, not a brand-new one.
+ */
+function formatMarketDataIncidentChangedAlert(event: AuditEvent): string | undefined {
+  const instruments = event.details.instruments;
+  if (!Array.isArray(instruments) || instruments.length === 0) return undefined;
+  const entries = instruments.filter(isIncidentDetailEntry);
+  if (entries.length === 0) return undefined;
+
+  return [
+    "⚠️ UPDATE: Market data incident reason changed",
+    "",
+    `Affected instruments: ${entries.map((e) => e.instrument).join(", ")}`,
+    ...entries.map(formatIncidentLine),
+    "This is the same open incident with an updated cause — not a new occurrence.",
+    "Entry/strategy analysis: still blocked for affected instruments.",
+    "Exit protection (stop-loss/take-profit/kill-switch): continuing via live quotes where a position is open.",
+  ].join("\n");
+}
+
+/** Repeated-Telegram-alert fix. Sent once an incident has cleared the configured recovery
+ * hysteresis (consecutive healthy validation cycles) — an operator who received the OPENED/CHANGED
+ * alert above is never left to infer recovery from silence alone. A later re-failure of the same
+ * instrument always produces a brand new MARKET_DATA_INCIDENT_OPENED alert, never silently
+ * suppressed as "already seen." */
 function formatMarketDataIncidentRecoveredAlert(event: AuditEvent): string | undefined {
-  const recoveredInstruments = event.details.recoveredInstruments;
-  if (!Array.isArray(recoveredInstruments) || recoveredInstruments.length === 0) return undefined;
+  const instruments = event.details.instruments;
+  if (!Array.isArray(instruments) || instruments.length === 0) return undefined;
+  const entries = instruments.filter(isRecoveredDetailEntry);
+  if (entries.length === 0) return undefined;
+
   return [
     "✅ RESOLVED: Market data incident cleared",
     "",
-    `Recovered instruments: ${recoveredInstruments.join(", ")}`,
+    `Recovered instruments: ${entries.map((e) => e.instrument).join(", ")}`,
     "Valid historical candle history has resumed — entry/strategy analysis and full exit protection are both active again.",
   ].join("\n");
 }
@@ -223,10 +293,17 @@ function formatAlertCore(event: AuditEvent): string | undefined {
     case "TRADE_CLOSE_FAILED":
     case "TRADING_CYCLE_FAILED":
       return formatCriticalFailureAlert(event);
-    case "MARKET_DATA_INCIDENT_ALERT":
-      return formatMarketDataIncidentAlert(event);
+    case "MARKET_DATA_INCIDENT_OPENED":
+      return formatMarketDataIncidentOpenedAlert(event);
+    case "MARKET_DATA_INCIDENT_CHANGED":
+      return formatMarketDataIncidentChangedAlert(event);
     case "MARKET_DATA_INCIDENT_RECOVERED":
       return formatMarketDataIncidentRecoveredAlert(event);
+    // Repeated-Telegram-alert fix. MARKET_DATA_INCIDENT_UNCHANGED and
+    // MARKET_DATA_INCIDENT_RECOVERY_PENDING are deliberately absent from this switch — both fall
+    // through to `default` (no message). This is the entire fix for the original bug: an
+    // unresolved, unchanged incident must never itself generate a repeated Telegram message, no
+    // matter how many cycles it persists.
     default:
       return undefined;
   }
