@@ -2,12 +2,7 @@ import * as fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import * as path from "node:path";
 import type { InstrumentCatalogueEntry } from "../instrument-catalogue/instrument-catalogue";
-import {
-  validateStrategyDefinition,
-  compareSemver,
-  type StrategyDefinitionRejectionReason,
-  type ValidatedStrategyRecord,
-} from "./strategy-definition";
+import { validateStrategyDefinition, compareSemver, type StrategyDefinitionRejectionReason, type ValidatedStrategyRecord } from "./strategy-definition";
 
 // Phase 1 — Declarative Strategy Foundation. Read-only, filesystem-only registry for HAND-AUTHORED
 // strategy definitions (source-controlled, see the repo's own `strategies/` directory) — a
@@ -32,6 +27,16 @@ export interface StrategyDefinitionLoadResult {
   rejected: RejectedStrategyFile[];
 }
 
+export interface LoadStrategyDefinitionsOptions {
+  /** Injectable clock for deterministic tests; defaults to the real current time. Called exactly
+   * ONCE per `loadStrategyDefinitions` call — every file processed in that one call shares the
+   * identical resulting `loadedAt` value, so a single catalogue generation never shows different
+   * strategies "loaded" at slightly different instants merely because they were processed a few
+   * milliseconds apart. Two SEPARATE calls to `loadStrategyDefinitions` (e.g. two different CLI
+   * invocations, or two tests) may naturally produce different `loadedAt` values. */
+  now?: () => string;
+}
+
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -40,24 +45,14 @@ function recordKey(record: ValidatedStrategyRecord): string {
   return `${record.document.strategyId}@${record.document.strategyVersion}`;
 }
 
-/** Deterministic regardless of the source JSON text's own key order — a plain `JSON.stringify`
- * comparison is key-order-sensitive (JS preserves object insertion order, which follows the source
- * text), so two files with byte-for-byte identical content but keys written in a different order
- * would otherwise be misdetected as CONFLICTING rather than deduplicated. Arrays keep their own
- * order (order is meaningful there — e.g. `supportedInstruments`, `signalExitRules`); only object
- * KEYS are sorted. */
-function canonicalStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalStringify(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
+/** Compares by content hash — never a second, parallel canonicalisation — so "identical duplicate"
+ * detection here and content hashing (strategy-definition.ts's own `computeContentHash`, over the
+ * exact same `canonicalStringify`) can never independently drift out of agreement: this IS that
+ * hash, not a re-derivation of it. Deterministic regardless of the source JSON text's own key
+ * order — two files with byte-for-byte identical content but keys written in a different order
+ * hash identically. */
 function recordsEqual(a: ValidatedStrategyRecord, b: ValidatedStrategyRecord): boolean {
-  return canonicalStringify(a.document) === canonicalStringify(b.document);
+  return a.result.provenance.contentHash === b.result.provenance.contentHash;
 }
 
 /**
@@ -72,9 +67,14 @@ function recordsEqual(a: ValidatedStrategyRecord, b: ValidatedStrategyRecord): b
 export async function loadStrategyDefinitions(
   directory: string,
   catalogueEntries: readonly InstrumentCatalogueEntry[],
+  options: LoadStrategyDefinitionsOptions = {},
 ): Promise<StrategyDefinitionLoadResult> {
   const rejected: RejectedStrategyFile[] = [];
   const candidates: ValidatedStrategyRecord[] = [];
+  // Computed ONCE, up front — every record accepted by this call gets this exact same
+  // `loadedAt`, never a fresh `Date.now()` read per file (see LoadStrategyDefinitionsOptions's own
+  // doc comment on `now`).
+  const loadedAt = (options.now ?? (() => new Date().toISOString()))();
 
   let names: string[];
   try {
@@ -120,7 +120,7 @@ export async function loadStrategyDefinitions(
       rejected.push({ filePath, reason: "INVALID_JSON", detail: toErrorMessage(error) });
       continue;
     }
-    const result = validateStrategyDefinition(parsed, filePath, catalogueEntries);
+    const result = validateStrategyDefinition(parsed, filePath, catalogueEntries, loadedAt);
     if (result.ok) {
       candidates.push(result.record);
     } else {

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildInstrumentCatalogue, type InstrumentCatalogueEntry } from "@/lib/hermes-execution/instrument-catalogue/instrument-catalogue";
 import { loadStrategyDefinitions, selectLatestVersions, versionHistory } from "@/lib/hermes-execution/strategy-definitions/strategy-definition-registry";
+import { validateStrategyDefinition } from "@/lib/hermes-execution/strategy-definitions/strategy-definition";
 
 // Phase 1 declarative strategy registry — filesystem, fixture-only tests. Never calls eToro, never
 // runs a broker/probe/smoke command, never touches the real .data/hermes-execution directory or the
@@ -107,8 +108,12 @@ describe("loadStrategyDefinitions (filesystem)", () => {
   it("deterministic file ordering — repeated runs against the same directory produce identical results", async () => {
     await write("b.json", strategyDoc({ strategyVersion: "1.0.0" }));
     await write("a.json", strategyDoc({ strategyVersion: "2.0.0" }));
-    const first = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE);
-    const second = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE);
+    // Fixed clock: this test is about file-ordering determinism, not about loadedAt — two separate
+    // real-clock reads are legitimately allowed to differ (see "loadedAt provenance" below), which
+    // would otherwise be an unrelated source of flakiness here.
+    const now = () => "2024-01-01T00:00:00.000Z";
+    const first = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now });
+    const second = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now });
     expect(first).toEqual(second);
   });
 
@@ -118,6 +123,60 @@ describe("loadStrategyDefinitions (filesystem)", () => {
     const result = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE);
     expect(result.accepted).toHaveLength(1);
     expect(result.rejected).toHaveLength(0);
+  });
+
+  it("loaded provenance carries a content hash, and an identical document in a different file hashes identically", async () => {
+    await write("a.json", strategyDoc({ strategyVersion: "1.0.0" }));
+    await write("b.json", strategyDoc({ strategyVersion: "2.0.0" })); // different version, same shape otherwise
+    const result = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE);
+    expect(result.accepted).toHaveLength(2);
+    for (const record of result.accepted) {
+      expect(record.result.provenance.contentHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(record.result.provenance.contentHashAlgorithm).toBe("sha256");
+    }
+    // Re-validating the exact same v1.0.0 content directly (bypassing the filesystem) must hash
+    // identically to what the registry loaded from a.json.
+    const revalidated = validateStrategyDefinition(strategyDoc({ strategyVersion: "1.0.0" }), "/some/unrelated/path.json", VERIFIED_CATALOGUE);
+    const loadedV1 = result.accepted.find((r) => r.document.strategyVersion === "1.0.0")!;
+    expect(revalidated.ok && revalidated.record.result.provenance.contentHash).toBe(loadedV1.result.provenance.contentHash);
+  });
+
+  describe("loadedAt provenance", () => {
+    it("defaults to a valid UTC ISO-8601 timestamp for every record when no clock is injected", async () => {
+      await write("a.json", strategyDoc());
+      const result = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE);
+      expect(result.accepted).toHaveLength(1);
+      const { loadedAt } = result.accepted[0]!.result.provenance;
+      expect(loadedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(new Date(loadedAt).toISOString()).toBe(loadedAt);
+    });
+
+    it("every record loaded in the same call shares one consistent, injected loadedAt", async () => {
+      await write("a.json", strategyDoc({ strategyVersion: "1.0.0" }));
+      await write("b.json", strategyDoc({ strategyVersion: "2.0.0" }));
+      const fixed = "2024-03-15T10:00:00.000Z";
+      const result = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now: () => fixed });
+      expect(result.accepted).toHaveLength(2);
+      for (const record of result.accepted) {
+        expect(record.result.provenance.loadedAt).toBe(fixed);
+      }
+    });
+
+    it("two separate load operations may produce different loadedAt values without affecting content hash or duplicate identity", async () => {
+      await write("a.json", strategyDoc());
+      const first = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now: () => "2020-01-01T00:00:00.000Z" });
+      const second = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now: () => "2030-01-01T00:00:00.000Z" });
+      expect(first.accepted[0]!.result.provenance.loadedAt).not.toBe(second.accepted[0]!.result.provenance.loadedAt);
+      expect(first.accepted[0]!.result.provenance.contentHash).toBe(second.accepted[0]!.result.provenance.contentHash);
+    });
+
+    it("duplicate handling is unaffected by loadedAt — identical documents still dedupe to one accepted record", async () => {
+      await write("a.json", strategyDoc());
+      await write("b.json", strategyDoc());
+      const result = await loadStrategyDefinitions(dir, VERIFIED_CATALOGUE, { now: () => "2024-01-01T00:00:00.000Z" });
+      expect(result.accepted).toHaveLength(1);
+      expect(result.rejected).toHaveLength(0);
+    });
   });
 
   it("identical duplicates are still deduplicated even when the source JSON text has different key order", async () => {

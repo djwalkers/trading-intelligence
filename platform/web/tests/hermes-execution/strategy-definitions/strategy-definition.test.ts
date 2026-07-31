@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildInstrumentCatalogue, type InstrumentCatalogueEntry } from "@/lib/hermes-execution/instrument-catalogue/instrument-catalogue";
-import { findProhibitedFields, validateStrategyDefinition, compareSemver, parseSemver } from "@/lib/hermes-execution/strategy-definitions/strategy-definition";
+import {
+  findProhibitedFields,
+  validateStrategyDefinition,
+  compareSemver,
+  parseSemver,
+  canonicalStringify,
+  computeContentHash,
+  CONTENT_HASH_ALGORITHM,
+} from "@/lib/hermes-execution/strategy-definitions/strategy-definition";
 
 // Phase 1 declarative strategy schema — pure/fixture-only tests. Never calls eToro, never touches
 // the filesystem, never runs a broker/probe/smoke command.
@@ -391,6 +399,146 @@ describe("validateStrategyDefinition", () => {
       const result = validateStrategyDefinition(validDoc({ status: "RETIRED" }), "/tmp/x.json", VERIFIED_CATALOGUE);
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.record.result.usableForBacktest).toBe(false);
+    });
+  });
+
+  describe("content hash", () => {
+    it("is a valid lowercase hex SHA-256 digest, tagged with the algorithm", () => {
+      const result = validateStrategyDefinition(validDoc(), "/tmp/x.json", VERIFIED_CATALOGUE);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.record.result.provenance.contentHashAlgorithm).toBe("sha256");
+        expect(CONTENT_HASH_ALGORITHM).toBe("sha256");
+        expect(result.record.result.provenance.contentHash).toMatch(/^[0-9a-f]{64}$/);
+      }
+    });
+
+    it("different key order in the source object produces an identical hash", () => {
+      const forward = validDoc();
+      const reversedKeys = Object.keys(forward as Record<string, unknown>).reverse();
+      const reversed = Object.fromEntries(reversedKeys.map((k) => [k, (forward as Record<string, unknown>)[k]]));
+      expect(computeContentHash(forward)).toBe(computeContentHash(reversed));
+    });
+
+    it("an identical document loaded from two different file paths hashes identically", () => {
+      const a = validateStrategyDefinition(validDoc(), "/tmp/a.json", VERIFIED_CATALOGUE);
+      const b = validateStrategyDefinition(validDoc(), "/some/other/dir/b.json", VERIFIED_CATALOGUE);
+      expect(a.ok && b.ok).toBe(true);
+      if (a.ok && b.ok) expect(a.record.result.provenance.contentHash).toBe(b.record.result.provenance.contentHash);
+    });
+
+    it("source file path does not affect the hash even though it differs between the two calls", () => {
+      const shortPath = validateStrategyDefinition(validDoc(), "x.json", VERIFIED_CATALOGUE);
+      const longPath = validateStrategyDefinition(validDoc(), "/very/long/absolute/directory/path/x.json", VERIFIED_CATALOGUE);
+      expect(shortPath.ok && longPath.ok).toBe(true);
+      if (shortPath.ok && longPath.ok) expect(shortPath.record.result.provenance.contentHash).toBe(longPath.record.result.provenance.contentHash);
+    });
+
+    it("wall-clock time does not affect the hash (no loadedAt/timestamp is ever hashed)", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2020-01-01T00:00:00.000Z"));
+        const first = computeContentHash(validDoc());
+        vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+        const second = computeContentHash(validDoc());
+        expect(first).toBe(second);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a changed indicator period produces a different hash", () => {
+      const a = computeContentHash(
+        validDoc({
+          indicators: [
+            { id: "ema20", type: "EMA", sourceField: "close", parameters: { period: 20 }, outputAlias: "EMA20" },
+            { id: "ema50", type: "EMA", sourceField: "close", parameters: { period: 50 }, outputAlias: "EMA50" },
+          ],
+        }),
+      );
+      const b = computeContentHash(
+        validDoc({
+          indicators: [
+            { id: "ema20", type: "EMA", sourceField: "close", parameters: { period: 21 }, outputAlias: "EMA20" },
+            { id: "ema50", type: "EMA", sourceField: "close", parameters: { period: 50 }, outputAlias: "EMA50" },
+          ],
+        }),
+      );
+      expect(a).not.toBe(b);
+    });
+
+    it("a changed entry rule produces a different hash", () => {
+      const a = computeContentHash(validDoc());
+      const b = computeContentHash(validDoc({ entryRules: { operator: "LESS_THAN", left: { kind: "INDICATOR_ALIAS", alias: "EMA20" }, right: { kind: "INDICATOR_ALIAS", alias: "EMA50" } } }));
+      expect(a).not.toBe(b);
+    });
+
+    it("a changed status produces a different hash", () => {
+      const a = computeContentHash(validDoc());
+      const b = computeContentHash(validDoc({ status: "DRAFT" }));
+      expect(a).not.toBe(b);
+    });
+
+    it("a changed array order produces a different hash where order is semantically meaningful", () => {
+      const a = computeContentHash(validDoc({ supportedInstruments: ["BTC", "ETH"] }));
+      const b = computeContentHash(validDoc({ supportedInstruments: ["ETH", "BTC"] }));
+      expect(a).not.toBe(b);
+    });
+
+    it("canonicalStringify never mutates its input", () => {
+      const doc = validDoc();
+      const before = JSON.parse(JSON.stringify(doc));
+      canonicalStringify(doc);
+      expect(doc).toEqual(before);
+    });
+
+    it("canonicalStringify sorts object keys but preserves array element order", () => {
+      expect(canonicalStringify({ b: 1, a: 2 })).toBe(canonicalStringify({ a: 2, b: 1 }));
+      expect(canonicalStringify([1, 2, 3])).not.toBe(canonicalStringify([3, 2, 1]));
+    });
+  });
+
+  describe("loadedAt provenance", () => {
+    it("defaults to a valid UTC ISO-8601 timestamp when not supplied by the caller", () => {
+      const result = validateStrategyDefinition(validDoc(), "/tmp/x.json", VERIFIED_CATALOGUE);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const { loadedAt } = result.record.result.provenance;
+        expect(loadedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+        expect(new Date(loadedAt).toISOString()).toBe(loadedAt); // round-trips — genuinely valid ISO-8601 UTC
+      }
+    });
+
+    it("respects an explicitly injected loadedAt value rather than reading the real clock", () => {
+      const injected = "2020-01-01T00:00:00.000Z";
+      const result = validateStrategyDefinition(validDoc(), "/tmp/x.json", VERIFIED_CATALOGUE, injected);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.record.result.provenance.loadedAt).toBe(injected);
+    });
+
+    it("is never sourced from the document — a loadedAt field in the source JSON is rejected as an unrecognised root field", () => {
+      const result = validateStrategyDefinition(validDoc({ loadedAt: "2020-01-01T00:00:00.000Z" }), "/tmp/x.json", VERIFIED_CATALOGUE);
+      expect(result).toMatchObject({ ok: false, reason: "UNEXPECTED_SHAPE" });
+    });
+
+    it("different loadedAt values never change the content hash", () => {
+      const a = validateStrategyDefinition(validDoc(), "/tmp/x.json", VERIFIED_CATALOGUE, "2020-01-01T00:00:00.000Z");
+      const b = validateStrategyDefinition(validDoc(), "/tmp/x.json", VERIFIED_CATALOGUE, "2030-06-15T12:00:00.000Z");
+      expect(a.ok && b.ok).toBe(true);
+      if (a.ok && b.ok) {
+        expect(a.record.result.provenance.loadedAt).not.toBe(b.record.result.provenance.loadedAt);
+        expect(a.record.result.provenance.contentHash).toBe(b.record.result.provenance.contentHash);
+      }
+    });
+
+    it("different loadedAt values never change duplicate-equality identity (the value the registry's own recordsEqual relies on)", () => {
+      // The registry compares `provenance.contentHash` alone to decide "identical duplicate" — this
+      // proves that comparison is stable across two validations of the same document that only
+      // differ in their injected loadedAt, which is exactly what recordsEqual depends on.
+      const a = validateStrategyDefinition(validDoc(), "/a.json", VERIFIED_CATALOGUE, "2020-01-01T00:00:00.000Z");
+      const b = validateStrategyDefinition(validDoc(), "/b.json", VERIFIED_CATALOGUE, "2025-05-05T05:05:05.000Z");
+      expect(a.ok && b.ok).toBe(true);
+      if (a.ok && b.ok) expect(a.record.result.provenance.contentHash).toBe(b.record.result.provenance.contentHash);
     });
   });
 });

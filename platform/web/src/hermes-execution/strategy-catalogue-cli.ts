@@ -40,8 +40,13 @@ function printRejections(label: string, rejected: ReadonlyArray<{ filePath: stri
   }
 }
 
+// Short prefix only — a full 64-hex-char SHA-256 digest would make every default human-output row
+// excessively wide; the full value is always available via --json (result.provenance.contentHash).
+const HUMAN_HASH_PREFIX_LENGTH = 8;
+
 function formatRow(record: ValidatedStrategyRecord, versionCount: number): string {
   const { document, result } = record;
+  const { contentHashAlgorithm, contentHash } = result.provenance;
   return (
     `${document.strategyId.padEnd(24)}  ` +
     `v${document.strategyVersion.padEnd(9)}  ` +
@@ -49,7 +54,8 @@ function formatRow(record: ValidatedStrategyRecord, versionCount: number): strin
     `usableForBacktest=${(result.usableForBacktest ? "yes" : "no").padEnd(3)}  ` +
     `usableForDemo=${(result.usableForDemo ? "yes" : "no").padEnd(3)}  ` +
     `instruments=${result.supportedCatalogueInstruments.join(",") || "none"}  ` +
-    `versions=${versionCount}`
+    `versions=${versionCount}  ` +
+    `hash=${contentHashAlgorithm}:${contentHash.slice(0, HUMAN_HASH_PREFIX_LENGTH)}…`
   );
 }
 
@@ -68,7 +74,9 @@ export async function main(): Promise<void> {
     stage4Evidence,
   });
 
-  const strategyLoad = await loadStrategyDefinitions(STRATEGIES_DIR, catalogueEntries);
+  // Same instant as `generatedAt` — one clock read for the whole CLI invocation, so every
+  // strategy's own `loadedAt` matches the catalogue's own generation timestamp exactly.
+  const strategyLoad = await loadStrategyDefinitions(STRATEGIES_DIR, catalogueEntries, { now: () => generatedAt });
   const latest = selectLatestVersions(strategyLoad.accepted);
   const latestRecords = [...latest.values()].sort((a, b) => a.document.strategyId.localeCompare(b.document.strategyId));
 
@@ -89,6 +97,8 @@ export async function main(): Promise<void> {
               status: r.document.status,
               valid: r.result.valid,
               filePath: r.filePath,
+              contentHash: r.result.provenance.contentHash,
+              loadedAt: r.result.provenance.loadedAt,
             })),
           })),
         },

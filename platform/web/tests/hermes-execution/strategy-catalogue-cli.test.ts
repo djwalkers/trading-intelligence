@@ -101,7 +101,24 @@ describe("strategy-catalogue-cli", () => {
     expect(row).toMatch(/instruments=BTC/);
   });
 
-  it("supports --json output with full curated strategy/rejection data", async () => {
+  it("human output includes a concise content-hash prefix, not the full 64-hex-char digest", async () => {
+    await fs.writeFile(path.join(strategiesDir, "test.json"), JSON.stringify(strategyDoc()), "utf-8");
+    process.argv = ["node", "strategy-catalogue-cli.ts"];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let lines: string[];
+    try {
+      const { main } = await import("@/hermes-execution/strategy-catalogue-cli");
+      await main();
+    } finally {
+      lines = logSpy.mock.calls.map((call) => String(call[0]));
+      logSpy.mockRestore();
+    }
+    const row = lines.find((l) => l.startsWith("TEST_STRATEGY_V1"))!;
+    expect(row).toMatch(/hash=sha256:[0-9a-f]{8}…/);
+    expect(row).not.toMatch(/[0-9a-f]{64}/); // the full digest itself must never appear in human output
+  });
+
+  it("supports --json output with full curated strategy/rejection data, including the full content hash", async () => {
     await fs.writeFile(path.join(strategiesDir, "test.json"), JSON.stringify(strategyDoc()), "utf-8");
     await fs.writeFile(path.join(strategiesDir, "broken.json"), "{ not valid json", "utf-8");
     process.argv = ["node", "strategy-catalogue-cli.ts", "--json"];
@@ -119,6 +136,12 @@ describe("strategy-catalogue-cli", () => {
     expect(parsed.strategies).toHaveLength(1);
     expect(parsed.strategies[0].document.strategyId).toBe("TEST_STRATEGY_V1");
     expect(parsed.strategies[0].result.usableForDemo).toBe(false);
+    expect(parsed.strategies[0].result.provenance.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(parsed.strategies[0].result.provenance.contentHashAlgorithm).toBe("sha256");
+    expect(parsed.strategies[0].result.provenance.loadedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(parsed.strategies[0].history[0].contentHash).toBe(parsed.strategies[0].result.provenance.contentHash);
+    expect(parsed.strategies[0].history[0].loadedAt).toBe(parsed.strategies[0].result.provenance.loadedAt);
+    expect(parsed.strategies[0].result.provenance.loadedAt).toBe(parsed.generatedAt); // one shared clock read for the whole CLI run
     expect(parsed.rejectedCount).toBe(1);
   });
 
