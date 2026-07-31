@@ -10,6 +10,11 @@ import {
   FUTURE_TIMESTAMP_TOLERANCE_MS,
   type ValidatedEvidenceRecord,
 } from "@/lib/hermes-execution/instrument-catalogue/instrument-catalogue";
+import {
+  loadStage4CapabilityEvidence,
+  STAGE4_EVIDENCE_SCHEMA_VERSION,
+  STAGE4_EVIDENCE_TYPE,
+} from "@/lib/hermes-execution/instrument-catalogue/stage4-capability-evidence";
 
 // Phase 0 instrument catalogue — pure/fixture-only tests. Never calls eToro, never runs the probe,
 // never touches the real .data/hermes-execution directory (a fresh, isolated temp directory is used
@@ -214,6 +219,55 @@ describe("computeEffectiveCapabilityStatus", () => {
 
   it("a Stage-4 FAILED dominates a read-only pass", () => {
     expect(computeEffectiveCapabilityStatus("READ_ONLY_VERIFIED", "FAILED")).toBe("FAILED");
+  });
+
+  it("a Stage-4 INDETERMINATE dominates a read-only pass, distinct from FAILED", () => {
+    expect(computeEffectiveCapabilityStatus("READ_ONLY_VERIFIED", "INDETERMINATE")).toBe("INDETERMINATE");
+  });
+
+  it("readOnly != READ_ONLY_VERIFIED can never yield VERIFIED, even with stage4 VERIFIED (newer degraded read-only lowers effective status over an older Stage-4 VERIFIED)", () => {
+    expect(computeEffectiveCapabilityStatus("NOT_TESTED", "VERIFIED")).toBe("NOT_TESTED");
+    expect(computeEffectiveCapabilityStatus("UNSUPPORTED", "VERIFIED")).toBe("UNSUPPORTED");
+    expect(computeEffectiveCapabilityStatus("PARTIALLY_SUPPORTED", "VERIFIED")).toBe("PARTIALLY_SUPPORTED");
+  });
+
+  it("stage4 FAILED/INDETERMINATE surface honestly regardless of readOnly, never hidden behind a stale reading", () => {
+    for (const readOnly of ["NOT_TESTED", "UNSUPPORTED", "PARTIALLY_SUPPORTED", "READ_ONLY_VERIFIED"] as const) {
+      expect(computeEffectiveCapabilityStatus(readOnly, "FAILED")).toBe("FAILED");
+      expect(computeEffectiveCapabilityStatus(readOnly, "INDETERMINATE")).toBe("INDETERMINATE");
+    }
+  });
+
+  describe("complete 4x4 truth table (readOnly x stage4)", () => {
+    const readOnlyStates = ["NOT_TESTED", "UNSUPPORTED", "PARTIALLY_SUPPORTED", "READ_ONLY_VERIFIED"] as const;
+    const stage4States = ["NOT_TESTED", "VERIFIED", "FAILED", "INDETERMINATE"] as const;
+
+    const expected: Record<string, string> = {
+      "NOT_TESTED|NOT_TESTED": "NOT_TESTED",
+      "NOT_TESTED|VERIFIED": "NOT_TESTED",
+      "NOT_TESTED|FAILED": "FAILED",
+      "NOT_TESTED|INDETERMINATE": "INDETERMINATE",
+      "UNSUPPORTED|NOT_TESTED": "UNSUPPORTED",
+      "UNSUPPORTED|VERIFIED": "UNSUPPORTED",
+      "UNSUPPORTED|FAILED": "FAILED",
+      "UNSUPPORTED|INDETERMINATE": "INDETERMINATE",
+      "PARTIALLY_SUPPORTED|NOT_TESTED": "PARTIALLY_SUPPORTED",
+      "PARTIALLY_SUPPORTED|VERIFIED": "PARTIALLY_SUPPORTED",
+      "PARTIALLY_SUPPORTED|FAILED": "FAILED",
+      "PARTIALLY_SUPPORTED|INDETERMINATE": "INDETERMINATE",
+      "READ_ONLY_VERIFIED|NOT_TESTED": "READ_ONLY_VERIFIED",
+      "READ_ONLY_VERIFIED|VERIFIED": "VERIFIED",
+      "READ_ONLY_VERIFIED|FAILED": "FAILED",
+      "READ_ONLY_VERIFIED|INDETERMINATE": "INDETERMINATE",
+    };
+
+    for (const readOnly of readOnlyStates) {
+      for (const stage4 of stage4States) {
+        it(`readOnly=${readOnly}, stage4=${stage4} -> ${expected[`${readOnly}|${stage4}`]}`, () => {
+          expect(computeEffectiveCapabilityStatus(readOnly, stage4)).toBe(expected[`${readOnly}|${stage4}`]);
+        });
+      }
+    }
   });
 });
 
@@ -441,5 +495,120 @@ describe("loadCapabilityEvidence + buildInstrumentCatalogue (filesystem)", () =>
       // runId "probe-etoro-b" sorts after "probe-etoro-a" — deterministic tie-break, not file order.
       expect(first[0]!.evidenceRunId).toBe("probe-etoro-b");
     });
+  });
+});
+
+describe("buildInstrumentCatalogue — Stage-4 evidence merge", () => {
+  let stage4Dir: string;
+
+  beforeEach(async () => {
+    stage4Dir = await fs.mkdtemp(path.join(os.tmpdir(), "instrument-catalogue-stage4-test-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(stage4Dir, { recursive: true, force: true });
+  });
+
+  // Keeps `stages` consistent with `finalClassification` by default — validateStage4EvidenceDocument
+  // recomputes classification from `stages` itself and rejects any document where they disagree.
+  function stage4StagesFor(classification: string) {
+    const notRun = { status: "NOT_RUN", detail: "not attempted" };
+    if (classification === "FAILED") {
+      return { resolution: { status: "FAILED", detail: "failed" }, quote: notRun, openOrderSubmission: notRun, openPositionConfirmation: notRun, closeOrderSubmission: notRun, closedPositionConfirmation: notRun };
+    }
+    if (classification === "INDETERMINATE") {
+      return {
+        resolution: { status: "SUCCEEDED", detail: "ok" },
+        quote: { status: "SUCCEEDED", detail: "ok" },
+        openOrderSubmission: { status: "INDETERMINATE", detail: "ambiguous" },
+        openPositionConfirmation: notRun,
+        closeOrderSubmission: notRun,
+        closedPositionConfirmation: notRun,
+      };
+    }
+    const succeeded = { status: "SUCCEEDED", detail: "ok" };
+    return { resolution: succeeded, quote: succeeded, openOrderSubmission: succeeded, openPositionConfirmation: succeeded, closeOrderSubmission: succeeded, closedPositionConfirmation: succeeded };
+  }
+
+  async function writeStage4(fileName: string, overrides: Record<string, unknown> = {}): Promise<void> {
+    const finalClassification = typeof overrides.finalClassification === "string" ? overrides.finalClassification : "VERIFIED";
+    const doc = {
+      schemaVersion: STAGE4_EVIDENCE_SCHEMA_VERSION,
+      evidenceType: STAGE4_EVIDENCE_TYPE,
+      runId: "smoke-etoro-1000",
+      startedAt: "2026-07-31T00:00:00.000Z",
+      completedAt: "2026-07-31T00:00:05.000Z",
+      gitCommit: "abc123",
+      appVersion: "1.13.0",
+      brokerProvider: "etoro-demo",
+      requestedInstrument: "BTC",
+      resolvedInstrument: { symbol: "BTC", displayName: "Bitcoin", brokerInstrumentId: 100000, instrumentTypeID: 10, exchangeID: 8 },
+      accountModeEvidence: { configuredProvider: "etoro-demo", demoOnlyGuardPassed: true, liveRouteReachable: false },
+      stages: stage4StagesFor(finalClassification),
+      finalClassification: "VERIFIED",
+      classificationReasons: [],
+      limitations: [],
+      evidenceGeneratedAt: "2026-07-31T00:00:05.000Z",
+      ...overrides,
+    };
+    await fs.writeFile(path.join(stage4Dir, fileName), JSON.stringify(doc), "utf-8");
+  }
+
+  async function loadStage4(directory = stage4Dir) {
+    return loadStage4CapabilityEvidence(directory, { nowMs: FIXED_NOW_MS });
+  }
+
+  it("missing Stage-4 directory (or omitted stage4Evidence) leaves every seed symbol NOT_TESTED", async () => {
+    const stage4Evidence = await loadStage4(path.join(stage4Dir, "does-not-exist"));
+    const withOption = buildInstrumentCatalogue({ seedSymbols: ["BTC", "ETH", "SOL"], configuredUniverse: ["BTC", "ETH", "SOL"], evidence: { sourceDirectory: "", accepted: [], rejected: [] }, stage4Evidence });
+    const withoutOption = buildInstrumentCatalogue({ seedSymbols: ["BTC", "ETH", "SOL"], configuredUniverse: ["BTC", "ETH", "SOL"], evidence: { sourceDirectory: "", accepted: [], rejected: [] } });
+    for (const entries of [withOption, withoutOption]) {
+      expect(entries.every((e) => e.stage4CapabilityStatus === "NOT_TESTED")).toBe(true);
+      expect(entries.every((e) => e.stage4EvidenceRunId === null)).toBe(true);
+      expect(entries.every((e) => e.stage4History.length === 0)).toBe(true);
+    }
+  });
+
+  it("a VERIFIED Stage-4 run populates provenance fields and, with matching READ_ONLY_VERIFIED evidence, makes effective VERIFIED", async () => {
+    await writeStage4("run.json");
+    const stage4Evidence = await loadStage4();
+    const evidence = { sourceDirectory: "", accepted: [{ filePath: "x", instrument: "BTC", schemaVersion: 2, runId: "probe-1", startedAt: "2026-07-31T00:00:00.000Z", completedAt: "2026-07-31T00:00:00.000Z", completedAtMs: Date.parse("2026-07-31T00:00:00.000Z"), gitCommit: undefined, appVersion: "1.0.0", classification: "READ_ONLY_VERIFIED" as const, classificationReasons: [], brokerInstrumentId: 1, instrumentTypeID: 10, exchangeID: 8, displayName: "Bitcoin" }], rejected: [] };
+    const entries = buildInstrumentCatalogue({ seedSymbols: ["BTC"], configuredUniverse: ["BTC"], evidence, stage4Evidence });
+    expect(entries[0]!.stage4CapabilityStatus).toBe("VERIFIED");
+    expect(entries[0]!.stage4EvidenceRunId).toBe("smoke-etoro-1000");
+    expect(entries[0]!.stage4EvidenceGitCommit).toBe("abc123");
+    expect(entries[0]!.stage4EvidenceFile).toBeTruthy();
+    expect(entries[0]!.stage4History).toHaveLength(1);
+    expect(entries[0]!.effectiveCapabilityStatus).toBe("VERIFIED");
+  });
+
+  it("read-only and Stage-4 provenance stay on separate fields — read-only history is never mixed with stage4History", async () => {
+    await writeStage4("run.json");
+    const stage4Evidence = await loadStage4();
+    const entries = buildInstrumentCatalogue({ seedSymbols: ["BTC"], configuredUniverse: ["BTC"], evidence: { sourceDirectory: "", accepted: [], rejected: [] }, stage4Evidence });
+    expect(entries[0]!.history).toHaveLength(0);
+    expect(entries[0]!.stage4History).toHaveLength(1);
+    expect(entries[0]!.evidenceRunId).toBeNull();
+    expect(entries[0]!.stage4EvidenceRunId).toBe("smoke-etoro-1000");
+  });
+
+  it("a newer FAILED Stage-4 run supersedes an older VERIFIED one (most-favourable is never preserved)", async () => {
+    await writeStage4("old.json", { runId: "run-old", startedAt: "2026-07-29T00:00:00.000Z", completedAt: "2026-07-30T00:00:00.000Z", finalClassification: "VERIFIED" });
+    await writeStage4("new.json", { runId: "run-new", completedAt: "2026-07-31T00:00:00.000Z", finalClassification: "FAILED" });
+    const stage4Evidence = await loadStage4();
+    const entries = buildInstrumentCatalogue({ seedSymbols: ["BTC"], configuredUniverse: ["BTC"], evidence: { sourceDirectory: "", accepted: [], rejected: [] }, stage4Evidence });
+    expect(entries[0]!.stage4CapabilityStatus).toBe("FAILED");
+    expect(entries[0]!.stage4EvidenceRunId).toBe("run-new");
+    expect(entries[0]!.stage4History).toHaveLength(2);
+  });
+
+  it("a newer INDETERMINATE Stage-4 run supersedes an older VERIFIED one", async () => {
+    await writeStage4("old.json", { runId: "run-old", startedAt: "2026-07-29T00:00:00.000Z", completedAt: "2026-07-30T00:00:00.000Z", finalClassification: "VERIFIED" });
+    await writeStage4("new.json", { runId: "run-new", completedAt: "2026-07-31T00:00:00.000Z", finalClassification: "INDETERMINATE" });
+    const stage4Evidence = await loadStage4();
+    const entries = buildInstrumentCatalogue({ seedSymbols: ["BTC"], configuredUniverse: ["BTC"], evidence: { sourceDirectory: "", accepted: [], rejected: [] }, stage4Evidence });
+    expect(entries[0]!.stage4CapabilityStatus).toBe("INDETERMINATE");
+    expect(entries[0]!.effectiveCapabilityStatus).toBe("INDETERMINATE");
+    expect(entries[0]!.stage4History).toHaveLength(2);
   });
 });

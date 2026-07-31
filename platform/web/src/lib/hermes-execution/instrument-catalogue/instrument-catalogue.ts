@@ -1,6 +1,10 @@
 import * as fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import * as path from "node:path";
+// Type-only — erased at compile time, so this never creates a runtime circular import even though
+// stage4-capability-evidence.ts itself imports normalizeSymbol/FUTURE_TIMESTAMP_TOLERANCE_MS from
+// THIS file. Only the shape of Stage-4 evidence is shared here, never its loading logic.
+import type { Stage4EvidenceLoadResult, ValidatedStage4EvidenceRecord, Stage4FinalClassification } from "./stage4-capability-evidence";
 
 // Phase 0 — Instrument Catalogue foundation. Ingests the read-only eToro capability probe's own
 // schema-version-2 evidence documents (etoro-instrument-probe.ts) into a small, typed, queryable
@@ -15,16 +19,16 @@ import * as path from "node:path";
  * read-only probe run can produce; VERIFIED is Stage-4-only and never appears here). */
 export type ReadOnlyCapabilityStatus = "NOT_TESTED" | "UNSUPPORTED" | "PARTIALLY_SUPPORTED" | "READ_ONLY_VERIFIED";
 
-/** Stage 4 (broker-etoro-smoke.ts) evidence is not ingested by this first version at all — no
- * Stage-4 evidence file format/location exists yet (see this module's own top-of-file note and the
- * design doc's "known limitation"). Every catalogue entry's `stage4CapabilityStatus` is therefore
- * always NOT_TESTED today; the type exists so `effectiveCapabilityStatus` and a future Stage-4
- * loader are both already well-typed. */
-export type Stage4CapabilityStatus = "NOT_TESTED" | "VERIFIED" | "FAILED";
+/** Stage 4 (broker-etoro-smoke.ts) evidence, ingested from its own dedicated evidence directory —
+ * see stage4-capability-evidence.ts. INDETERMINATE means the broker's final state could not be
+ * proven safely (ambiguous match, timeout after a mutation, etc.) — deliberately never collapsed
+ * into FAILED (which implies "nothing happened") or VERIFIED. */
+export type Stage4CapabilityStatus = "NOT_TESTED" | "VERIFIED" | "FAILED" | "INDETERMINATE";
 
 /** Never READ_ONLY_VERIFIED-derived-VERIFIED — see computeEffectiveCapabilityStatus's own doc
- * comment for the exact precedence. */
-export type EffectiveCapabilityStatus = ReadOnlyCapabilityStatus | "VERIFIED" | "FAILED";
+ * comment for the exact precedence. INDETERMINATE is its own honest state, never collapsed into
+ * FAILED or a stale read-only reading. */
+export type EffectiveCapabilityStatus = ReadOnlyCapabilityStatus | "VERIFIED" | "FAILED" | "INDETERMINATE";
 
 export type AssetClass = "crypto" | "equity" | "unknown";
 
@@ -105,10 +109,22 @@ export interface InstrumentCatalogueEntry {
   evidenceFile: string | null;
   classificationReasons: string[];
   limitations: string[];
-  /** Every trusted evidence run found for this instrument, oldest first — requirement 7's own
-   * "retain summary/history of prior states if practical." The LAST element is always the one
-   * every other field above was derived from. */
+  /** Every trusted READ-ONLY evidence run found for this instrument, oldest first — requirement 7's
+   * own "retain summary/history of prior states if practical." The LAST element is always the one
+   * every other read-only field above was derived from. Kept entirely separate from
+   * `stage4History` below — the two provenance trails are never merged. */
   history: Array<{ completedAt: string; runId: string; classification: ReadOnlyCapabilityStatus; evidenceFile: string }>;
+  /** Stage-4 provenance — deliberately separate fields from the read-only ones above, never merged
+   * into a single "evidenceRunId"/"evidenceFile" pair, since a read-only run and a Stage-4 run are
+   * different evidence trails that can each independently be the "latest" for their own dimension. */
+  stage4LastTestedAt: string | null;
+  stage4EvidenceRunId: string | null;
+  stage4EvidenceGitCommit: string | null;
+  stage4EvidenceFile: string | null;
+  stage4ClassificationReasons: string[];
+  /** Every trusted Stage-4 evidence run found for this instrument, oldest first. The LAST element is
+   * always the one `stage4CapabilityStatus`/the other stage4* fields above were derived from. */
+  stage4History: Array<{ completedAt: string; runId: string; classification: Stage4FinalClassification; evidenceFile: string }>;
 }
 
 export const CATALOGUE_SCHEMA_MIN_VERSION = 2;
@@ -137,7 +153,7 @@ function toErrorMessage(error: unknown): string {
 /** Same uppercase+trim convention config.ts uses for `HERMES_INSTRUMENT_UNIVERSE` entries — the
  * one normalisation rule this module documents and applies when comparing a requested instrument
  * symbol against the broker's own resolved symbol. */
-function normalizeSymbol(symbol: string): string {
+export function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
 }
 
@@ -396,14 +412,29 @@ function inferAssetClass(instrumentTypeID: number | null): AssetClass {
 }
 
 /**
- * Never VERIFIED purely from read-only evidence (requirement: "Effective status must not become
- * VERIFIED from read-only evidence alone") — VERIFIED requires stage4 === "VERIFIED" specifically.
- * A Stage-4 FAILED result dominates (a concrete broker-execution failure is never masked by an
- * unrelated read-only pass); otherwise effective mirrors the read-only status as-is.
+ * Complete, deterministic 4x4 truth table (readOnly x stage4) — every combination maps to an
+ * explicit, honest state; nothing is guessed or hidden.
+ *
+ * Precedence, in order:
+ *  1. stage4 === "FAILED"        -> "FAILED"        (a concrete broker-execution failure is never
+ *                                                      masked by an unrelated read-only reading)
+ *  2. stage4 === "INDETERMINATE" -> "INDETERMINATE"  (an unresolved ambiguity about broker state is
+ *                                                      never papered over either — dominates just
+ *                                                      like FAILED, for the same reason)
+ *  3. readOnly !== "READ_ONLY_VERIFIED" -> readOnly  (VERIFIED can NEVER be claimed — including from
+ *                                                      an older Stage-4 VERIFIED result — unless the
+ *                                                      CURRENT read-only evidence is itself clean; a
+ *                                                      newer degraded read-only run always lowers
+ *                                                      effective status even over a still-VERIFIED
+ *                                                      Stage-4 history)
+ *  4. stage4 === "VERIFIED"      -> "VERIFIED"       (readOnly is READ_ONLY_VERIFIED from here)
+ *  5. otherwise (stage4 === "NOT_TESTED") -> readOnly (== "READ_ONLY_VERIFIED")
  */
 export function computeEffectiveCapabilityStatus(readOnly: ReadOnlyCapabilityStatus, stage4: Stage4CapabilityStatus): EffectiveCapabilityStatus {
-  if (stage4 === "VERIFIED") return "VERIFIED";
   if (stage4 === "FAILED") return "FAILED";
+  if (stage4 === "INDETERMINATE") return "INDETERMINATE";
+  if (readOnly !== "READ_ONLY_VERIFIED") return readOnly;
+  if (stage4 === "VERIFIED") return "VERIFIED";
   return readOnly;
 }
 
@@ -417,7 +448,14 @@ export interface BuildCatalogueOptions {
    * get a catalogue row at all. */
   configuredUniverse: readonly string[];
   evidence: EvidenceLoadResult;
+  /** The dedicated Stage-4 evidence source (stage4-capability-evidence.ts's own loader output).
+   * Optional so every existing read-only-only caller/test keeps working unchanged — omitted (or an
+   * empty result) means every seed symbol's Stage-4 state is NOT_TESTED, exactly as if Stage 4 had
+   * simply never been run. */
+  stage4Evidence?: Stage4EvidenceLoadResult;
 }
+
+const EMPTY_STAGE4_EVIDENCE: Stage4EvidenceLoadResult = { sourceDirectory: "", accepted: [], rejected: [] };
 
 /**
  * Pure — given already-loaded evidence, builds one entry per seed symbol (never more, never
@@ -425,7 +463,9 @@ export interface BuildCatalogueOptions {
  * "Latest trustworthy run wins" (requirement 7/8): accepted records for one instrument are sorted
  * by (completedAtMs, runId) and the LAST one is authoritative — this is purely chronological, so a
  * newer PARTIALLY_SUPPORTED or even UNSUPPORTED run correctly supersedes an older
- * READ_ONLY_VERIFIED one (requirement 6), never the reverse.
+ * READ_ONLY_VERIFIED one (requirement 6), never the reverse. Stage-4 evidence is grouped/sorted the
+ * exact same way, entirely independently — a newer FAILED or INDETERMINATE Stage-4 run always
+ * supersedes an older VERIFIED one; the most favourable Stage-4 result is never preserved.
  */
 export function buildInstrumentCatalogue(options: BuildCatalogueOptions): InstrumentCatalogueEntry[] {
   const byInstrument = new Map<string, ValidatedEvidenceRecord[]>();
@@ -438,15 +478,32 @@ export function buildInstrumentCatalogue(options: BuildCatalogueOptions): Instru
     list.sort((a, b) => a.completedAtMs - b.completedAtMs || a.runId.localeCompare(b.runId));
   }
 
+  const stage4Evidence = options.stage4Evidence ?? EMPTY_STAGE4_EVIDENCE;
+  const stage4ByInstrument = new Map<string, ValidatedStage4EvidenceRecord[]>();
+  for (const record of stage4Evidence.accepted) {
+    const list = stage4ByInstrument.get(record.requestedInstrument) ?? [];
+    list.push(record);
+    stage4ByInstrument.set(record.requestedInstrument, list);
+  }
+  for (const list of stage4ByInstrument.values()) {
+    list.sort((a, b) => a.completedAtMs - b.completedAtMs || a.runId.localeCompare(b.runId));
+  }
+
   return options.seedSymbols.map((symbol) => {
     const records = byInstrument.get(symbol) ?? [];
     const current = records[records.length - 1];
     const configuredInUniverse = options.configuredUniverse.includes(symbol);
     const readOnlyCapabilityStatus: ReadOnlyCapabilityStatus = current?.classification ?? "NOT_TESTED";
-    const stage4CapabilityStatus: Stage4CapabilityStatus = "NOT_TESTED"; // no Stage-4 evidence source ingested in this phase.
+
+    const stage4Records = stage4ByInstrument.get(symbol) ?? [];
+    const currentStage4 = stage4Records[stage4Records.length - 1];
+    const stage4CapabilityStatus: Stage4CapabilityStatus = currentStage4?.finalClassification ?? "NOT_TESTED";
     const effectiveCapabilityStatus = computeEffectiveCapabilityStatus(readOnlyCapabilityStatus, stage4CapabilityStatus);
 
-    const limitations: string[] = ["Stage 4 (broker execution) not yet verified — capability is read-only-only."];
+    const limitations: string[] = [];
+    if (stage4CapabilityStatus === "NOT_TESTED") {
+      limitations.push("Stage 4 (broker execution) not yet verified — capability is read-only-only.");
+    }
     if (current?.instrumentTypeID == null) limitations.push("assetClass unresolved — no confirmed instrumentTypeID from evidence.");
 
     return {
@@ -473,6 +530,12 @@ export function buildInstrumentCatalogue(options: BuildCatalogueOptions): Instru
       classificationReasons: current?.classificationReasons ?? [],
       limitations,
       history: records.map((r) => ({ completedAt: r.completedAt, runId: r.runId, classification: r.classification, evidenceFile: r.filePath })),
+      stage4LastTestedAt: currentStage4?.completedAt ?? null,
+      stage4EvidenceRunId: currentStage4?.runId ?? null,
+      stage4EvidenceGitCommit: currentStage4?.gitCommit ?? null,
+      stage4EvidenceFile: currentStage4?.filePath ?? null,
+      stage4ClassificationReasons: currentStage4?.classificationReasons ?? [],
+      stage4History: stage4Records.map((r) => ({ completedAt: r.completedAt, runId: r.runId, classification: r.finalClassification, evidenceFile: r.filePath })),
     };
   });
 }

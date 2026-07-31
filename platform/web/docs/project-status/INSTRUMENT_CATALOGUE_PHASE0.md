@@ -1,7 +1,11 @@
 # Instrument Catalogue — Phase 0
 
-**Status:** Read-only foundation. No broker order, no Stage 4 execution, no PM2 action, no live
-trading behaviour change, no new instrument enabled. See
+**Status:** Read-only foundation, now also ingesting Stage-4 evidence. The catalogue itself never
+places a broker order, never executes Stage 4, never touches PM2, and never changes live trading
+behaviour or which instruments are enabled — see
+[`ETORO_STAGE4_CAPABILITY_EVIDENCE.md`](./ETORO_STAGE4_CAPABILITY_EVIDENCE.md) for the full Stage-4
+evidence contract (schema, classification/ambiguity rules, exit codes, safety warning) that
+`npm run broker:etoro-smoke` itself produces, and
 [`ETORO_INSTRUMENT_CAPABILITY_PLAN.md`](./ETORO_INSTRUMENT_CAPABILITY_PLAN.md) and
 [`INSTRUMENT_UNIVERSE_DESIGN.md`](./INSTRUMENT_UNIVERSE_DESIGN.md) for the plans this implements.
 
@@ -56,8 +60,12 @@ predates a real quote-freshness classification defect and must never seed the ca
 | Field | Values |
 |---|---|
 | `readOnlyCapabilityStatus` | `NOT_TESTED`, `UNSUPPORTED`, `PARTIALLY_SUPPORTED`, `READ_ONLY_VERIFIED` |
-| `stage4CapabilityStatus` | `NOT_TESTED`, `VERIFIED`, `FAILED` (no Stage-4 evidence source is ingested yet — always `NOT_TESTED` in this phase) |
-| `effectiveCapabilityStatus` | Never becomes `VERIFIED` from read-only evidence alone. `VERIFIED` requires `stage4CapabilityStatus === "VERIFIED"`; a Stage-4 `FAILED` dominates; otherwise it mirrors `readOnlyCapabilityStatus`. |
+| `stage4CapabilityStatus` | `NOT_TESTED`, `VERIFIED`, `FAILED`, `INDETERMINATE` — ingested from the dedicated Stage-4 evidence directory; see [`ETORO_STAGE4_CAPABILITY_EVIDENCE.md`](./ETORO_STAGE4_CAPABILITY_EVIDENCE.md) |
+| `effectiveCapabilityStatus` | `ReadOnlyCapabilityStatus \| "VERIFIED" \| "FAILED" \| "INDETERMINATE"`. Never becomes `VERIFIED` from read-only evidence alone, and never from a stale/degraded read-only reading even if Stage 4 was once `VERIFIED`. A Stage-4 `FAILED` or `INDETERMINATE` result always dominates. Full truth table in the Stage-4 doc. |
+
+Stage-4 provenance is kept on its own separate fields — `stage4LastTestedAt`, `stage4EvidenceRunId`,
+`stage4EvidenceGitCommit`, `stage4EvidenceFile`, `stage4ClassificationReasons`, `stage4History` —
+never merged with the read-only `evidence*`/`history` fields above them.
 
 ## Precedence rules (multiple evidence files)
 
@@ -107,11 +115,24 @@ npm run instrument:catalogue
 npm run instrument:catalogue -- --json
 ```
 
-Prints one row per seed symbol, the rejected-evidence count/reasons, generation timestamp, source
-directory, and an explicit "no provider calls made" line. Never connects to a broker.
+Prints one row per seed symbol showing read-only, Stage-4, and effective status separately, e.g.
+(before any Stage-4 evidence exists):
 
-## Known limitation
+```
+BTC  configured=yes  readOnly=READ_ONLY_VERIFIED    stage4=NOT_TESTED     effective=READ_ONLY_VERIFIED    inTradingUniverse=yes
+ETH  configured=yes  readOnly=READ_ONLY_VERIFIED    stage4=NOT_TESTED     effective=READ_ONLY_VERIFIED    inTradingUniverse=yes
+SOL  configured=yes  readOnly=READ_ONLY_VERIFIED    stage4=NOT_TESTED     effective=READ_ONLY_VERIFIED    inTradingUniverse=yes
+```
 
-Stage 4 (execution) evidence is not ingested by this phase at all — no Stage-4 evidence file
-format/location exists yet. `stage4CapabilityStatus` is always `NOT_TESTED` today. Building that
-ingestion (and any live-runtime wiring) is future work, not part of this foundation.
+Also prints the rejected-evidence count/reasons for BOTH the read-only and Stage-4 sources
+separately (human output caps each list at 10 entries; `--json` always returns the full, curated
+list for both). Never connects to a broker, and never imports or invokes
+`broker-etoro-smoke.ts` — Stage 4 is only ever run explicitly, by a human, via its own command.
+
+## Known limitations
+
+- Stage-4 per-stage internal detail (the six-stage breakdown inside each evidence document) is not
+  surfaced in the catalogue at all — only the already-decided `finalClassification` and provenance
+  are ingested, exactly like the read-only loader trusts `classification` directly rather than
+  re-deriving it from `resolution`/`quote`/`candles` itself.
+- No live-runtime wiring exists yet — the catalogue remains a standalone, read-only reporting tool.
