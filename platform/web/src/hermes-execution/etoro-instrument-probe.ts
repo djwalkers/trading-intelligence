@@ -11,7 +11,7 @@ import {
 } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import { validateHistoricalCandles, diagnoseCandleGaps, type MarketTimeframe } from "@/lib/hermes-execution/market-data/candle-validation";
-import type { RawRateFieldInspection } from "@/lib/hermes-execution/etoro/etoro-quote-diagnostics";
+import { compareQuoteSamples, type RawRateFieldInspection, type CuratedRateSample, type QuoteSampleComparison } from "@/lib/hermes-execution/etoro/etoro-quote-diagnostics";
 import type { Candle } from "@/lib/hermes-execution/types";
 import { checkEtoroDemoConfig, connectEtoroDemoBroker } from "./etoro-cli-shared";
 
@@ -53,6 +53,19 @@ const INTER_INSTRUMENT_PAUSE_MS = 1_500;
 // Plan §3 — "Freshness check: compare the quote's own timestamp... against wall-clock time; flag
 // as stale if the gap exceeds a short threshold (recommend 60 seconds)."
 const QUOTE_STALENESS_THRESHOLD_MS = 60_000;
+
+// Multi-sample rate comparison (probe-etoro-1785449795206 follow-up). Bounded on both ends: a
+// sample count of 1 would defeat the whole point (there is nothing to "compare" across a single
+// sample), and an unbounded count could turn an opt-in diagnostic into an unattended request
+// storm — so both count and interval are validated against these bounds before ANY request is
+// made (see main()'s own argument-validation step, which fails closed with zero network activity
+// on an out-of-range value).
+const MIN_QUOTE_SAMPLE_COUNT = 2;
+const MAX_QUOTE_SAMPLE_COUNT = 10;
+const DEFAULT_QUOTE_SAMPLE_COUNT = 3;
+const MIN_QUOTE_SAMPLE_INTERVAL_MS = 1_000;
+const MAX_QUOTE_SAMPLE_INTERVAL_MS = 60_000;
+const DEFAULT_QUOTE_SAMPLE_INTERVAL_MS = 5_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +123,9 @@ export interface EtoroReadOnlyProbeBroker {
   getRate(instrument: string): Promise<{ bid: number; ask: number; date?: string }>;
   getHistoricalCandles(instrument: string, timeframe: MarketTimeframe, count: number): Promise<Candle[]>;
   getRateFieldDiagnostics(instrument: string): Promise<RawRateFieldInspection>;
+  /** Multi-sample rate comparison (probe-etoro-1785449795206 follow-up) — one more read-only GET
+   * .../rates call per invocation, reachable only via the opt-in `--diagnose-quote-samples` flag. */
+  getRateSample(instrument: string, sampleNumber: number): Promise<CuratedRateSample>;
 }
 
 export type ResolutionOutcome =
@@ -170,6 +186,14 @@ export type CandleOutcome =
 // read-only tool, no matter how clean Stages 1-3 come back.
 export type Classification = "NOT_TESTED" | "UNSUPPORTED" | "PARTIALLY_SUPPORTED" | "READ_ONLY_VERIFIED";
 
+/** Multi-sample rate comparison (probe-etoro-1785449795206 follow-up) — the full sample sequence
+ * plus its deterministic comparison. Diagnostic evidence only; never read by classify() or
+ * classificationReasons(). */
+export interface QuoteSampleDiagnosticResult {
+  samples: CuratedRateSample[];
+  comparison: QuoteSampleComparison;
+}
+
 interface InstrumentProbeResult {
   instrument: string;
   resolution: ResolutionOutcome;
@@ -178,6 +202,7 @@ interface InstrumentProbeResult {
   classification: Classification;
   classificationReasons: string[];
   quoteFieldDiagnostics?: RawRateFieldInspection;
+  quoteSampleDiagnostics?: QuoteSampleDiagnosticResult;
 }
 
 /** The non-secret configuration snapshot captured into every evidence document — never apiKey/
@@ -221,6 +246,10 @@ interface InstrumentEvidenceDocument {
    * succeeded. Quote-timestamp-semantics investigation — see etoro-quote-diagnostics.ts's own
    * top-of-file comment. Never influences `classification` itself. */
   quoteFieldDiagnostics: RawRateFieldInspection | undefined;
+  /** Only present when this run was invoked with `--diagnose-quote-samples` AND resolution
+   * succeeded. Never influences `classification` itself — see QuoteSampleDiagnosticResult's own
+   * doc comment. */
+  quoteSampleDiagnostics: QuoteSampleDiagnosticResult | undefined;
 }
 
 interface ProbeDeps {
@@ -235,6 +264,15 @@ interface ProbeDeps {
    * EtoroDemoBroker.getRateFieldDiagnostics's own doc comment for why this issues a second,
    * separate eToro call when enabled. */
   diagnoseQuoteFields: boolean;
+  /** Opt-in only (`--diagnose-quote-samples`) — never enabled by a default probe run, and
+   * independent of `diagnoseQuoteFields` (either, both, or neither may be set). */
+  diagnoseQuoteSamples: boolean;
+  /** Validated against [MIN_QUOTE_SAMPLE_COUNT, MAX_QUOTE_SAMPLE_COUNT] before main() ever
+   * connects to the broker — only meaningful when diagnoseQuoteSamples is true. */
+  quoteSampleCount: number;
+  /** Validated against [MIN_QUOTE_SAMPLE_INTERVAL_MS, MAX_QUOTE_SAMPLE_INTERVAL_MS] before main()
+   * ever connects to the broker — only meaningful when diagnoseQuoteSamples is true. */
+  quoteSampleIntervalMs: number;
 }
 
 async function recordStageResult(
@@ -599,6 +637,61 @@ async function probeQuoteFieldDiagnostics(deps: ProbeDeps, instrument: string): 
   }
 }
 
+/**
+ * Multi-sample rate comparison (probe-etoro-1785449795206 follow-up) — one sample fetch, with the
+ * SAME bounded retry-once-on-transport-error policy every other stage already uses (never more).
+ * A sample that still fails after its retry is dropped from the sequence (recorded, never
+ * silently substituted with fabricated data) rather than aborting the whole comparison.
+ */
+async function fetchQuoteSampleWithRetry(deps: ProbeDeps, instrument: string, sampleNumber: number, attempt = 1): Promise<CuratedRateSample | undefined> {
+  try {
+    return await deps.broker.getRateSample(instrument, sampleNumber);
+  } catch (error) {
+    if (attempt === 1) {
+      await sleep(INTER_INSTRUMENT_PAUSE_MS);
+      return fetchQuoteSampleWithRetry(deps, instrument, sampleNumber, 2);
+    }
+    await recordStageResult(deps, instrument, "quote", {
+      outcome: "diagnostic-failed",
+      diagnostic: "quote-sample",
+      sampleNumber,
+      message: toErrorMessage(error),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Multi-sample rate comparison (probe-etoro-1785449795206 follow-up) — opt-in only
+ * (`--diagnose-quote-samples`), never called during a default probe run. Requests are strictly
+ * sequential (never parallel) with `deps.quoteSampleIntervalMs` between each — see
+ * EtoroDemoBroker.getRateSample's own doc comment for why each call is independent. Draws NO
+ * conclusion about the provider or the instrument's own classification — only compareQuoteSamples's
+ * deterministic, evidence-only observation codes are ever recorded (see that function's own doc
+ * comment).
+ */
+async function probeQuoteSamples(deps: ProbeDeps, instrument: string): Promise<QuoteSampleDiagnosticResult | undefined> {
+  const samples: CuratedRateSample[] = [];
+  for (let i = 1; i <= deps.quoteSampleCount; i++) {
+    const sample = await fetchQuoteSampleWithRetry(deps, instrument, i);
+    if (sample) samples.push(sample);
+    if (i < deps.quoteSampleCount) {
+      await sleep(deps.quoteSampleIntervalMs);
+    }
+  }
+  if (samples.length === 0) return undefined;
+
+  const comparison = compareQuoteSamples(samples, QUOTE_STALENESS_THRESHOLD_MS);
+  await recordStageResult(deps, instrument, "quote", {
+    outcome: "diagnostic",
+    diagnostic: "quote-sample-comparison",
+    requestedSampleCount: deps.quoteSampleCount,
+    collectedSampleCount: samples.length,
+    comparison,
+  });
+  return { samples, comparison };
+}
+
 async function probeInstrument(
   deps: ProbeDeps,
   instrument: string,
@@ -612,14 +705,22 @@ async function probeInstrument(
   let quote: QuoteOutcome | undefined;
   let candles: CandleOutcome | undefined;
   let quoteFieldDiagnostics: RawRateFieldInspection | undefined;
+  let quoteSampleDiagnostics: QuoteSampleDiagnosticResult | undefined;
   if (resolution.kind === "success") {
     quote = await probeQuote(deps, instrument);
     candles = await probeCandles(deps, instrument);
     if (deps.diagnoseQuoteFields) {
       quoteFieldDiagnostics = await probeQuoteFieldDiagnostics(deps, instrument);
     }
+    if (deps.diagnoseQuoteSamples) {
+      quoteSampleDiagnostics = await probeQuoteSamples(deps, instrument);
+    }
   }
 
+  // Live-BTC-run remediation, still in force: classification is derived purely from `resolution`/
+  // `quote`/`candles` above — quoteFieldDiagnostics/quoteSampleDiagnostics are NEVER passed to
+  // classify()/classificationReasons(), so no diagnostic mode can ever upgrade or downgrade
+  // READ_ONLY_VERIFIED eligibility.
   const classification = classify(resolution, quote, candles);
   const reasons = classificationReasons(resolution, quote, candles);
   const completedAt = new Date().toISOString();
@@ -640,6 +741,7 @@ async function probeInstrument(
       classification,
       classificationReasons: reasons,
       quoteFieldDiagnostics,
+      quoteSampleDiagnostics,
     },
     deps.secrets,
   );
@@ -658,7 +760,7 @@ async function probeInstrument(
   });
 
   return {
-    result: { instrument, resolution, quote, candles, classification, classificationReasons: reasons, quoteFieldDiagnostics },
+    result: { instrument, resolution, quote, candles, classification, classificationReasons: reasons, quoteFieldDiagnostics, quoteSampleDiagnostics },
     evidenceFile,
   };
 }
@@ -729,12 +831,37 @@ function printUsage(): void {
   console.log("  npm run broker:etoro-probe -- ETH SOL");
   console.log("  npm run broker:etoro-probe -- --all");
   console.log("  npm run broker:etoro-probe -- BTC --diagnose-quote-fields   (opt-in, one extra read-only call per instrument)");
+  console.log(
+    "  npm run broker:etoro-probe -- BTC --diagnose-quote-samples --quote-sample-count=5 --quote-sample-interval-ms=5000",
+  );
+  console.log(`                                                              (opt-in, ${MIN_QUOTE_SAMPLE_COUNT}-${MAX_QUOTE_SAMPLE_COUNT} extra sequential read-only calls per instrument)`);
   console.log("");
   console.log(
     "No default instrument is probed when no argument is given — this tool never silently probes " +
       "the whole configured universe. Pass one or more symbols, or --all to explicitly opt into " +
       "probing every instrument in config.hermesAgent.instrumentUniverse.",
   );
+}
+
+/**
+ * Multi-sample rate comparison (probe-etoro-1785449795206 follow-up). Parses `--<prefix><n>`,
+ * returning `defaultValue` (and no error) when the flag is absent entirely — the caller only
+ * consults this at all once `--diagnose-quote-samples` has already been confirmed present.
+ * Rejects (not just clamps) an out-of-range or non-integer value — a silently clamped value would
+ * let an operator believe they configured something they didn't.
+ */
+function parseBoundedIntFlag(rawArgs: readonly string[], prefix: string, defaultValue: number, min: number, max: number): { value: number; error?: string } {
+  const match = rawArgs.find((arg) => arg.trim().toLowerCase().startsWith(prefix));
+  if (!match) return { value: defaultValue };
+  const rawValue = match.trim().slice(prefix.length);
+  const parsed = Number(rawValue);
+  if (!Number.isInteger(parsed)) {
+    return { value: defaultValue, error: `${prefix}<n> must be a whole number, received "${rawValue}".` };
+  }
+  if (parsed < min || parsed > max) {
+    return { value: defaultValue, error: `${prefix}<n> must be between ${min} and ${max}, received ${parsed}.` };
+  }
+  return { value: parsed };
 }
 
 export async function main(): Promise<void> {
@@ -750,9 +877,18 @@ export async function main(): Promise<void> {
   // Quote-timestamp-semantics investigation. Opt-in only, off by default: an ordinary probe run's
   // request count/behaviour is completely unchanged unless this flag is explicitly given.
   const wantsQuoteFieldDiagnostics = rawArgs.some((arg) => arg.trim().toLowerCase() === "--diagnose-quote-fields");
-  const KNOWN_FLAGS = new Set(["--all", "--diagnose-quote-fields"]);
+  // Multi-sample rate comparison (probe-etoro-1785449795206 follow-up). Independent of
+  // --diagnose-quote-fields — either, both, or neither may be given.
+  const wantsQuoteSampleDiagnostics = rawArgs.some((arg) => arg.trim().toLowerCase() === "--diagnose-quote-samples");
+
+  const BOOLEAN_FLAGS = new Set(["--all", "--diagnose-quote-fields", "--diagnose-quote-samples"]);
+  const VALUE_FLAG_PREFIXES = ["--quote-sample-count=", "--quote-sample-interval-ms="];
+  const isFlagArg = (arg: string): boolean => {
+    const normalized = arg.trim().toLowerCase();
+    return BOOLEAN_FLAGS.has(normalized) || VALUE_FLAG_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+  };
   const cliInstruments = rawArgs
-    .filter((arg) => !KNOWN_FLAGS.has(arg.trim().toLowerCase()))
+    .filter((arg) => !isFlagArg(arg))
     .map((s) => s.trim().toUpperCase())
     .filter((s) => s.length > 0);
 
@@ -763,6 +899,28 @@ export async function main(): Promise<void> {
   }
   if (wantsAll && cliInstruments.length > 0) {
     console.log(`Note: --all was given alongside explicit symbol(s) (${cliInstruments.join(", ")}) — probing the full configured universe; the explicit symbols are redundant with --all and are ignored.`);
+  }
+
+  // Multi-sample rate comparison. Validated BEFORE any config/connection work — an invalid bound
+  // fails closed with zero network activity, exactly like the no-instrument-argument case above.
+  let quoteSampleCount = DEFAULT_QUOTE_SAMPLE_COUNT;
+  let quoteSampleIntervalMs = DEFAULT_QUOTE_SAMPLE_INTERVAL_MS;
+  if (wantsQuoteSampleDiagnostics) {
+    const countResult = parseBoundedIntFlag(rawArgs, "--quote-sample-count=", DEFAULT_QUOTE_SAMPLE_COUNT, MIN_QUOTE_SAMPLE_COUNT, MAX_QUOTE_SAMPLE_COUNT);
+    const intervalResult = parseBoundedIntFlag(
+      rawArgs,
+      "--quote-sample-interval-ms=",
+      DEFAULT_QUOTE_SAMPLE_INTERVAL_MS,
+      MIN_QUOTE_SAMPLE_INTERVAL_MS,
+      MAX_QUOTE_SAMPLE_INTERVAL_MS,
+    );
+    if (countResult.error || intervalResult.error) {
+      console.error(countResult.error ?? intervalResult.error);
+      process.exitCode = 1;
+      return;
+    }
+    quoteSampleCount = countResult.value;
+    quoteSampleIntervalMs = intervalResult.value;
   }
 
   const config = getHermesExecutionConfig();
@@ -820,6 +978,14 @@ export async function main(): Promise<void> {
         "the raw response's own field names (quote-timestamp-semantics investigation).",
     );
   }
+  if (wantsQuoteSampleDiagnostics) {
+    const extraRequests = quoteSampleCount * instruments.length;
+    console.log(
+      `--diagnose-quote-samples enabled: ${quoteSampleCount} EXTRA read-only rates call(s) per instrument ` +
+        `(${extraRequests} total across ${instruments.length} instrument(s)), sequential, ${quoteSampleIntervalMs}ms apart ` +
+        "(multi-sample rate comparison). Never places, closes, or alters any order.",
+    );
+  }
 
   const deps: ProbeDeps = {
     broker,
@@ -830,6 +996,9 @@ export async function main(): Promise<void> {
     maxCandleAgeSeconds: config.marketData.maxCandleAgeSeconds,
     secrets: [config.etoro.apiKey, config.etoro.userKey].filter((s): s is string => typeof s === "string" && s.length > 0),
     diagnoseQuoteFields: wantsQuoteFieldDiagnostics,
+    diagnoseQuoteSamples: wantsQuoteSampleDiagnostics,
+    quoteSampleCount,
+    quoteSampleIntervalMs,
   };
 
   const results: InstrumentProbeResult[] = [];
@@ -850,6 +1019,20 @@ export async function main(): Promise<void> {
         `  Quote field diagnostics: rowFound=${d.selectedRowFound}, fields=[${d.availableFieldNames.join(", ")}], ` +
           `timestampLikeFields=${JSON.stringify(d.timestampLikeFields)}`,
       );
+    }
+    if (result.quoteSampleDiagnostics) {
+      const { samples, comparison } = result.quoteSampleDiagnostics;
+      console.log(`  Quote sample diagnostics: ${samples.length} sample(s) over ${comparison.elapsedMs ?? 0}ms`);
+      console.log(
+        `    bidChanged=${comparison.bidChangedAcrossSamples} askChanged=${comparison.askChangedAcrossSamples} ` +
+          `dateChanged=${comparison.dateChangedAcrossSamples} lastExecutionChanged=${comparison.lastExecutionChangedAcrossSamples} ` +
+          `priceRateIdChanged=${comparison.priceRateIdChangedAcrossSamples}`,
+      );
+      console.log(
+        `    uniqueBidAskPairs=${comparison.uniqueBidAskPairCount} uniqueDates=${comparison.uniqueDateCount} ` +
+          `uniquePriceRateIds=${comparison.uniquePriceRateIdCount}`,
+      );
+      console.log(`    observations: ${comparison.observations.length > 0 ? comparison.observations.join(", ") : "(none)"}`);
     }
     console.log(`  Evidence:             ${evidenceFile}`);
     console.log("");

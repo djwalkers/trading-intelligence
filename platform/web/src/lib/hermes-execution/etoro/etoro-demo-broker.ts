@@ -5,7 +5,7 @@ import {
   type EtoroInstrumentSearchResult,
   type EtoroPosition,
 } from "./etoro-client";
-import { inspectRawRate, type RawRateFieldInspection } from "./etoro-quote-diagnostics";
+import { inspectRawRate, extractCuratedRateSample, type RawRateFieldInspection, type CuratedRateSample } from "./etoro-quote-diagnostics";
 import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
 import type { EtoroDemoConfig } from "../config";
@@ -334,6 +334,23 @@ export class EtoroDemoBroker implements PaperBroker {
     const resolved = this.requireResolvedInstrument(internalInstrument);
     const response = await this.client.getRates([resolved.instrumentId]);
     return inspectRawRate(response, resolved.instrumentId);
+  }
+
+  /**
+   * Multi-sample rate comparison (probe-etoro-1785449795206 follow-up) — diagnostic only, never
+   * called by getRate()/the trading path/the capability probe's own default run. Issues its OWN,
+   * separate GET .../instruments/rates call per invocation (the caller — etoro-instrument-probe.ts's
+   * opt-in `--diagnose-quote-samples` mode — is responsible for spacing repeated calls out
+   * sequentially with a delay; this method itself only ever makes one call per invocation, never a
+   * batch). Request/response timestamps are captured immediately around this one network call, so
+   * they reflect this exact round-trip, not any surrounding orchestration overhead.
+   */
+  async getRateSample(internalInstrument: string, sampleNumber: number): Promise<CuratedRateSample> {
+    const resolved = this.requireResolvedInstrument(internalInstrument);
+    const requestStartedAt = new Date().toISOString();
+    const response = await this.client.getRates([resolved.instrumentId]);
+    const responseReceivedAt = new Date().toISOString();
+    return extractCuratedRateSample(response, resolved.instrumentId, { sampleNumber, requestStartedAt, responseReceivedAt });
   }
 
   /**

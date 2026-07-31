@@ -870,6 +870,432 @@ describe("etoro-instrument-probe — main()", () => {
     });
   });
 
+  // Multi-sample rate comparison (probe-etoro-1785449795206 follow-up). --diagnose-quote-samples is
+  // opt-in only — a default probe run must never issue these extra calls, samples must always be
+  // sequential (never parallel), and enabling this mode must never affect classification.
+  describe("--diagnose-quote-samples (opt-in multi-sample rate comparison)", () => {
+    interface RawSample {
+      bid: number | null;
+      ask: number | null;
+      date: string | null;
+      lastExecution: number | null;
+      priceRateID: number | null;
+    }
+
+    function makeSampleableBroker(behaviors: Record<string, FakeInstrumentBehavior>, sequence: RawSample[]) {
+      const base = makeFakeBroker(behaviors);
+      let callIndex = 0;
+      const getRateSample = vi.fn(async (_instrument: string, sampleNumber: number) => {
+        const raw = sequence[callIndex] ?? sequence[sequence.length - 1]!;
+        callIndex += 1;
+        const requestStartedAt = new Date().toISOString();
+        const responseReceivedAt = new Date().toISOString();
+        return {
+          sampleNumber,
+          requestStartedAt,
+          responseReceivedAt,
+          instrumentID: 100000,
+          bid: raw.bid,
+          ask: raw.ask,
+          spread: raw.bid !== null && raw.ask !== null ? raw.ask - raw.bid : null,
+          date: raw.date,
+          parsedDateAgeSeconds: raw.date !== null && Number.isFinite(Date.parse(raw.date)) ? Math.max(0, (Date.now() - Date.parse(raw.date)) / 1000) : null,
+          lastExecution: raw.lastExecution,
+          priceRateID: raw.priceRateID,
+          conversionRateBid: null,
+          conversionRateAsk: null,
+          bidDiscounted: null,
+          askDiscounted: null,
+        };
+      });
+      return { ...base, getRateSample };
+    }
+
+    const BTC_RESOLVE = () =>
+      Promise.resolve({ instrumentId: 100000, displayName: "Bitcoin", symbol: "BTC", instrumentTypeID: 10, exchangeID: 8 });
+    const STALE_DATE = new Date(Date.now() - 8_196_000).toISOString();
+
+    describe("bounds validation", () => {
+      it.each([
+        ["0", "0"],
+        ["1", "1"],
+        ["11", "11"],
+        ["abc", "abc"],
+      ])("rejects --quote-sample-count=%s, making zero requests", async (rawValue) => {
+        const broker = makeSampleableBroker({ BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101 }), candles: () => Promise.resolve(validCandles(60, 0)) } }, []);
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", `--quote-sample-count=${rawValue}`];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        expect(createMock).not.toHaveBeenCalled();
+        expect(broker.getRateSample).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(1);
+      });
+
+      it.each(["2", "10"])("accepts the boundary sample count %s", async (rawValue) => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101 }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [{ bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null }],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = [
+          "node",
+          "etoro-instrument-probe.ts",
+          "BTC",
+          "--diagnose-quote-samples",
+          `--quote-sample-count=${rawValue}`,
+          "--quote-sample-interval-ms=1000",
+        ];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        expect(broker.getRateSample).toHaveBeenCalledTimes(Number(rawValue));
+        expect(process.exitCode).toBe(0);
+      }, 15_000);
+
+      it("rejects an interval below the minimum (999ms), making zero requests", async () => {
+        const broker = makeSampleableBroker({ BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101 }), candles: () => Promise.resolve(validCandles(60, 0)) } }, []);
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-interval-ms=999"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        expect(createMock).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(1);
+      });
+
+      it("accepts the minimum interval (1000ms)", async () => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101 }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [{ bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null }],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        expect(process.exitCode).toBe(0);
+        expect(broker.getRateSample).toHaveBeenCalledTimes(2);
+      }, 15_000);
+    });
+
+    it("never calls getRateSample during a default run, or when only --diagnose-quote-fields is given", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      expect(broker.getRateSample).not.toHaveBeenCalled();
+    });
+
+    it("issues exactly the configured sample count, sequentially, in ascending sampleNumber order", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+        ],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=3", "--quote-sample-interval-ms=1000"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      expect(broker.getRateSample).toHaveBeenCalledTimes(3);
+      const calls = broker.getRateSample.mock.calls;
+      expect(calls[0]).toEqual(["BTC", 1]);
+      expect(calls[1]).toEqual(["BTC", 2]);
+      expect(calls[2]).toEqual(["BTC", 3]);
+    }, 15_000);
+
+    it("waits at least the configured interval between samples (never fires them back-to-back)", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+        ],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const startedAt = Date.now();
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
+    }, 15_000);
+
+    it("prints the total number of extra read-only requests before proceeding", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+        ],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      let lines: string[];
+      try {
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+      } finally {
+        lines = logSpy.mock.calls.map((call) => String(call[0]));
+        logSpy.mockRestore();
+      }
+
+      const announceLine = lines.find((line) => line.includes("--diagnose-quote-samples enabled"));
+      expect(announceLine).toBeTruthy();
+      expect(announceLine).toMatch(/2 EXTRA read-only rates call/);
+      expect(announceLine).toMatch(/2 total across 1 instrument/);
+    }, 15_000);
+
+    describe("comparison observations", () => {
+      it("records BID_ASK_CHANGED_DATE_UNCHANGED when bid/ask move but date stays fixed", async () => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+            { bid: 105, ask: 106, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          ],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { comparison: { observations: string[] } };
+        expect(diagnostics.comparison.observations).toContain("BID_ASK_CHANGED_DATE_UNCHANGED");
+      }, 15_000);
+
+      it("records PRICE_RATE_ID_CHANGED_DATE_UNCHANGED when priceRateID moves but date stays fixed", async () => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: 1 },
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: 2 },
+          ],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { comparison: { observations: string[] } };
+        expect(diagnostics.comparison.observations).toContain("PRICE_RATE_ID_CHANGED_DATE_UNCHANGED");
+      }, 15_000);
+
+      it("records DATE_CHANGED_WITH_RATE when date and price change together", async () => {
+        const secondDate = new Date(Date.now() - 8_190_000).toISOString();
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+            { bid: 105, ask: 106, date: secondDate, lastExecution: null, priceRateID: null },
+          ],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { comparison: { observations: string[] } };
+        expect(diagnostics.comparison.observations).toContain("DATE_CHANGED_WITH_RATE");
+      }, 15_000);
+
+      it("records NO_FIELDS_CHANGED and PROVIDER_DATE_REMAINS_STALE when nothing changes and every sample is stale", async () => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          ],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { comparison: { observations: string[] } };
+        expect(diagnostics.comparison.observations).toContain("NO_FIELDS_CHANGED");
+        expect(diagnostics.comparison.observations).toContain("PROVIDER_DATE_REMAINS_STALE");
+      }, 15_000);
+
+      it("reports lastExecution as null across all samples without crashing when the provider never returns it", async () => {
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+            { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          ],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { samples: Array<{ lastExecution: unknown }> };
+        expect(diagnostics.samples.every((s) => s.lastExecution === null)).toBe(true);
+      }, 15_000);
+
+      it("computes a fractional-second quote date's age correctly for each sample", async () => {
+        const fractionalDate = new Date(Date.now() - 8_196_000).toISOString().replace("Z", "1349Z");
+        const broker = makeSampleableBroker(
+          { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+          [{ bid: 100, ask: 101, date: fractionalDate, lastExecution: null, priceRateID: null }],
+        );
+        createMock.mockResolvedValue(broker);
+        process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+        const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+        await main();
+
+        const events = await readProbeLog();
+        const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+        const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+        const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { samples: Array<{ parsedDateAgeSeconds: number | null }> };
+        expect(diagnostics.samples[0]!.parsedDateAgeSeconds).toBeGreaterThan(8_000);
+      }, 15_000);
+    });
+
+    it("persists samples and comparison in the evidence document", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+        ],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { samples: unknown[]; comparison: { sampleCount: number } };
+      expect(diagnostics.samples).toHaveLength(2);
+      expect(diagnostics.comparison.sampleCount).toBe(2);
+    }, 15_000);
+
+    it("never changes classification/classificationReasons — a stale single quote stays PARTIALLY_SUPPORTED/QUOTE_STALE regardless of what the samples show", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [
+          // Samples show bid/ask genuinely moving — must still never upgrade classification.
+          { bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null },
+          { bid: 200, ask: 201, date: STALE_DATE, lastExecution: null, priceRateID: null },
+        ],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      expect(classified?.details.classification).toBe("PARTIALLY_SUPPORTED");
+      expect(classified?.details.classificationReasons).toEqual(["QUOTE_STALE"]);
+    }, 15_000);
+
+    it("never persists a raw payload — only the explicitly curated per-sample fields appear in evidence", async () => {
+      const broker = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [{ bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null }],
+      );
+      createMock.mockResolvedValue(broker);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await main();
+
+      const events = await readProbeLog();
+      const classified = events.find((e) => e.eventType === "INSTRUMENT_PROBE_CLASSIFIED" && e.instrument === "BTC");
+      const evidence = await readEvidenceFile(classified!.details.evidenceFile as string);
+      const diagnostics = evidence[0]!.details.quoteSampleDiagnostics as { samples: Array<Record<string, unknown>> };
+      const allowedKeys = [
+        "sampleNumber",
+        "requestStartedAt",
+        "responseReceivedAt",
+        "instrumentID",
+        "bid",
+        "ask",
+        "spread",
+        "date",
+        "parsedDateAgeSeconds",
+        "lastExecution",
+        "priceRateID",
+        "conversionRateBid",
+        "conversionRateAsk",
+        "bidDiscounted",
+        "askDiscounted",
+      ];
+      for (const sample of diagnostics.samples) {
+        expect(Object.keys(sample).sort()).toEqual(allowedKeys.sort());
+      }
+    }, 15_000);
+
+    it("never accesses a mutation method even with sampling enabled", async () => {
+      const real = makeSampleableBroker(
+        { BTC: { resolve: BTC_RESOLVE, rate: () => Promise.resolve({ bid: 100, ask: 101, date: STALE_DATE }), candles: () => Promise.resolve(validCandles(60, 0)) } },
+        [{ bid: 100, ask: 101, date: STALE_DATE, lastExecution: null, priceRateID: null }],
+      );
+      const guarded = new Proxy(real as unknown as Record<string, unknown>, {
+        get(target, prop, receiver) {
+          if (typeof prop === "string" && MUTATION_METHOD_NAMES.has(prop)) {
+            throw new Error(`Read-only probe attempted to access disallowed broker method "${prop}"`);
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      createMock.mockResolvedValue(guarded);
+      process.argv = ["node", "etoro-instrument-probe.ts", "BTC", "--diagnose-quote-samples", "--quote-sample-count=2", "--quote-sample-interval-ms=1000"];
+
+      const { main } = await import("@/hermes-execution/etoro-instrument-probe");
+      await expect(main()).resolves.not.toThrow();
+      expect(process.exitCode).toBe(0);
+    }, 15_000);
+  });
+
   describe("evidence safety — secret redaction", () => {
     it("never persists the configured apiKey/userKey, even when an error message would otherwise echo them", async () => {
       const leakyError = new Error(`upstream rejected request with header x-api-key: ${TEST_API_KEY} and x-user-key: ${TEST_USER_KEY}`);

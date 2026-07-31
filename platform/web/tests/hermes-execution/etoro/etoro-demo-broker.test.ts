@@ -438,6 +438,72 @@ describe("EtoroDemoBroker — quote field diagnostics (getRateFieldDiagnostics)"
   });
 });
 
+// Multi-sample rate comparison (probe-etoro-1785449795206 follow-up). getRateSample is diagnostic-
+// only — a SEPARATE eToro call per invocation, never invoked by the trading path or a default
+// probe run.
+describe("EtoroDemoBroker — quote sample diagnostics (getRateSample)", () => {
+  it("captures the curated fields for one sample, including ones EtoroRate never declares", async () => {
+    const { broker } = makeBroker(
+      defaultRoutes({
+        rates: () =>
+          jsonResponse(200, {
+            rates: [
+              {
+                instrumentID: 100000,
+                bid: 64712.47,
+                ask: 64712.48,
+                date: "2026-07-30T19:57:23.1261349Z",
+                lastExecution: 64712.475,
+                priceRateID: 987654,
+                conversionRateBid: 1,
+                conversionRateAsk: 1,
+                bidDiscounted: 64712.4,
+                askDiscounted: 64712.5,
+              },
+            ],
+          }),
+      }),
+    );
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    const sample = await broker.getRateSample("BTC", 1);
+
+    expect(sample.sampleNumber).toBe(1);
+    expect(sample.instrumentID).toBe(100000);
+    expect(sample.bid).toBe(64712.47);
+    expect(sample.ask).toBe(64712.48);
+    expect(sample.lastExecution).toBe(64712.475);
+    expect(sample.priceRateID).toBe(987654);
+    expect(sample.conversionRateBid).toBe(1);
+    expect(sample.bidDiscounted).toBe(64712.4);
+    expect(typeof sample.requestStartedAt).toBe("string");
+    expect(typeof sample.responseReceivedAt).toBe("string");
+  });
+
+  it("issues its own, separate rates request per invocation, distinct from getRate() and getRateFieldDiagnostics()", async () => {
+    const ratesSpy = vi.fn(() => jsonResponse(200, { rates: [{ instrumentID: 100000, bid: 1, ask: 2, date: "2026-01-01T00:00:00Z" }] }));
+    const { broker } = makeBroker(defaultRoutes({ rates: ratesSpy }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+
+    await broker.getRate("BTC");
+    await broker.getRateSample("BTC", 1);
+    await broker.getRateSample("BTC", 2);
+    expect(ratesSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports null for lastExecution/priceRateID when the row omits them, never crashing", async () => {
+    const { broker } = makeBroker(defaultRoutes({ rates: () => jsonResponse(200, { rates: [{ instrumentID: 100000, bid: 1, ask: 2 }] }) }));
+    await broker.connect();
+    await broker.resolveInstrument("BTC");
+    const sample = await broker.getRateSample("BTC", 1);
+    expect(sample.lastExecution).toBeNull();
+    expect(sample.priceRateID).toBeNull();
+    expect(sample.date).toBeNull();
+  });
+});
+
 describe("EtoroDemoBroker — historical candle retrieval", () => {
   it("translates the generic timeframe into eToro's interval enum and requests the resolved instrumentId", async () => {
     const historySpy = vi.fn(() => defaultCandleHistoryResponse());
