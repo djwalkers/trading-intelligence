@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "strategyId": "CRYPTO_EMA_TREND_V1",
+  "strategyVersion": "1.0.0",
+  "name": "Crypto EMA Trend (v1)",
+  "description": "An illustrative EMA20/EMA50 trend-following concept for BTC/ETH/SOL on the 1h timeframe, gated by an RSI healthy-range filter. Hand-authored for Phase 1's declarative strategy schema.",
+  "status": "APPROVED_FOR_BACKTEST",
+  "strategyFamily": "TREND_FOLLOWING",
+  "assetClass": "crypto",
+  "supportedInstruments": ["BTC", "ETH", "SOL"],
+  "timeframe": "1h",
+  "dataRequirements": ["close", "high", "low"],
+  "indicators": [
+    { "id": "ema20", "type": "EMA", "sourceField": "close", "parameters": { "period": 20 }, "outputAlias": "EMA20" },
+    { "id": "ema50", "type": "EMA", "sourceField": "close", "parameters": { "period": 50 }, "outputAlias": "EMA50" },
+    { "id": "rsi14", "type": "RSI", "sourceField": "close", "parameters": { "period": 14 }, "outputAlias": "RSI14" },
+    { "id": "atr14", "type": "ATR", "sourceField": "close", "parameters": { "period": 14 }, "outputAlias": "ATR14" }
+  ],
+  "entryRules": {
+    "operator": "AND",
+    "rules": [
+      { "operator": "GREATER_THAN", "left": { "kind": "INDICATOR_ALIAS", "alias": "EMA20" }, "right": { "kind": "INDICATOR_ALIAS", "alias": "EMA50" } },
+      {
+        "operator": "BETWEEN",
+        "operand": { "kind": "INDICATOR_ALIAS", "alias": "RSI14" },
+        "lowerBound": { "kind": "CONSTANT", "value": 45 },
+        "upperBound": { "kind": "CONSTANT", "value": 70 }
+      }
+    ]
+  },
+  "signalExitRules": [
+    {
+      "kind": "CONDITION",
+      "rule": { "operator": "CROSSES_BELOW", "left": { "kind": "INDICATOR_ALIAS", "alias": "EMA20" }, "right": { "kind": "INDICATOR_ALIAS", "alias": "EMA50" } }
+    },
+    { "kind": "MAX_BARS_HELD", "maxBars": 200 }
+  ],
+  "parameters": {
+    "rsiHealthyLowerBound": 45,
+    "rsiHealthyUpperBound": 70
+  },
+  "eligibility": {
+    "requiresReadOnlyVerified": true,
+    "requiresStage4Verified": false,
+    "requiresConfiguredUniverse": true,
+    "notes": ["Declarative only — does not itself grant, verify, or change any catalogue/runtime capability."]
+  },
+  "backtestPolicy": {
+    "minHistoryBars": 250,
+    "warmupBars": 50,
+    "notes": ["EMA50 needs at least 50 prior bars before its value is meaningful; minHistoryBars adds margin for a reasonable sample size."]
+  },
+  "provenance": {
+    "author": "hermes-execution-phase1",
+    "createdAt": "2026-07-31T00:00:00.000Z",
+    "notes": ["Hand-authored example for Phase 1 — not derived from any research run."]
+  },
+  "limitations": [
+    "Illustrative example only — never claimed to be profitable or to have positive expectancy.",
+    "Never approved for demo or live trading in this phase — usableForDemo is unconditionally false until a separate, trusted promotion mechanism exists.",
+    "Defines no position sizing, leverage, stop-loss, or take-profit — those remain exclusively the domain of the deterministic, persisted risk/execution layer, external to this document.",
+    "Not yet backtested against real historical data — its status reflects schema/structural readiness only, not empirical validation.",
+    "Signal-level exits (EMA20 crosses below EMA50; max 200 bars held) are advisory only — deterministic stop-loss, take-profit, kill-switch, and lifecycle protection remain external and authoritative."
+  ]
+}
