@@ -239,9 +239,14 @@ warnings, and limitations — no secrets anywhere (nothing in this pipeline ever
 ## CLI
 
 ```
-npm run strategy:research -- --plan <research-plan.json> [--json] [--output-dir <path>] [--max-experiments <n>] [--fail-fast]
+npm run strategy:research -- --plan <research-plan.json> [--json] [--output-dir <path>] [--max-experiments <n>] [--fail-fast] [--validate-only]
 ```
 
+- `--validate-only` (Phase 4 addition): verifies the plan schema, the strategy content hash, and
+  every declared dataset's hash/instrument/timeframe/date-range — WITHOUT generating the experiment
+  matrix or running a single backtest. Reuses `runResearch`'s own verification prefix
+  (`loadAndVerifyPlanAndDatasets` in research-engine.ts) rather than a second, parallel check. See
+  `docs/project-status/DATASET_INTAKE_PHASE4.md` for the dataset-preparation workflow this pairs with.
 - `--max-experiments` may only LOWER the built-in 500 cap, never raise it — rejected explicitly
   otherwise.
 - `--fail-fast` is accepted for forward-compatibility and to document intent: `runResearch` already

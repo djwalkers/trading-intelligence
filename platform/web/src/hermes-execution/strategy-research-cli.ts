@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { buildBacktestCatalogueStub } from "./strategy-backtest-cli";
-import { runResearch } from "@/lib/hermes-execution/strategy-research/research-engine";
+import { runResearch, validateResearchPlanDatasets } from "@/lib/hermes-execution/strategy-research/research-engine";
 import { writeResearchEvidence } from "@/lib/hermes-execution/strategy-research/research-persistence";
 import { RESEARCH_DISCLAIMER } from "@/lib/hermes-execution/strategy-research/research-result";
 import { MAX_EXPERIMENT_VARIANTS_HARD_CAP } from "@/lib/hermes-execution/strategy-research/experiment-matrix";
@@ -32,10 +32,15 @@ interface ParsedArgs {
    * this CLI reports in full regardless of this flag — per requirement 11's own explicit "only for
    * invalid input, not failed strategy results." */
   failFast: boolean;
+  /** Phase 4 addition: verifies the plan and every dataset it declares (plan schema, strategy
+   * content hash, every dataset content hash/instrument/timeframe/date-range) WITHOUT generating
+   * the experiment matrix or running a single backtest — reuses `runResearch`'s own verification
+   * prefix (research-engine.ts's `loadAndVerifyPlanAndDatasets`), never a separate check. */
+  validateOnly: boolean;
 }
 
 const FLAGS_WITH_VALUES = ["--plan", "--output-dir", "--max-experiments"] as const;
-const KNOWN_FLAGS = new Set<string>([...FLAGS_WITH_VALUES, "--json", "--fail-fast"]);
+const KNOWN_FLAGS = new Set<string>([...FLAGS_WITH_VALUES, "--json", "--fail-fast", "--validate-only"]);
 
 type ArgParseResult = { ok: true; args: ParsedArgs } | { ok: false; json: boolean; detail: string };
 
@@ -43,6 +48,7 @@ function parseArgs(argv: readonly string[]): ArgParseResult {
   const raw = new Map<string, string>();
   let json = false;
   let failFast = false;
+  let validateOnly = false;
   const unknown: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -57,6 +63,10 @@ function parseArgs(argv: readonly string[]): ArgParseResult {
     }
     if (arg === "--fail-fast") {
       failFast = true;
+      continue;
+    }
+    if (arg === "--validate-only") {
+      validateOnly = true;
       continue;
     }
     const value = argv[++i];
@@ -75,11 +85,11 @@ function parseArgs(argv: readonly string[]): ArgParseResult {
     maxExperiments = value;
   }
 
-  return { ok: true, args: { plan: raw.get("--plan"), outputDir: raw.get("--output-dir"), json, maxExperiments, failFast } };
+  return { ok: true, args: { plan: raw.get("--plan"), outputDir: raw.get("--output-dir"), json, maxExperiments, failFast, validateOnly } };
 }
 
 function printUsage(): void {
-  console.error("Usage: npm run strategy:research -- --plan <research-plan.json> [--json] [--output-dir <path>] [--max-experiments <n>] [--fail-fast]");
+  console.error("Usage: npm run strategy:research -- --plan <research-plan.json> [--json] [--output-dir <path>] [--max-experiments <n>] [--fail-fast] [--validate-only]");
 }
 
 function fail(json: boolean, stage: string, reason: string, detail: string): void {
@@ -107,6 +117,25 @@ export async function main(): Promise<void> {
   if (!args.plan) {
     fail(args.json, "args", "MISSING_ARGUMENTS", "Missing required argument: --plan");
     printUsage();
+    return;
+  }
+
+  if (args.validateOnly) {
+    const validation = await validateResearchPlanDatasets({ planPath: args.plan, strategiesDir: STRATEGIES_DIR, catalogueEntries: buildBacktestCatalogueStub() });
+    if (!validation.ok) {
+      fail(args.json, validation.stage, validation.reason, validation.detail);
+      return;
+    }
+    if (args.json) {
+      console.log(JSON.stringify({ validateOnly: true, ...validation }, null, 2));
+      return;
+    }
+    console.log("Research plan + dataset validation — Phase 4 (--validate-only, no backtest run)");
+    console.log("================================================================================");
+    console.log(`Research plan: ${validation.plan.researchPlanId} v${validation.plan.researchPlanVersion}`);
+    console.log(`Strategy: ${validation.strategy.strategyId} v${validation.strategy.strategyVersion} (hash ${validation.strategy.strategyContentHash.slice(0, 12)}…)`);
+    for (const dataset of validation.datasets) console.log(`  Dataset [${dataset.instrument}/${dataset.role}]: ${dataset.filePath} (hash ${dataset.datasetHash.slice(0, 12)}…)`);
+    console.log("\nAll declared datasets verified successfully. No backtest was run.");
     return;
   }
 

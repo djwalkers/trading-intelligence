@@ -229,10 +229,18 @@ export function buildRobustnessWarnings(baseline: VariantResult, variants: reado
  * cross-instrument/cross-variant aggregate statistics, (10) returns one immutable `ResearchResult` —
  * this function performs no persistence itself (see research-persistence.ts).
  */
-export async function runResearch(options: RunResearchOptions): Promise<RunResearchOutput> {
-  const now = options.now ?? (() => new Date().toISOString());
-  const nowIso = now();
+type PlanAndDatasetVerificationResult =
+  | { ok: true; plan: ResearchPlanDocument; record: Awaited<ReturnType<typeof loadStrategyDefinitions>>["accepted"][number]; planContentHash: string; manifestResult: Extract<Awaited<ReturnType<typeof loadAndVerifyManifest>>, { ok: true }> }
+  | { ok: false; stage: RunResearchStage; reason: string; detail: string };
 
+/**
+ * The shared prefix of `runResearch` and `validateResearchPlanDatasets`: read/parse the plan file,
+ * validate it (first without, then with, the real strategy content hash), load the exact strategy
+ * version through the REAL Phase 1 registry, and verify every declared dataset's actual hash against
+ * the manifest. Factored out so plan/dataset-only validation (no backtest ever run) and the full
+ * research run share this logic verbatim rather than maintaining two copies of it.
+ */
+async function loadAndVerifyPlanAndDatasets(options: Pick<RunResearchOptions, "planPath" | "strategiesDir" | "catalogueEntries">, now: () => string, nowIso: string): Promise<PlanAndDatasetVerificationResult> {
   let rawPlanText: string;
   try {
     rawPlanText = await fs.readFile(options.planPath, "utf-8");
@@ -277,6 +285,44 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
   const manifestResult = await loadAndVerifyManifest(plan.datasets, now);
   if (!manifestResult.ok) return { ok: false, stage: "dataset", reason: manifestResult.reason, detail: manifestResult.detail };
 
+  return { ok: true, plan, record, planContentHash: final.result.contentHash, manifestResult };
+}
+
+export type ValidateOnlyOutput =
+  | {
+      ok: true;
+      plan: { researchPlanId: string; researchPlanVersion: string; planContentHash: string };
+      strategy: { strategyId: string; strategyVersion: string; strategyContentHash: string };
+      datasets: { instrument: string; role: string; datasetHash: string; filePath: string }[];
+    }
+  | { ok: false; stage: RunResearchStage; reason: string; detail: string };
+
+/**
+ * Verifies a plan and every dataset it declares — WITHOUT generating the experiment matrix or
+ * running a single backtest — for a `--validate-only` CLI mode. Read-only, deterministic, and no
+ * slower than the plan/dataset-verification prefix `runResearch` already performs before its first
+ * backtest; this never duplicates that logic, it reuses `loadAndVerifyPlanAndDatasets` directly.
+ */
+export async function validateResearchPlanDatasets(options: Pick<RunResearchOptions, "planPath" | "strategiesDir" | "catalogueEntries" | "now">): Promise<ValidateOnlyOutput> {
+  const now = options.now ?? (() => new Date().toISOString());
+  const verification = await loadAndVerifyPlanAndDatasets(options, now, now());
+  if (!verification.ok) return { ok: false, stage: verification.stage, reason: verification.reason, detail: verification.detail };
+  return {
+    ok: true,
+    plan: { researchPlanId: verification.plan.researchPlanId, researchPlanVersion: verification.plan.researchPlanVersion, planContentHash: verification.planContentHash },
+    strategy: { strategyId: verification.record.document.strategyId, strategyVersion: verification.record.document.strategyVersion, strategyContentHash: verification.record.result.provenance.contentHash },
+    datasets: verification.manifestResult.resolved.map((r) => ({ instrument: r.entry.instrument, role: r.entry.role, datasetHash: r.dataset.datasetHash, filePath: r.entry.datasetFile })),
+  };
+}
+
+export async function runResearch(options: RunResearchOptions): Promise<RunResearchOutput> {
+  const now = options.now ?? (() => new Date().toISOString());
+  const nowIso = now();
+
+  const verification = await loadAndVerifyPlanAndDatasets(options, now, nowIso);
+  if (!verification.ok) return verification;
+  const { plan, record, manifestResult, planContentHash } = verification;
+
   const instrumentPlansResult = resolveInstrumentDatasetPlans(plan, manifestResult.resolved);
   if (!instrumentPlansResult.ok) return { ok: false, stage: "dataset", reason: "INCOMPLETE_MANIFEST", detail: instrumentPlansResult.detail };
 
@@ -301,7 +347,7 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
 
   const datasetIdentities = manifestResult.resolved.map((r) => ({ instrument: r.entry.instrument, role: r.entry.role, datasetHash: r.dataset.datasetHash, filePath: r.entry.datasetFile }));
   const researchFingerprint = computeResearchFingerprint({
-    planContentHash: final.result.contentHash,
+    planContentHash,
     strategyContentHash: record.result.provenance.contentHash,
     datasetHashes: datasetIdentities.map(({ instrument, role, datasetHash }) => ({ instrument, role, datasetHash })),
     experimentMatrixHash: matrixResult.experimentMatrixHash,
@@ -314,7 +360,7 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
     generatedAt: nowIso,
     phase2EngineVersion: BACKTEST_ENGINE_VERSION,
     phase3EngineVersion: PHASE3_RESEARCH_ENGINE_VERSION,
-    plan: { researchPlanId: plan.researchPlanId, researchPlanVersion: plan.researchPlanVersion, planContentHash: final.result.contentHash },
+    plan: { researchPlanId: plan.researchPlanId, researchPlanVersion: plan.researchPlanVersion, planContentHash },
     planDocument: plan,
     strategy: { strategyId: record.document.strategyId, strategyVersion: record.document.strategyVersion, strategyContentHash: record.result.provenance.contentHash },
     datasets: datasetIdentities,

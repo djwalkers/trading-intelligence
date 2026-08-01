@@ -20,6 +20,7 @@
     "strategy:catalogue": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/strategy-catalogue-cli.ts",
     "strategy:backtest": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/strategy-backtest-cli.ts",
     "strategy:research": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/strategy-research-cli.ts",
+    "dataset:prepare": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/dataset-prepare-cli.ts",
     "market:decide": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-decide.ts",
     "market:runtime": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-runtime.ts",
     "market:diagnostics": "NODE_OPTIONS=--conditions=react-server tsx --env-file-if-exists=.env.local src/hermes-execution/market-diagnostics.ts"

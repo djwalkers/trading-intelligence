@@ -150,6 +150,118 @@ describe("strategy-research-cli", () => {
     }
   });
 
+  it("--validate-only verifies the plan and every dataset without running a single backtest (Phase 4 first-run preparation)", async () => {
+    process.argv = ["node", "strategy-research-cli.ts", "--plan", planPath, "--validate-only", "--json"];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { main } = await import("@/hermes-execution/strategy-research-cli");
+      await main();
+      expect(process.exitCode).not.toBe(1);
+      const parsed = JSON.parse(String(logSpy.mock.calls[0]![0]));
+      expect(parsed.ok).toBe(true);
+      expect(parsed.validateOnly).toBe(true);
+      expect(parsed.plan.researchPlanId).toBe("TEST_RESEARCH_PLAN");
+      expect(parsed.strategy.strategyContentHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(parsed.datasets).toHaveLength(1);
+      expect(parsed.datasets[0].datasetHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(parsed.outcome).toBeUndefined();
+      expect(parsed.variants).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("--validate-only rejects an invalid plan the same way a full run would, still without running any backtest", async () => {
+    process.argv = ["node", "strategy-research-cli.ts", "--plan", path.join(planDir, "missing.json"), "--validate-only", "--json"];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { main } = await import("@/hermes-execution/strategy-research-cli");
+      await main();
+      expect(process.exitCode).toBe(1);
+      const parsed = JSON.parse(String(logSpy.mock.calls[0]![0]));
+      expect(parsed.ok).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      process.exitCode = 0;
+    }
+  });
+
+  it("--validate-only never reaches experiment expansion or a single backtest — a plan whose experiments would hard-fail a real run still validates successfully", async () => {
+    // Every combination is structurally invalid (fast >= slow) — a real run would reject this at the
+    // "experiments" stage with NO_VALID_VARIANTS, and would certainly never reach a backtest. If
+    // --validate-only accidentally called generateExperimentMatrix/runVariant, this plan would make
+    // that failure visible; since it doesn't, this proves zero experiment expansion and zero backtests.
+    const doc = makeDatasetDoc("BTC", 150);
+    const dataPath = await writeJsonFile(dataDir, "BTC2.json", doc);
+    const hash = datasetHashFor("BTC", 150);
+    const brokenExperimentsPlanPath = await writeJsonFile(
+      planDir,
+      "broken-experiments-plan.json",
+      makeResearchPlanRaw({
+        strategyContentHash: baselineStrategyContentHash(),
+        instruments: ["BTC"],
+        datasets: [{ instrument: "BTC", timeframe: "1h", datasetFile: dataPath, expectedDatasetHash: hash, startTimestamp: doc.candles[0]!.timestamp, endTimestamp: doc.candles[doc.candles.length - 1]!.timestamp, role: "FULL_HISTORY" }],
+        parameterExperiments: { dimensions: { emaFastPeriod: { kind: "EXPLICIT_VALUES", values: [50, 60] }, emaSlowPeriod: { kind: "EXPLICIT_VALUES", values: [10, 20] } }, maxExperiments: 20 },
+      }),
+    );
+    process.argv = ["node", "strategy-research-cli.ts", "--plan", brokenExperimentsPlanPath, "--validate-only", "--json"];
+    let validateOnlyOutput: string;
+    const logSpy1 = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { main } = await import("@/hermes-execution/strategy-research-cli");
+      await main();
+    } finally {
+      validateOnlyOutput = String(logSpy1.mock.calls[0]![0]);
+      logSpy1.mockRestore();
+      process.exitCode = 0;
+    }
+    const parsed = JSON.parse(validateOnlyOutput);
+    expect(parsed.ok).toBe(true);
+
+    // Confirm a FULL run of the identical plan really would have failed at the experiments stage —
+    // otherwise this test would not actually be proving anything about --validate-only's own behaviour.
+    vi.resetModules();
+    process.argv = ["node", "strategy-research-cli.ts", "--plan", brokenExperimentsPlanPath, "--json"];
+    let fullRunOutput: string;
+    const logSpy2 = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { main: main2 } = await import("@/hermes-execution/strategy-research-cli");
+      await main2();
+    } finally {
+      fullRunOutput = String(logSpy2.mock.calls[0]![0]);
+      logSpy2.mockRestore();
+      process.exitCode = 0;
+    }
+    const fullRunParsed = JSON.parse(fullRunOutput);
+    expect(fullRunParsed.ok).toBe(false);
+    expect(fullRunParsed.stage).toBe("experiments");
+  });
+
+  it("--validate-only performs no filesystem writes, even when --output-dir is also supplied", async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), "research-cli-validate-only-output-"));
+    try {
+      process.argv = ["node", "strategy-research-cli.ts", "--plan", planPath, "--validate-only", "--output-dir", outputDir, "--json"];
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { main } = await import("@/hermes-execution/strategy-research-cli");
+        await main();
+        const parsed = JSON.parse(String(logSpy.mock.calls[0]![0]));
+        expect(parsed.ok).toBe(true);
+      } finally {
+        logSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+      expect(await fs.readdir(outputDir)).toEqual([]);
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("the top-level crash handler uses exit code 2, distinct from every known-rejection path's code 1", async () => {
     const source = await fs.readFile("src/hermes-execution/strategy-research-cli.ts", "utf-8");
     expect(source).toMatch(/main\(\)\.catch\(/);
