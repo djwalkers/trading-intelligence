@@ -26,7 +26,10 @@ const STRATEGIES_DIR = process.env.HERMES_STRATEGY_DEFINITIONS_DIR_FOR_TESTS_ONL
 // asked for was automatically "known to the catalogue," completely defeating this boundary). An
 // instrument outside this exact set can never pass catalogue validation, and is additionally
 // rejected explicitly and immediately in `main()` below before any file is even read.
-const BACKTEST_CATALOGUE_INSTRUMENTS = ["BTC", "ETH", "SOL"] as const;
+// Exported so Phase 3's research engine (strategy-research/) can build the IDENTICAL, honest
+// catalogue stub — reused, never duplicated — whenever it loads a strategy through this same Phase 1
+// registry for research purposes.
+export const BACKTEST_CATALOGUE_INSTRUMENTS = ["BTC", "ETH", "SOL"] as const;
 
 /**
  * Backtest-only, synthetic instrument catalogue stub — loadStrategyDefinitions (the existing Phase 1
@@ -38,7 +41,7 @@ const BACKTEST_CATALOGUE_INSTRUMENTS = ["BTC", "ETH", "SOL"] as const;
  * — this stub's only real job is proving "this symbol exists at all," never asserting anything true
  * about live broker/demo/trading-universe eligibility, which this offline tool has no basis to know.
  */
-function buildBacktestCatalogueStub(): InstrumentCatalogueEntry[] {
+export function buildBacktestCatalogueStub(): InstrumentCatalogueEntry[] {
   return BACKTEST_CATALOGUE_INSTRUMENTS.map((symbol) => ({
     symbol,
     displayName: null,

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "researchPlanId": "CRYPTO_EMA_TREND_V1_BASELINE_NEIGHBOURHOOD",
+  "researchPlanVersion": "1.0.0",
+  "name": "CRYPTO_EMA_TREND_V1 — baseline parameter neighbourhood (example, non-runnable)",
+  "description": "Phase 3 example research plan. NON-RUNNABLE AS COMMITTED: every entry in `datasets` below is an explicit PLACEHOLDER — `datasetFile` points at a file that does not exist in this repository, and `expectedDatasetHash` is a placeholder of all zeros, never a real SHA-256 digest. This repository has no established convention for committing large real market datasets, and this plan deliberately does not fabricate one. To actually run this plan: supply real (or your own synthetic-but-honestly-labelled) local candle dataset JSON files for BTC/ETH/SOL on the 1h timeframe, compute each one's real dataset hash with `npm run strategy:backtest` (any run against that file prints `dataset.datasetHash`) or `computeDatasetHash` directly, and replace the placeholder `datasetFile`/`expectedDatasetHash` values below accordingly. Everything else in this plan (the strategy pin, the parameter neighbourhood, the criteria) is real and meaningful as written.",
+  "strategyId": "CRYPTO_EMA_TREND_V1",
+  "strategyVersion": "1.0.0",
+  "strategyContentHash": "afeb2299a9c09ac2420c9ea5097cbc5b8a1f1a3cf23a13518d4f1c5800d75121",
+  "instruments": ["BTC", "ETH", "SOL"],
+  "timeframe": "1h",
+  "datasets": [
+    { "instrument": "BTC", "timeframe": "1h", "datasetFile": "PLACEHOLDER — supply a real local BTC 1h candle dataset JSON file path here", "expectedDatasetHash": "0000000000000000000000000000000000000000000000000000000000000000", "startTimestamp": "2025-01-01T00:00:00.000Z", "endTimestamp": "2025-12-31T23:00:00.000Z", "role": "FULL_HISTORY" },
+    { "instrument": "ETH", "timeframe": "1h", "datasetFile": "PLACEHOLDER — supply a real local ETH 1h candle dataset JSON file path here", "expectedDatasetHash": "0000000000000000000000000000000000000000000000000000000000000000", "startTimestamp": "2025-01-01T00:00:00.000Z", "endTimestamp": "2025-12-31T23:00:00.000Z", "role": "FULL_HISTORY" },
+    { "instrument": "SOL", "timeframe": "1h", "datasetFile": "PLACEHOLDER — supply a real local SOL 1h candle dataset JSON file path here", "expectedDatasetHash": "0000000000000000000000000000000000000000000000000000000000000000", "startTimestamp": "2025-01-01T00:00:00.000Z", "endTimestamp": "2025-12-31T23:00:00.000Z", "role": "FULL_HISTORY" }
+  ],
+  "baselineConfig": { "feeBps": 10, "slippageBps": 10, "startingCapital": 10000 },
+  "parameterExperiments": {
+    "dimensions": {
+      "emaFastPeriod": { "kind": "RANGE", "min": 15, "max": 25, "step": 5 },
+      "emaSlowPeriod": { "kind": "RANGE", "min": 40, "max": 60, "step": 10 },
+      "rsiPeriod": { "kind": "RANGE", "min": 10, "max": 18, "step": 4 }
+    },
+    "maxExperiments": 50
+  },
+  "chronologicalSplits": [
+    { "instrument": "BTC", "splitAt": "2025-09-30T23:00:00.000Z" },
+    { "instrument": "ETH", "splitAt": "2025-09-30T23:00:00.000Z" },
+    { "instrument": "SOL", "splitAt": "2025-09-30T23:00:00.000Z" }
+  ],
+  "passCriteria": [
+    { "metric": "MIN_TRADE_COUNT", "operator": "GREATER_THAN_OR_EQUAL", "threshold": 10, "scope": "OUT_OF_SAMPLE" },
+    { "metric": "MIN_NET_RETURN", "operator": "GREATER_THAN_OR_EQUAL", "threshold": 0, "scope": "OUT_OF_SAMPLE" },
+    { "metric": "MAX_DRAWDOWN", "operator": "LESS_THAN_OR_EQUAL", "threshold": 0.35, "scope": "PER_INSTRUMENT" },
+    { "metric": "MIN_ACCEPTABLE_VARIANT_PERCENTAGE", "operator": "GREATER_THAN_OR_EQUAL", "threshold": 60, "scope": "ACROSS_VARIANTS" }
+  ],
+  "failureCriteria": [
+    { "metric": "MAX_DRAWDOWN", "operator": "GREATER_THAN", "threshold": 0.6, "scope": "PER_INSTRUMENT" }
+  ],
+  "robustnessChecks": {
+    "minTradeCountWarningThreshold": 20,
+    "maxInstrumentConcentrationWarningThreshold": 70,
+    "notes": ["A modest neighbourhood around the baseline's own EMA20/EMA50/RSI14 parameters — never a wide or exhaustive search."]
+  },
+  "limitations": [
+    "NON-RUNNABLE AS COMMITTED — see this plan's own `description` field: every dataset entry is a placeholder pending real local candle data.",
+    "This is an illustrative EXAMPLE of a well-formed Phase 3 research plan, never itself evidence that CRYPTO_EMA_TREND_V1 is profitable, tested, or ready for any promotion.",
+    "The declared parameter neighbourhood and thresholds are conservative defaults for illustration, not a claim that they are optimal or well-calibrated for any real market."
+  ],
+  "provenance": {
+    "author": "hermes-execution-phase3",
+    "createdAt": "2026-08-01T00:00:00.000Z",
+    "notes": ["Example plan accompanying Phase 3 — Strategy Research Workflow."]
+  }
+}
