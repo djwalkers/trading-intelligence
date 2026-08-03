@@ -46,6 +46,11 @@ export interface BinanceKnownMarketClosure {
  * the specifically evidenced pair (see DATASET_INTAKE_PHASE4.md's own Binance section); scoped to
  * `ALL_SPOT` because the outage was exchange-wide, not pair-specific, so it is expected to explain the
  * identical missing hour for `ETHUSDT`/`SOLUSDT` archives as well.
+ *
+ * Corrected (pre-commit review): the locally cached, checksum-verified March 2023 archives for
+ * BTCUSDT/ETHUSDT/SOLUSDT all show the identical real sequence 12:00Z, 14:00Z, 15:00Z — i.e. `13:00Z`
+ * is the one genuinely missing open time; `15:00Z` is a REAL, present candle and was never actually
+ * missing. `missingOpenTime` below was originally (incorrectly) entered as `15:00:00.000Z`.
  */
 export const BINANCE_KNOWN_MARKET_CLOSURES: readonly BinanceKnownMarketClosure[] = [
   {
@@ -53,7 +58,7 @@ export const BINANCE_KNOWN_MARKET_CLOSURES: readonly BinanceKnownMarketClosure[]
     market: "SPOT",
     appliesToSymbols: ["ALL_SPOT"],
     timeframe: "1h",
-    missingOpenTime: "2023-03-24T15:00:00.000Z",
+    missingOpenTime: "2023-03-24T13:00:00.000Z",
     reasonCode: "EXCHANGE_SYSTEM_OUTAGE",
     description: "Binance spot trading suspension during temporary system maintenance",
     sourceReference: "Binance exchange-wide system outage, 2023-03-24 (informational citation only — never fetched or trusted remotely at runtime)",

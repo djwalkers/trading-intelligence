@@ -256,7 +256,13 @@ describe("validateCandleDataset — closed key sets and size bound (pre-commit r
 });
 
 describe("validateCandleDataset — known market closures (explained gaps)", () => {
-  const MISSING_OPEN_TIME = "2023-03-24T15:00:00.000Z";
+  // Corrected (pre-commit review): the locally cached, checksum-verified March 2023 archives prove
+  // the real sequence 12:00Z, 14:00Z, 15:00Z for BTCUSDT/ETHUSDT/SOLUSDT — the genuinely missing open
+  // time is 13:00Z, never 15:00Z (a real, present candle). This suite previously used a misidentified
+  // 15:00Z gap; every fixture below now uses the corrected 13:00Z value and, where it's the primary
+  // scenario, the EXACT real 3-candle sequence.
+  const MISSING_OPEN_TIME = "2023-03-24T13:00:00.000Z";
+  const REAL_SEQUENCE = ["2023-03-24T12:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T15:00:00.000Z"];
 
   function makeCandlesAt(timestamps: string[]) {
     return timestamps.map((timestamp, i) => {
@@ -288,23 +294,26 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
       instrument: "BTC",
       timeframe: "1h",
       source: "test fixture",
-      candles: makeCandlesAt(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T16:00:00.000Z", "2023-03-24T17:00:00.000Z"]),
+      candles: makeCandlesAt(REAL_SEQUENCE),
       ...overrides,
     };
   }
 
-  it("accepts the exact 2023-03-24T15:00:00Z gap when covered by a matching knownClosures entry, and never synthesizes a candle for it", () => {
+  it("accepts the exact real sequence (12:00Z, 14:00Z, 15:00Z) — 13:00Z is the single known missing hour, never synthesized, and 15:00Z is present and never declared as a closure", () => {
     const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure()] }), "test.json", "t");
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.dataset.document.candles.map((c) => c.timestamp)).toEqual(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T16:00:00.000Z", "2023-03-24T17:00:00.000Z"]);
+      expect(result.dataset.document.candles.map((c) => c.timestamp)).toEqual(REAL_SEQUENCE);
       expect(result.dataset.document.candles.some((c) => c.timestamp === MISSING_OPEN_TIME)).toBe(false);
+      // 15:00Z is a REAL, present candle — never inserted, never declared as a closure itself.
+      expect(result.dataset.document.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(true);
+      expect(result.dataset.document.knownClosures?.some((c) => c.missingOpenTime === "2023-03-24T15:00:00.000Z")).toBe(false);
       expect(result.dataset.provenance.appliedKnownClosures).toHaveLength(1);
       expect(result.dataset.provenance.appliedKnownClosures[0]!.missingOpenTime).toBe(MISSING_OPEN_TIME);
     }
   });
 
-  it("BTC, ETH, and SOL all accept the same missing hour when each carries its own matching closure entry", () => {
+  it("BTC, ETH, and SOL all accept the same corrected missing hour when each carries its own matching ALL_SPOT-derived closure entry", () => {
     for (const instrument of ["BTC", "ETH", "SOL"]) {
       const result = validateCandleDataset(makeGapDoc({ instrument, knownClosures: [makeClosure({ symbol: instrument })] }), "test.json", "t");
       expect(result.ok).toBe(true);
@@ -319,8 +328,8 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
 
   it("rejects an extra, unexplained adjacent missing hour", () => {
     const doc = makeGapDoc({
-      candles: makeCandlesAt(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T17:00:00.000Z"]), // 15:00 AND 16:00 both missing
-      knownClosures: [makeClosure()], // only 15:00 declared
+      candles: makeCandlesAt(["2023-03-24T12:00:00.000Z", "2023-03-24T15:00:00.000Z"]), // 13:00 AND 14:00 both missing
+      knownClosures: [makeClosure()], // only 13:00 declared
     });
     const result = validateCandleDataset(doc, "test.json", "t");
     expect(result.ok).toBe(false);
@@ -329,8 +338,8 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
 
   it("rejects partial coverage of a two-hour gap (only one of the two missing hours declared)", () => {
     const doc = makeGapDoc({
-      candles: makeCandlesAt(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T17:00:00.000Z"]), // 15:00 and 16:00 both missing
-      knownClosures: [makeClosure()], // only 15:00 declared
+      candles: makeCandlesAt(["2023-03-24T12:00:00.000Z", "2023-03-24T15:00:00.000Z"]), // 13:00 and 14:00 both missing
+      knownClosures: [makeClosure()], // only 13:00 declared
     });
     const result = validateCandleDataset(doc, "test.json", "t");
     expect(result.ok).toBe(false);
@@ -339,32 +348,21 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
 
   it("accepts a two-hour gap once BOTH missing hours have their own declared closure entry", () => {
     const doc = makeGapDoc({
-      candles: makeCandlesAt(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T17:00:00.000Z"]),
-      knownClosures: [makeClosure(), makeClosure({ missingOpenTime: "2023-03-24T16:00:00.000Z", closureId: "other" })],
+      candles: makeCandlesAt(["2023-03-24T12:00:00.000Z", "2023-03-24T15:00:00.000Z"]),
+      knownClosures: [makeClosure(), makeClosure({ missingOpenTime: "2023-03-24T14:00:00.000Z", closureId: "other" })],
     });
     const result = validateCandleDataset(doc, "test.json", "t");
     expect(result.ok).toBe(true);
   });
 
   it("one closure entry cannot be stretched to also cover a second, separate unrelated gap (pre-commit review)", () => {
-    const doc = {
-      schemaVersion: 1,
-      instrument: "BTC",
-      timeframe: "1h",
-      source: "test fixture",
-      // Two SEPARATE single-hour gaps: 15:00 (declared, real) and 18:00 (real, but never declared).
-      candles: makeCandlesAt([
-        "2023-03-24T13:00:00.000Z",
-        "2023-03-24T14:00:00.000Z",
-        "2023-03-24T16:00:00.000Z",
-        "2023-03-24T17:00:00.000Z",
-        "2023-03-24T19:00:00.000Z",
-        "2023-03-24T20:00:00.000Z",
-      ]),
-      knownClosures: [makeClosure()], // only 15:00 declared
-    };
+    const doc = makeGapDoc({
+      // Two SEPARATE single-hour gaps: 13:00 (declared, real) and 16:00 (real, but never declared).
+      candles: makeCandlesAt([...REAL_SEQUENCE, "2023-03-24T17:00:00.000Z"]),
+      knownClosures: [makeClosure()], // only 13:00 declared
+    });
     const result = validateCandleDataset(doc, "test.json", "t");
-    expect(result.ok).toBe(false); // the 18:00 gap is never explained by the 15:00 closure entry
+    expect(result.ok).toBe(false); // the 16:00 gap is never explained by the 13:00 closure entry
     if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
 
@@ -387,7 +385,7 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
   });
 
   it("rejects a malformed (non-hour-aligned) closure timestamp", () => {
-    const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure({ missingOpenTime: "2023-03-24T15:30:00.000Z" })] }), "test.json", "t");
+    const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure({ missingOpenTime: "2023-03-24T13:30:00.000Z" })] }), "test.json", "t");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("MALFORMED_CLOSURE_ENTRY");
   });
@@ -412,8 +410,8 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
       instrument: "BTC",
       timeframe: "1h",
       source: "test fixture",
-      candles: makeCandlesAt(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z"]), // perfectly contiguous, no gap at all
-      knownClosures: [makeClosure()], // declares the 15:00 outage anyway
+      candles: makeCandlesAt(["2023-04-01T00:00:00.000Z", "2023-04-01T01:00:00.000Z"]), // perfectly contiguous, no gap at all, wholly unrelated to March 24
+      knownClosures: [makeClosure()], // declares the 13:00 outage anyway
     };
     const result = validateCandleDataset(doc, "test.json", "t");
     expect(result.ok).toBe(false);
@@ -421,9 +419,9 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
   });
 
   it("rejects a closure whose missingOpenTime lies outside the dataset's own candle range (pre-commit review)", () => {
-    const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure(), makeClosure({ missingOpenTime: "2023-03-24T16:00:00.000Z", closureId: "unused" })] }), "test.json", "t");
-    // The 15:00 entry explains the real gap; the 16:00 entry does not correspond to any missing hour
-    // at all (16:00 candle IS present in makeGapDoc) — it's a declared-but-unused/out-of-range entry.
+    const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure(), makeClosure({ missingOpenTime: "2023-03-24T20:00:00.000Z", closureId: "unused" })] }), "test.json", "t");
+    // The 13:00 entry explains the real gap; the 20:00 entry falls entirely outside the dataset's own
+    // candle range (12:00..15:00) — a declared-but-unused/out-of-range entry.
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("UNAPPLIED_CLOSURE_ENTRY");
   });
@@ -451,17 +449,27 @@ describe("validateCandleDataset — known market closures (explained gaps)", () 
     if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
 
-  it("toCandles never produces a candle at the missing hour — no signal/trade can ever be generated for it", () => {
+  it("toCandles never produces a candle at the missing hour, and DOES include the real 15:00Z candle — no signal/trade can ever be generated for the missing hour", () => {
     const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure()] }), "test.json", "t");
     expect(result.ok).toBe(true);
     if (result.ok) {
       const candles = toCandles(result.dataset.document);
-      expect(candles).toHaveLength(4);
+      expect(candles).toHaveLength(3);
       expect(candles.some((c) => c.timestamp === MISSING_OPEN_TIME)).toBe(false);
-      // The backtest engine iterates this array positionally — 14:00 is immediately followed by
-      // 16:00 (a real 2-hour jump), never an inserted/interpolated 15:00 bar a strategy could react to.
-      expect(candles.map((c) => c.timestamp)).toEqual(["2023-03-24T13:00:00.000Z", "2023-03-24T14:00:00.000Z", "2023-03-24T16:00:00.000Z", "2023-03-24T17:00:00.000Z"]);
+      // The backtest engine iterates this array positionally — 12:00 is immediately followed by
+      // 14:00 (a real 2-hour jump), never an inserted/interpolated 13:00 bar a strategy could react
+      // to; 15:00 is present as an ordinary real candle.
+      expect(candles.map((c) => c.timestamp)).toEqual(REAL_SEQUENCE);
     }
+  });
+
+  it("negative regression (pre-commit review): declaring the previously-misidentified 15:00Z instead of the corrected 13:00Z never explains the real gap", () => {
+    const result = validateCandleDataset(makeGapDoc({ knownClosures: [makeClosure({ missingOpenTime: "2023-03-24T15:00:00.000Z" })] }), "test.json", "t");
+    // 12:00 -> 14:00 -> 15:00 has exactly one real gap (13:00Z, between 12:00 and 14:00). A closure
+    // declared at 15:00Z instead cannot explain it (13:00Z is unmatched) — the real gap remains
+    // outright rejected, exactly as an unknown/unexplained gap always is.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
 });
 

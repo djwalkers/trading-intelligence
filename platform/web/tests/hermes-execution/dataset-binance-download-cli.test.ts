@@ -48,10 +48,13 @@ function buildFetchMock(months: readonly string[]): ReturnType<typeof vi.fn> {
   });
 }
 
-const KNOWN_CLOSURE_MISSING_OPEN_TIME_MS = Date.parse("2023-03-24T15:00:00.000Z");
+// Corrected (pre-commit review): the locally cached, checksum-verified March 2023 archives prove the
+// real sequence 12:00Z, 14:00Z, 15:00Z for BTCUSDT/ETHUSDT/SOLUSDT — the genuinely missing open time
+// is 13:00Z, never 15:00Z (a real, present candle). This fixture previously removed the wrong row.
+const KNOWN_CLOSURE_MISSING_OPEN_TIME_MS = Date.parse("2023-03-24T13:00:00.000Z");
 
 /** Identical to `buildFetchMock`, except the 2023-03 archive (for all three symbols) is missing
- * exactly the real, documented 2023-03-24T15:00:00Z Binance spot outage hour — the exact scenario
+ * exactly the real, documented 2023-03-24T13:00:00Z Binance spot outage hour — the exact scenario
  * binance-known-market-closures.ts's own committed registry entry exists to explain. Every other
  * month is unaffected. Still never touches the network. */
 function buildFetchMockWithMarch2023Closure(months: readonly string[]): ReturnType<typeof vi.fn> {
@@ -262,7 +265,7 @@ describe("dataset-binance-download-cli", () => {
   );
 
   it(
-    "full pipeline accepts and records the exact 2023-03-24T15:00:00Z Binance known market closure, for BTC/ETH/SOL, without synthesizing a candle",
+    "full pipeline accepts and records the exact 2023-03-24T13:00:00Z Binance known market closure, for BTC/ETH/SOL, without synthesizing a candle",
     async () => {
       const monthsResult = generateMonthRange("2023-01", "2025-12");
       if (!monthsResult.ok) throw new Error("bad fixture range");
@@ -289,9 +292,12 @@ describe("dataset-binance-download-cli", () => {
         const inSamplePath = path.join(outputRoot, "prepared", `${instrument}_IN_SAMPLE_1h.json`);
         const document = JSON.parse(await fs.readFile(inSamplePath, "utf-8"));
         expect(document.candles).toHaveLength(731 * 24 - 1);
-        expect(document.candles.some((c: { timestamp: string }) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
+        expect(document.candles.some((c: { timestamp: string }) => c.timestamp === "2023-03-24T13:00:00.000Z")).toBe(false);
+        // 15:00Z (the previously misidentified value) is a REAL, present candle — never absent, never
+        // itself declared as a closure.
+        expect(document.candles.some((c: { timestamp: string }) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(true);
         expect(document.knownClosures).toHaveLength(1);
-        expect(document.knownClosures[0].missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+        expect(document.knownClosures[0].missingOpenTime).toBe("2023-03-24T13:00:00.000Z");
         expect(document.knownClosures[0].reasonCode).toBe("EXCHANGE_SYSTEM_OUTAGE");
         expect(document.knownClosures[0].status).toBe("VERIFIED_EXCEPTION");
 
@@ -306,12 +312,12 @@ describe("dataset-binance-download-cli", () => {
       // verbatim from the committed registry, regardless of whether this run needed it) from what was
       // actually APPLIED (below) — never conflated into one list.
       expect(report.knownMarketClosures.registryEntries).toHaveLength(1);
-      expect(report.knownMarketClosures.registryEntries[0].missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+      expect(report.knownMarketClosures.registryEntries[0].missingOpenTime).toBe("2023-03-24T13:00:00.000Z");
       expect(report.knownMarketClosures.registryEntries[0].appliesToSymbols).toEqual(["ALL_SPOT"]);
       expect(report.knownMarketClosures.applied).toHaveLength(3); // BTC, ETH, SOL — each their own IN_SAMPLE dataset
       for (const applied of report.knownMarketClosures.applied) {
         expect(applied.role).toBe("IN_SAMPLE");
-        expect(applied.missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+        expect(applied.missingOpenTime).toBe("2023-03-24T13:00:00.000Z");
         expect(applied.reasonCode).toBe("EXCHANGE_SYSTEM_OUTAGE");
         expect(applied.candleSynthesized).toBe(false);
       }

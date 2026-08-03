@@ -384,12 +384,15 @@ describe("sliceCandlesByDateRange — IS/OOS slicing", () => {
 });
 
 describe("prepareDataset — known market closures passthrough", () => {
+  // Corrected (pre-commit review): the locally cached, checksum-verified March 2023 archives prove
+  // the real sequence 12:00Z, 14:00Z, 15:00Z — the genuinely missing open time is 13:00Z, never
+  // 15:00Z (a real, present candle). GAP_ROWS below is the exact real sequence.
   const CLOSURE: DatasetKnownClosure = {
     provider: "BINANCE",
     market: "SPOT",
     symbol: "BTC",
     timeframe: "1h",
-    missingOpenTime: "2023-03-24T15:00:00.000Z",
+    missingOpenTime: "2023-03-24T13:00:00.000Z",
     reasonCode: "EXCHANGE_SYSTEM_OUTAGE",
     description: "Binance spot trading suspension during temporary system maintenance",
     sourceReference: "test citation",
@@ -398,18 +401,14 @@ describe("prepareDataset — known market closures passthrough", () => {
     closureId: "test-closure-id",
   };
 
-  const GAP_ROWS = [
-    "2023-03-24T13:00:00Z,100,101,99,100.5,10",
-    "2023-03-24T14:00:00Z,100.5,102,100,101.5,12",
-    "2023-03-24T16:00:00Z,101.5,103,101,102.5,11",
-    "2023-03-24T17:00:00Z,102.5,104,102,103.5,9",
-  ];
+  const GAP_ROWS = ["2023-03-24T12:00:00Z,100,101,99,100.5,10", "2023-03-24T14:00:00Z,100.5,102,100,101.5,12", "2023-03-24T15:00:00Z,101.5,103,101,102.5,11"];
 
-  it("accepts a gap covered by an explicit knownClosures entry and threads it through report/provenance", () => {
+  it("accepts a gap covered by an explicit knownClosures entry and threads it through report/provenance — 13:00Z missing, 15:00Z present and not a closure", () => {
     const result = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [CLOSURE] });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.document.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
+      expect(result.document.candles.some((c) => c.timestamp === "2023-03-24T13:00:00.000Z")).toBe(false);
+      expect(result.document.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(true);
       expect(result.document.knownClosures).toEqual([CLOSURE]);
       expect(result.report.knownClosureCount).toBe(1);
       expect(result.provenance.appliedKnownClosures).toEqual([CLOSURE]);
@@ -428,8 +427,8 @@ describe("prepareDataset — known market closures passthrough", () => {
       rawText: csvRows(GAP_ROWS),
       format: "csv",
       knownClosures: [CLOSURE],
-      dateFrom: "2023-03-24T13:00:00.000Z",
-      dateTo: "2023-03-24T18:00:00.000Z",
+      dateFrom: "2023-03-24T12:00:00.000Z",
+      dateTo: "2023-03-24T16:00:00.000Z",
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.provenance.appliedKnownClosures).toEqual([CLOSURE]);
@@ -437,7 +436,7 @@ describe("prepareDataset — known market closures passthrough", () => {
 
   it("the prepared dataset hash changes when closure metadata changes, with the identical real gap explained both times", () => {
     // Same GAP_ROWS (identical candles) both times — only the closure's own reasonCode differs, and
-    // both variants actually explain the same real 15:00 gap (an unused/unrelated closure is now
+    // both variants actually explain the same real 13:00 gap (an unused/unrelated closure is now
     // rejected outright — see the pre-commit review test below — so this can no longer compare an
     // "applied" vs. "merely declared" variant).
     const withClosure = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [CLOSURE] });
@@ -462,5 +461,11 @@ describe("prepareDataset — known market closures passthrough", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("UNAPPLIED_CLOSURE_ENTRY");
+  });
+
+  it("negative regression (pre-commit review): declaring the previously-misidentified 15:00Z instead of the corrected 13:00Z never explains the real gap", () => {
+    const result = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [{ ...CLOSURE, missingOpenTime: "2023-03-24T15:00:00.000Z" }] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
 });

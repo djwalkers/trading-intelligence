@@ -326,9 +326,14 @@ invalidate the self-validation that already ran.
 Initial entry — the documented 2023-03-24 Binance spot exchange-wide system outage:
 
 - `provider: "BINANCE"`, `market: "SPOT"`, `appliesToSymbols: ["ALL_SPOT"]`, `timeframe: "1h"`
-- `missingOpenTime: "2023-03-24T15:00:00.000Z"` (previous candle `14:00:00Z`, next candle
-  `16:00:00Z`)
+- `missingOpenTime: "2023-03-24T13:00:00.000Z"` (previous candle `12:00:00Z`, next candle
+  `14:00:00Z`)
 - `reasonCode: "EXCHANGE_SYSTEM_OUTAGE"`, `status: "VERIFIED_EXCEPTION"`
+
+Corrected (pre-commit review): the locally cached, checksum-verified March 2023 archives for
+BTCUSDT/ETHUSDT/SOLUSDT all prove the identical real sequence `12:00Z`, `14:00Z`, `15:00Z` — i.e.
+`13:00Z` is the one genuinely missing open time. `missingOpenTime` was originally entered incorrectly
+as `15:00:00.000Z`; `15:00Z` is itself a real, present candle and was never actually missing.
 
 A gap is accepted ONLY when it spans exact whole 1-hour intervals AND every single missing hour within
 it has its own matching, verified registry entry for that exact symbol/timeframe — an unknown gap, a

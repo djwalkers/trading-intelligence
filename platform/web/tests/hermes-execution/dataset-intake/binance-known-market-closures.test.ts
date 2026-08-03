@@ -19,7 +19,7 @@ const KNOWN_2023_03_24_ENTRY: BinanceKnownMarketClosure = {
   market: "SPOT",
   appliesToSymbols: ["ALL_SPOT"],
   timeframe: "1h",
-  missingOpenTime: "2023-03-24T15:00:00.000Z",
+  missingOpenTime: "2023-03-24T13:00:00.000Z",
   reasonCode: "EXCHANGE_SYSTEM_OUTAGE",
   description: "Binance spot trading suspension during temporary system maintenance",
   sourceReference: "test",
@@ -31,8 +31,8 @@ describe("BINANCE_KNOWN_MARKET_CLOSURES — committed registry", () => {
     expect(findClosureRegistryConflicts(BINANCE_KNOWN_MARKET_CLOSURES)).toEqual([]);
   });
 
-  it("declares the exact 2023-03-24T15:00:00Z Binance spot exchange-wide outage", () => {
-    const entry = BINANCE_KNOWN_MARKET_CLOSURES.find((e) => e.missingOpenTime === "2023-03-24T15:00:00.000Z");
+  it("declares the exact 2023-03-24T13:00:00Z Binance spot exchange-wide outage (corrected from a previously misidentified 15:00Z — pre-commit review)", () => {
+    const entry = BINANCE_KNOWN_MARKET_CLOSURES.find((e) => e.missingOpenTime === "2023-03-24T13:00:00.000Z");
     expect(entry).toBeDefined();
     expect(entry?.provider).toBe("BINANCE");
     expect(entry?.market).toBe("SPOT");
@@ -44,8 +44,8 @@ describe("BINANCE_KNOWN_MARKET_CLOSURES — committed registry", () => {
 
   it("resolves the missing hour for BTCUSDT, ETHUSDT, and SOLUSDT (ALL_SPOT scope)", () => {
     for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT"] as const) {
-      expect(resolveKnownMissingOpenTimesForSymbolMonth(symbol, "2023-03")).toEqual(new Set(["2023-03-24T15:00:00.000Z"]));
-      expect(findClosureRecord(symbol, "2023-03-24T15:00:00.000Z")).toBeDefined();
+      expect(resolveKnownMissingOpenTimesForSymbolMonth(symbol, "2023-03")).toEqual(new Set(["2023-03-24T13:00:00.000Z"]));
+      expect(findClosureRecord(symbol, "2023-03-24T13:00:00.000Z")).toBeDefined();
     }
   });
 
@@ -54,23 +54,30 @@ describe("BINANCE_KNOWN_MARKET_CLOSURES — committed registry", () => {
     expect(resolveKnownMissingOpenTimesForSymbolMonth("BTCUSDT", "2023-02")).toEqual(new Set());
   });
 
-  it("never resolves a closure for a different, unrelated hour", () => {
+  it("never resolves a closure for the real, present, adjacent candles (12:00Z, 14:00Z) — only 13:00Z was ever missing", () => {
+    expect(findClosureRecord("BTCUSDT", "2023-03-24T12:00:00.000Z")).toBeUndefined();
     expect(findClosureRecord("BTCUSDT", "2023-03-24T14:00:00.000Z")).toBeUndefined();
-    expect(findClosureRecord("BTCUSDT", "2023-03-24T16:00:00.000Z")).toBeUndefined();
+  });
+
+  it("negative regression (pre-commit review): 15:00Z is a REAL, present candle and must never resolve as a closure", () => {
+    for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT"] as const) {
+      expect(findClosureRecord(symbol, "2023-03-24T15:00:00.000Z")).toBeUndefined();
+    }
+    expect(resolveKnownMissingOpenTimesForSymbolMonth("BTCUSDT", "2023-03").has("2023-03-24T15:00:00.000Z")).toBe(false);
   });
 });
 
 describe("isHourAlignedIsoTimestamp", () => {
   it("accepts a canonical, hour-aligned UTC timestamp", () => {
-    expect(isHourAlignedIsoTimestamp("2023-03-24T15:00:00.000Z")).toBe(true);
+    expect(isHourAlignedIsoTimestamp("2023-03-24T13:00:00.000Z")).toBe(true);
   });
 
   it("rejects a sub-hour offset", () => {
-    expect(isHourAlignedIsoTimestamp("2023-03-24T15:30:00.000Z")).toBe(false);
+    expect(isHourAlignedIsoTimestamp("2023-03-24T13:30:00.000Z")).toBe(false);
   });
 
   it("rejects a non-canonical (non-toISOString) form", () => {
-    expect(isHourAlignedIsoTimestamp("2023-03-24T15:00:00Z")).toBe(false);
+    expect(isHourAlignedIsoTimestamp("2023-03-24T13:00:00Z")).toBe(false);
   });
 
   it("rejects an unparseable value", () => {
@@ -80,7 +87,7 @@ describe("isHourAlignedIsoTimestamp", () => {
 
 describe("findClosureRegistryConflicts — pure conflict detection over an arbitrary registry array", () => {
   it("flags a malformed (non-hour-aligned) missingOpenTime", () => {
-    const conflicts = findClosureRegistryConflicts([{ ...KNOWN_2023_03_24_ENTRY, missingOpenTime: "2023-03-24T15:30:00.000Z" }]);
+    const conflicts = findClosureRegistryConflicts([{ ...KNOWN_2023_03_24_ENTRY, missingOpenTime: "2023-03-24T13:30:00.000Z" }]);
     expect(conflicts.length).toBeGreaterThan(0);
   });
 

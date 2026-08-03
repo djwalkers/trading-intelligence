@@ -225,23 +225,28 @@ describe("validateMonthlyArchiveRows", () => {
 });
 
 describe("validateMonthlyArchiveRows — known market closures", () => {
-  it("accepts a gap fully explained by knownMissingOpenTimes and never inserts a candle for it", () => {
+  it("accepts the exact real gap (13:00Z missing, 12:00Z/14:00Z present) and never inserts a candle for it — corrected from a previously misidentified 15:00Z (pre-commit review)", () => {
     const rows = makeMonthRows(2023, 3);
-    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
     expect(missingIndex).toBeGreaterThan(0);
     rows.splice(missingIndex, 1);
-    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"]));
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.archive.candles).toHaveLength(31 * 24 - 1);
-      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
-      expect(result.archive.appliedKnownMissingOpenTimes).toEqual(["2023-03-24T15:00:00.000Z"]);
+      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T13:00:00.000Z")).toBe(false);
+      expect(result.archive.appliedKnownMissingOpenTimes).toEqual(["2023-03-24T13:00:00.000Z"]);
+      // 12:00Z and 14:00Z (the real, present neighbours) and 15:00Z (also real, present, and NOT
+      // declared as a closure) all remain ordinary candles in the output.
+      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T12:00:00.000Z")).toBe(true);
+      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T14:00:00.000Z")).toBe(true);
+      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(true);
     }
   });
 
   it("rejects the identical gap when no knownMissingOpenTimes are supplied", () => {
     const rows = makeMonthRows(2023, 3);
-    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
     rows.splice(missingIndex, 1);
     const result = validateMonthlyArchiveRows(rows, "2023-03");
     expect(result.ok).toBe(false);
@@ -250,18 +255,27 @@ describe("validateMonthlyArchiveRows — known market closures", () => {
 
   it("rejects an extra, unexplained adjacent missing hour", () => {
     const rows = makeMonthRows(2023, 3);
-    const idx15 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
-    rows.splice(idx15, 2); // also removes 16:00, only 15:00 is declared known
-    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    const idx13 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
+    rows.splice(idx13, 2); // also removes 14:00, only 13:00 is declared known
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"]));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
 
   it("rejects partial coverage of a two-hour gap", () => {
     const rows = makeMonthRows(2023, 3);
-    const idx15 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
-    rows.splice(idx15, 2); // removes 15:00 and 16:00
-    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"])); // only 15:00 declared
+    const idx13 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
+    rows.splice(idx13, 2); // removes 13:00 and 14:00
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"])); // only 13:00 declared
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("rejects a gap containing one known and one unknown missing hour (pre-commit review)", () => {
+    const rows = makeMonthRows(2023, 3);
+    const idx13 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
+    rows.splice(idx13, 2); // removes 13:00 (known) and 14:00 (unknown)
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z", "2023-03-24T20:00:00.000Z"])); // 14:00 never declared
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
@@ -269,7 +283,7 @@ describe("validateMonthlyArchiveRows — known market closures", () => {
   it("rejects an archive missing its very first hour of the month, even with an unrelated known closure active (pre-commit review)", () => {
     const rows = makeMonthRows(2023, 3);
     rows.shift(); // drop the 00:00 row — no adjacent-pair gap ever sees this, only the row-count check can catch it
-    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"]));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("UNEXPECTED_ROW_COUNT");
   });
@@ -277,16 +291,27 @@ describe("validateMonthlyArchiveRows — known market closures", () => {
   it("rejects an archive missing its very last hour of the month, even with an unrelated known closure active (pre-commit review)", () => {
     const rows = makeMonthRows(2023, 3);
     rows.pop(); // drop the 23:00 row on the last day
-    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"]));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("UNEXPECTED_ROW_COUNT");
   });
 
   it("a wrong (irrelevant) known-missing entry never explains a real gap", () => {
     const rows = makeMonthRows(2023, 3);
-    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 13));
     rows.splice(missingIndex, 1);
     const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-06-01T00:00:00.000Z"]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("negative regression (pre-commit review): removing the REAL, present 15:00Z candle is still rejected as an ordinary unexplained gap", () => {
+    const rows = makeMonthRows(2023, 3);
+    const idx15 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    rows.splice(idx15, 1);
+    // Even with the (correct, corrected) 13:00Z closure declared, removing 15:00Z — never declared —
+    // must still be rejected; 15:00Z was never the closure and must never be silently excused.
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T13:00:00.000Z"]));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
   });
