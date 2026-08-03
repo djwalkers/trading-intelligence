@@ -12,7 +12,11 @@ import { createHash } from "node:crypto";
 export const BINANCE_ARCHIVE_BASE_URL = "https://data.binance.vision";
 
 export type BinanceSymbol = "BTCUSDT" | "ETHUSDT" | "SOLUSDT";
-export const SUPPORTED_BINANCE_SYMBOLS: readonly BinanceSymbol[] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+// Pre-commit review fix. Runtime-frozen, not just TS-`readonly` — binance-known-market-closures.ts's
+// own `ALL_SPOT` expansion iterates this array to decide exactly which symbols a closure applies to;
+// a runtime mutation here (accidental or malicious) would silently change that expansion for every
+// already-validated registry entry without ever re-validating anything.
+export const SUPPORTED_BINANCE_SYMBOLS: readonly BinanceSymbol[] = Object.freeze(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
 
 export type ResearchInstrument = "BTC" | "ETH" | "SOL";
 export const RESEARCH_INSTRUMENTS: readonly ResearchInstrument[] = ["BTC", "ETH", "SOL"];
@@ -173,6 +177,11 @@ export interface ValidatedMonthlyArchive {
   month: string;
   unit: BinanceTimestampUnit;
   candles: { timestamp: string; open: number; high: number; low: number; close: number; volume: number }[];
+  /** Every missing hourly open time (ISO UTC) this archive was permitted to skip — always present,
+   * empty when no known closure applied. Never inserted as a candle; recorded purely as evidence that
+   * a gap was explained, not filled. Populated only from `knownMissingOpenTimes`, i.e. only from a
+   * caller-resolved, committed registry entry — never guessed from the gap itself. */
+  appliedKnownMissingOpenTimes: string[];
 }
 
 export type ValidateMonthlyArchiveResult = { ok: true; archive: ValidatedMonthlyArchive } | { ok: false; reason: string; detail: string };
@@ -188,10 +197,15 @@ function daysInMonth(year: number, month: number): number {
  * unique to "one Binance monthly archive": the timestamp unit is detected once (from the first row)
  * and every other row must match that SAME unit (a unit change mid-file is rejected as
  * `MIXED_TIMESTAMP_UNITS`, never silently reinterpreted row-by-row); the row count must exactly equal
- * the number of hours in the declared calendar month; every row's own timestamp must fall inside that
- * month; rows must be strictly ascending with no duplicates and no gap other than exactly one hour.
+ * the number of hours in the declared calendar month (less any explained closure — see below); every
+ * row's own timestamp must fall inside that month; rows must be strictly ascending with no duplicates
+ * and no gap other than exactly one hour — UNLESS every missing hour in a wider gap is present in
+ * `knownMissingOpenTimes` (resolved by the caller from the committed
+ * binance-known-market-closures.ts registry for this exact symbol/month, never guessed here), in
+ * which case the gap is accepted and recorded in `appliedKnownMissingOpenTimes` — no candle is ever
+ * inserted for a missing hour, explained or not.
  */
-export function validateMonthlyArchiveRows(rows: readonly BinanceKlineRow[], month: string): ValidateMonthlyArchiveResult {
+export function validateMonthlyArchiveRows(rows: readonly BinanceKlineRow[], month: string, knownMissingOpenTimes: ReadonlySet<string> = new Set()): ValidateMonthlyArchiveResult {
   const match = YYYY_MM_PATTERN.exec(month);
   if (!match) return { ok: false, reason: "INVALID_MONTH", detail: `month must be in YYYY-MM format (got ${JSON.stringify(month)})` };
   const year = Number(match[1]);
@@ -208,6 +222,7 @@ export function validateMonthlyArchiveRows(rows: readonly BinanceKlineRow[], mon
   }
 
   const candles: ValidatedMonthlyArchive["candles"] = [];
+  const appliedKnownMissingOpenTimes: string[] = [];
   let previousMs: number | undefined;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
@@ -227,19 +242,49 @@ export function validateMonthlyArchiveRows(rows: readonly BinanceKlineRow[], mon
       if (ms <= previousMs) {
         return { ok: false, reason: ms === previousMs ? "DUPLICATE_TIMESTAMP" : "OUT_OF_ORDER_TIMESTAMP", detail: `${month}: row ${i}'s timestamp ${iso} is not strictly after the previous row's` };
       }
-      if (ms - previousMs !== 3_600_000) {
-        return { ok: false, reason: "GAP_DETECTED", detail: `${month}: gap of ${ms - previousMs}ms before row ${i} (${iso}) does not equal exactly one hour — never filled or interpolated` };
+      const gapMs = ms - previousMs;
+      if (gapMs !== 3_600_000) {
+        const explained = explainGapWithKnownClosures(previousMs, gapMs, knownMissingOpenTimes);
+        if (explained === undefined) {
+          return { ok: false, reason: "GAP_DETECTED", detail: `${month}: gap of ${gapMs}ms before row ${i} (${iso}) does not equal exactly one hour, and is not fully covered by a declared known-closure entry — never filled or interpolated` };
+        }
+        appliedKnownMissingOpenTimes.push(...explained);
       }
     }
     previousMs = ms;
     candles.push({ timestamp: iso, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume });
   }
 
-  if (candles.length !== expectedCount) {
-    return { ok: false, reason: "UNEXPECTED_ROW_COUNT", detail: `${month}: expected exactly ${expectedCount} rows (${daysInMonth(year, monthNum)} days × 24h) but got ${candles.length}` };
+  const expectedRowCount = expectedCount - appliedKnownMissingOpenTimes.length;
+  if (candles.length !== expectedRowCount) {
+    return {
+      ok: false,
+      reason: "UNEXPECTED_ROW_COUNT",
+      detail: `${month}: expected exactly ${expectedRowCount} rows (${daysInMonth(year, monthNum)} days × 24h${appliedKnownMissingOpenTimes.length > 0 ? ` minus ${appliedKnownMissingOpenTimes.length} known-closure hour(s)` : ""}) but got ${candles.length}`,
+    };
   }
 
-  return { ok: true, archive: { month, unit: firstUnit, candles } };
+  return { ok: true, archive: { month, unit: firstUnit, candles, appliedKnownMissingOpenTimes } };
+}
+
+/**
+ * Returns the list of missing hourly open times (ISO UTC, ascending) between `previousMs` (exclusive)
+ * and `previousMs + gapMs` (exclusive) ONLY if the gap spans exact whole 1-hour intervals AND every
+ * single one of those missing hours is present in `knownMissingOpenTimes` — `undefined` otherwise
+ * (an unknown gap, a partially-covered gap, or a gap that isn't a whole number of hours). Never
+ * accepts a gap merely because SOME of its missing hours are known; every missing hour must match.
+ */
+function explainGapWithKnownClosures(previousMs: number, gapMs: number, knownMissingOpenTimes: ReadonlySet<string>): string[] | undefined {
+  if (gapMs <= 0 || gapMs % 3_600_000 !== 0) return undefined;
+  const missingCount = gapMs / 3_600_000 - 1;
+  if (missingCount <= 0) return undefined;
+  const missing: string[] = [];
+  for (let k = 1; k <= missingCount; k++) {
+    const iso = new Date(previousMs + k * 3_600_000).toISOString();
+    if (!knownMissingOpenTimes.has(iso)) return undefined;
+    missing.push(iso);
+  }
+  return missing;
 }
 
 /** Verifies every declared month is present exactly once, in ascending order, with no gap or overlap

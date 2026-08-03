@@ -14,13 +14,22 @@ import {
   validateMonthlyArchiveRows,
   type ArchiveLocation,
   type BinanceKlineRow,
+  type BinanceSymbol,
   type ResearchInstrument,
   type ValidatedMonthlyArchive,
 } from "@/lib/hermes-execution/dataset-intake/binance-archive";
+import {
+  BINANCE_KNOWN_MARKET_CLOSURES,
+  BINANCE_KNOWN_MARKET_CLOSURES_REGISTRY_VERSION,
+  closureRecordIdentity,
+  findClosureRecord,
+  resolveKnownMissingOpenTimesForSymbolMonth,
+} from "@/lib/hermes-execution/dataset-intake/binance-known-market-closures";
 import { extractSingleFileFromZip } from "@/lib/hermes-execution/dataset-intake/binance-zip";
 import { DEFAULT_DOWNLOAD_OPTIONS, downloadAndVerifyArchive, type DownloadOptions } from "@/lib/hermes-execution/dataset-intake/binance-downloader";
 import { DATASET_INTAKE_CONVERTER_VERSION, prepareDataset, type PrepareDatasetResult } from "@/lib/hermes-execution/dataset-intake/dataset-intake";
 import { appendManifestEntry } from "@/lib/hermes-execution/dataset-intake/manifest-writer";
+import type { DatasetKnownClosure } from "@/lib/hermes-execution/backtest/backtest-dataset";
 import type { DatasetManifestEntry, DatasetRole } from "@/lib/hermes-execution/strategy-research/dataset-manifest";
 
 // Phase 4 — Historical Dataset Intake. Operator-run acquisition of Binance's OFFICIAL public spot
@@ -226,13 +235,52 @@ async function auditLocalCache(sourceDir: string, instrument: ResearchInstrument
 }
 
 async function extractAndValidateArchive(sourceDir: string, instrument: ResearchInstrument, month: string): Promise<{ ok: true; archive: ValidatedMonthlyArchive } | { ok: false; reason: string; detail: string }> {
-  const location = buildArchiveLocation(INSTRUMENT_TO_BINANCE_SYMBOL[instrument], month);
+  const symbol = INSTRUMENT_TO_BINANCE_SYMBOL[instrument];
+  const location = buildArchiveLocation(symbol, month);
   const zipBytes = await fs.readFile(path.join(sourceDir, location.zipFileName));
   const extracted = extractSingleFileFromZip(zipBytes, location.csvFileName);
   if (!extracted.ok) return extracted;
   const parsed = parseBinanceKlineCsv(extracted.content.toString("utf-8"));
   if (!parsed.ok) return parsed;
-  return validateMonthlyArchiveRows(parsed.rows as readonly BinanceKlineRow[], month);
+  // Only a gap EXACTLY covered by the committed binance-known-market-closures.ts registry (for this
+  // exact symbol/month) is ever accepted — never guessed from the gap itself, never a CLI override.
+  const knownMissingOpenTimes = resolveKnownMissingOpenTimesForSymbolMonth(symbol, month);
+  return validateMonthlyArchiveRows(parsed.rows as readonly BinanceKlineRow[], month, knownMissingOpenTimes);
+}
+
+/** Resolves EVERY known-closure hour a symbol's archives across `archives` were permitted to skip
+ * (see `ValidatedMonthlyArchive.appliedKnownMissingOpenTimes`) into fully-evidenced
+ * `DatasetKnownClosure` records — one per missing hour, `symbol` stamped as the RESEARCH instrument
+ * (matching the prepared document's own `instrument`, never the raw Binance pair) so Phase 2's own
+ * `validateCandleDataset` can cross-check it directly against the document it's attached to. Returns
+ * `undefined` when no closure applied anywhere in `archives` — callers never attach an empty array. */
+function resolveDocumentKnownClosures(instrument: ResearchInstrument, archives: readonly ValidatedMonthlyArchive[]): DatasetKnownClosure[] | undefined {
+  const binanceSymbol: BinanceSymbol = INSTRUMENT_TO_BINANCE_SYMBOL[instrument];
+  const closures: DatasetKnownClosure[] = [];
+  for (const archive of archives) {
+    for (const missingOpenTime of archive.appliedKnownMissingOpenTimes) {
+      const registryEntry = findClosureRecord(binanceSymbol, missingOpenTime);
+      if (registryEntry === undefined) {
+        // Cannot happen: `appliedKnownMissingOpenTimes` is only ever populated from
+        // `resolveKnownMissingOpenTimesForSymbolMonth`, itself derived from this same registry.
+        throw new Error(`internal error: ${instrument} ${missingOpenTime} was accepted as a known closure but no longer resolves against the registry`);
+      }
+      closures.push({
+        provider: registryEntry.provider,
+        market: registryEntry.market,
+        symbol: instrument,
+        timeframe: "1h",
+        missingOpenTime,
+        reasonCode: registryEntry.reasonCode,
+        description: registryEntry.description,
+        sourceReference: registryEntry.sourceReference,
+        status: registryEntry.status,
+        registryVersion: BINANCE_KNOWN_MARKET_CLOSURES_REGISTRY_VERSION,
+        closureId: closureRecordIdentity(registryEntry, binanceSymbol),
+      });
+    }
+  }
+  return closures.length > 0 ? closures : undefined;
 }
 
 export async function main(): Promise<void> {
@@ -326,6 +374,7 @@ export async function main(): Promise<void> {
       const roleArchives = archives.filter((a) => a.month >= roleConfig.monthsFrom && a.month <= roleConfig.monthsTo);
       const rows = roleArchives.flatMap((a) => a.candles);
       const rawText = JSON.stringify(rows);
+      const knownClosures = resolveDocumentKnownClosures(instrument, roleArchives);
       const result = prepareDataset({
         rawText,
         format: "json",
@@ -337,6 +386,7 @@ export async function main(): Promise<void> {
         dateFrom: roleConfig.from,
         dateTo: roleConfig.to,
         importedAt: now(),
+        ...(knownClosures !== undefined ? { knownClosures } : {}),
       });
       if (!result.ok) {
         fail(args.json, "validation", result.reason, `${instrument} ${roleConfig.role}: ${result.detail}`, { report: result.report });
@@ -392,7 +442,46 @@ export async function main(): Promise<void> {
       lastTimestamp: result.ok ? result.document.candles[result.document.candles.length - 1]!.timestamp : null,
       datasetHash: result.ok ? result.datasetHash : null,
       inputFileHash: result.ok ? result.provenance.inputFileHash : null,
+      appliedKnownClosureCount: result.ok ? result.provenance.appliedKnownClosures.length : null,
     })),
+    // Every known-market-closure entry actually EXERCISED (never merely declared) to explain a real
+    // gap in any prepared dataset — sourced from binance-known-market-closures.ts via each dataset's
+    // own Phase 2 `provenance.appliedKnownClosures`, never re-derived or guessed here. Empty when no
+    // closure ever applied. `candleSynthesized` is always `false`: explaining a gap never inserts,
+    // interpolates, or forward-fills a candle for the missing hour, here or anywhere else in this
+    // pipeline.
+    knownMarketClosures: {
+      registryVersion: BINANCE_KNOWN_MARKET_CLOSURES_REGISTRY_VERSION,
+      // Every entry the committed registry declares — regardless of whether this particular run ever
+      // needed it — so a reviewer can see what was AVAILABLE to explain a gap, distinct from `applied`
+      // below (what was actually exercised). Verbatim from binance-known-market-closures.ts; never
+      // fetched, never re-derived, never symbol-resolved (unlike `applied`, which is per-instrument).
+      registryEntries: BINANCE_KNOWN_MARKET_CLOSURES.map((entry) => ({
+        provider: entry.provider,
+        market: entry.market,
+        appliesToSymbols: entry.appliesToSymbols,
+        timeframe: entry.timeframe,
+        missingOpenTime: entry.missingOpenTime,
+        reasonCode: entry.reasonCode,
+        status: entry.status,
+      })),
+      applied: preparedResults.flatMap(({ instrument, role, result }) =>
+        result.ok
+          ? result.provenance.appliedKnownClosures.map((closure) => ({
+              instrument,
+              role,
+              symbol: INSTRUMENT_TO_BINANCE_SYMBOL[instrument],
+              missingOpenTime: closure.missingOpenTime,
+              reasonCode: closure.reasonCode,
+              description: closure.description,
+              sourceReference: closure.sourceReference,
+              registryVersion: closure.registryVersion,
+              closureId: closure.closureId,
+              candleSynthesized: false,
+            }))
+          : [],
+      ),
+    },
     converterVersion: DATASET_INTAKE_CONVERTER_VERSION,
     binanceAcquisitionToolVersion: BINANCE_ACQUISITION_TOOL_VERSION,
     generatedAt: now(),
@@ -402,6 +491,7 @@ export async function main(): Promise<void> {
       "All three instruments are quoted against USDT — results are USDT-pair-specific and do not necessarily generalise to other quote assets or venues.",
       "Successful validation of these datasets establishes only that they are mechanically well-formed and complete for their declared period — it never establishes, implies, or predicts future profitability of any strategy run against them.",
       "No automatic promotion: this tool never modifies the committed example research plan, never runs a research plan, and never wires this data into any approval, execution, lifecycle, or live-trading path.",
+      "Any candle gap accepted via knownMarketClosures represents a genuine, documented Binance venue outage, never a data-quality shortcut — no candle is ever synthesized, interpolated, or forward-filled for the missing hour, and no strategy could have traded Binance spot during it.",
     ],
   };
   const reportWrite = await writeCreateOnly(path.join(manifestsDir, "acquisition-report.json"), JSON.stringify(acquisitionReport, null, 2));

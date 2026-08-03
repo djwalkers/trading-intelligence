@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { SUPPORTED_MARKET_TIMEFRAMES, TIMEFRAME_DURATIONS_MS, type MarketTimeframe } from "../market-data/candle-validation";
-import { computeDatasetHash, validateCandleDataset, type CandleDatasetDocument, type DatasetCandle, type DatasetRejectionReason } from "../backtest/backtest-dataset";
+import { computeDatasetHash, validateCandleDataset, type CandleDatasetDocument, type DatasetCandle, type DatasetKnownClosure, type DatasetRejectionReason } from "../backtest/backtest-dataset";
 
 // Phase 4 — Historical Dataset Intake. Converts an EXTERNALLY OBTAINED, ALREADY-LOCAL candle file
 // (CSV or JSON) into the exact Phase 2 `CandleDatasetDocument` schema and runs it through Phase 2's
@@ -77,6 +77,10 @@ export interface DatasetInspectionReport {
   rejectionDetail?: string;
   sliceRequested: boolean;
   sliceCandleCount: number | null;
+  /** Count of `knownClosures` entries the caller supplied (declared, not necessarily all exercised —
+   * see `DatasetIntakeProvenance.appliedKnownClosures` for exactly which ones actually explained a
+   * real gap). Zero for an ordinary import with no closure metadata. */
+  knownClosureCount: number;
   warnings: string[];
   limitations: string[];
 }
@@ -93,6 +97,10 @@ export interface DatasetIntakeProvenance {
   inputFileHash: string;
   rowCounts: { total: number; valid: number; invalid: number };
   validationResult: "VALID" | "REJECTED";
+  /** Exactly the `knownClosures` entries that were actually exercised to explain a real gap in the
+   * final document — passed straight through from Phase 2's own `DatasetProvenance.appliedKnownClosures`
+   * (never re-derived here). Empty for an ordinary import. */
+  appliedKnownClosures: DatasetKnownClosure[];
 }
 
 export interface PrepareDatasetInput {
@@ -111,6 +119,12 @@ export interface PrepareDatasetInput {
   /** Exclusive upper bound — see this module's own `sliceCandlesByDateRange` doc comment. */
   dateTo?: string;
   importedAt: string;
+  /** OPTIONAL, pre-resolved evidence for a genuine, verified market closure (e.g. a provider-specific
+   * registry such as binance-known-market-closures.ts) — passed straight through to Phase 2's own
+   * `validateCandleDataset` as `knownClosures` on the assembled document, never modified or
+   * re-derived here. Absent for an ordinary import, which stays exactly as strict as before this
+   * field existed: any gap in the assembled candles is rejected outright. */
+  knownClosures?: DatasetKnownClosure[];
 }
 
 export type PrepareDatasetResult =
@@ -460,6 +474,7 @@ function emptyReport(input: PrepareDatasetInput, expectedIntervalMs: number): Da
     validationStatus: "REJECTED",
     sliceRequested: input.dateFrom !== undefined || input.dateTo !== undefined,
     sliceCandleCount: null,
+    knownClosureCount: input.knownClosures?.length ?? 0,
     warnings: [],
     limitations: [...STANDING_INTAKE_LIMITATIONS],
   };
@@ -536,6 +551,7 @@ export function prepareDataset(input: PrepareDatasetInput): PrepareDatasetResult
     validationStatus: "REJECTED",
     sliceRequested: input.dateFrom !== undefined || input.dateTo !== undefined,
     sliceCandleCount: null,
+    knownClosureCount: input.knownClosures?.length ?? 0,
     warnings,
     limitations: [...STANDING_INTAKE_LIMITATIONS],
   };
@@ -553,13 +569,14 @@ export function prepareDataset(input: PrepareDatasetInput): PrepareDatasetResult
     return reject(baseReport, "INVALID_ROWS", `${invalidRows.length} row(s) failed to parse — no row is silently dropped or repaired: ${preview}${invalidRows.length > 5 ? "; …" : ""}`);
   }
 
-  const fullDocumentCandidate = { schemaVersion: 1 as const, instrument: input.instrument, timeframe: input.timeframe, source: input.source, candles };
+  const fullDocumentCandidate = { schemaVersion: 1 as const, instrument: input.instrument, timeframe: input.timeframe, source: input.source, candles, ...(input.knownClosures !== undefined ? { knownClosures: input.knownClosures } : {}) };
   const fullValidation = validateCandleDataset(fullDocumentCandidate, input.inputFileLabel, input.importedAt);
   if (!fullValidation.ok) {
     return reject(baseReport, fullValidation.reason, fullValidation.detail);
   }
 
   let finalCandles = fullValidation.dataset.document.candles;
+  let appliedKnownClosures = fullValidation.dataset.provenance.appliedKnownClosures;
   if (baseReport.sliceRequested) {
     finalCandles = sliceCandlesByDateRange(finalCandles, input.dateFrom, input.dateTo);
     const sliceValidation = validateCandleDataset({ ...fullDocumentCandidate, candles: finalCandles }, input.inputFileLabel, input.importedAt);
@@ -567,9 +584,17 @@ export function prepareDataset(input: PrepareDatasetInput): PrepareDatasetResult
       return reject(baseReport, "SLICE_INVALID", `[--date-from/--date-to] slice failed independent validation: [${sliceValidation.reason}] ${sliceValidation.detail}`);
     }
     finalCandles = sliceValidation.dataset.document.candles;
+    appliedKnownClosures = sliceValidation.dataset.provenance.appliedKnownClosures;
   }
 
-  const finalDocument: CandleDatasetDocument = { schemaVersion: 1, instrument: input.instrument, timeframe: input.timeframe, source: input.source, candles: finalCandles };
+  const finalDocument: CandleDatasetDocument = {
+    schemaVersion: 1,
+    instrument: input.instrument,
+    timeframe: input.timeframe,
+    source: input.source,
+    candles: finalCandles,
+    ...(input.knownClosures !== undefined ? { knownClosures: input.knownClosures } : {}),
+  };
   const datasetHash = computeDatasetHash(finalDocument);
 
   const report: DatasetInspectionReport = {
@@ -592,6 +617,7 @@ export function prepareDataset(input: PrepareDatasetInput): PrepareDatasetResult
     inputFileHash,
     rowCounts: { total: parsed.rows.length, valid: candles.length, invalid: invalidRows.length },
     validationResult: "VALID",
+    appliedKnownClosures,
   };
 
   return { ok: true, document: finalDocument, datasetHash, provenance, report };

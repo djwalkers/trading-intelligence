@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prepareDataset, sliceCandlesByDateRange, isSupportedTimezoneAssumption, type PrepareDatasetInput } from "@/lib/hermes-execution/dataset-intake/dataset-intake";
+import type { DatasetKnownClosure } from "@/lib/hermes-execution/backtest/backtest-dataset";
 
 // Phase 4 — Historical Dataset Intake. Pure conversion/validation/slicing — no filesystem I/O, no
 // provider/broker import anywhere. Every rejection reason exercised here mirrors a real, offline
@@ -379,5 +380,87 @@ describe("sliceCandlesByDateRange — IS/OOS slicing", () => {
       expect(before.document.candles.some((c) => c.timestamp === boundary)).toBe(false);
       expect(atAndAfter.document.candles.some((c) => c.timestamp === boundary)).toBe(true);
     }
+  });
+});
+
+describe("prepareDataset — known market closures passthrough", () => {
+  const CLOSURE: DatasetKnownClosure = {
+    provider: "BINANCE",
+    market: "SPOT",
+    symbol: "BTC",
+    timeframe: "1h",
+    missingOpenTime: "2023-03-24T15:00:00.000Z",
+    reasonCode: "EXCHANGE_SYSTEM_OUTAGE",
+    description: "Binance spot trading suspension during temporary system maintenance",
+    sourceReference: "test citation",
+    status: "VERIFIED_EXCEPTION",
+    registryVersion: 1,
+    closureId: "test-closure-id",
+  };
+
+  const GAP_ROWS = [
+    "2023-03-24T13:00:00Z,100,101,99,100.5,10",
+    "2023-03-24T14:00:00Z,100.5,102,100,101.5,12",
+    "2023-03-24T16:00:00Z,101.5,103,101,102.5,11",
+    "2023-03-24T17:00:00Z,102.5,104,102,103.5,9",
+  ];
+
+  it("accepts a gap covered by an explicit knownClosures entry and threads it through report/provenance", () => {
+    const result = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [CLOSURE] });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.document.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
+      expect(result.document.knownClosures).toEqual([CLOSURE]);
+      expect(result.report.knownClosureCount).toBe(1);
+      expect(result.provenance.appliedKnownClosures).toEqual([CLOSURE]);
+    }
+  });
+
+  it("still rejects the identical gap when knownClosures is not supplied", () => {
+    const result = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("a knownClosures entry survives a --date-from/--date-to slice that still contains the gap", () => {
+    const result = prepareDataset({
+      ...BASE,
+      rawText: csvRows(GAP_ROWS),
+      format: "csv",
+      knownClosures: [CLOSURE],
+      dateFrom: "2023-03-24T13:00:00.000Z",
+      dateTo: "2023-03-24T18:00:00.000Z",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.provenance.appliedKnownClosures).toEqual([CLOSURE]);
+  });
+
+  it("the prepared dataset hash changes when closure metadata changes, with the identical real gap explained both times", () => {
+    // Same GAP_ROWS (identical candles) both times — only the closure's own reasonCode differs, and
+    // both variants actually explain the same real 15:00 gap (an unused/unrelated closure is now
+    // rejected outright — see the pre-commit review test below — so this can no longer compare an
+    // "applied" vs. "merely declared" variant).
+    const withClosure = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [CLOSURE] });
+    const withDifferentReason = prepareDataset({ ...BASE, rawText: csvRows(GAP_ROWS), format: "csv", knownClosures: [{ ...CLOSURE, reasonCode: "OTHER_REASON" }] });
+    expect(withClosure.ok && withDifferentReason.ok).toBe(true);
+    if (withClosure.ok && withDifferentReason.ok) expect(withClosure.datasetHash).not.toBe(withDifferentReason.datasetHash);
+  });
+
+  it("rejects a declared closure that never explains any actual gap (pre-commit review)", () => {
+    const rows = ["2026-01-01T00:00:00Z,100,101,99,100.5,10", "2026-01-01T01:00:00Z,100.5,102,100,101.5,12"]; // perfectly contiguous, no gap
+    const result = prepareDataset({ ...BASE, rawText: csvRows(rows), format: "csv", knownClosures: [{ ...CLOSURE, missingOpenTime: "2026-02-01T00:00:00.000Z" }] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("UNAPPLIED_CLOSURE_ENTRY");
+  });
+
+  it("rejects a closure whose missingOpenTime lies outside the dataset's own date range (pre-commit review)", () => {
+    const result = prepareDataset({
+      ...BASE,
+      rawText: csvRows(GAP_ROWS),
+      format: "csv",
+      knownClosures: [CLOSURE, { ...CLOSURE, missingOpenTime: "2020-01-01T00:00:00.000Z", closureId: "far-outside-range" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("UNAPPLIED_CLOSURE_ENTRY");
   });
 });

@@ -224,6 +224,74 @@ describe("validateMonthlyArchiveRows", () => {
   });
 });
 
+describe("validateMonthlyArchiveRows — known market closures", () => {
+  it("accepts a gap fully explained by knownMissingOpenTimes and never inserts a candle for it", () => {
+    const rows = makeMonthRows(2023, 3);
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    expect(missingIndex).toBeGreaterThan(0);
+    rows.splice(missingIndex, 1);
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.archive.candles).toHaveLength(31 * 24 - 1);
+      expect(result.archive.candles.some((c) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
+      expect(result.archive.appliedKnownMissingOpenTimes).toEqual(["2023-03-24T15:00:00.000Z"]);
+    }
+  });
+
+  it("rejects the identical gap when no knownMissingOpenTimes are supplied", () => {
+    const rows = makeMonthRows(2023, 3);
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    rows.splice(missingIndex, 1);
+    const result = validateMonthlyArchiveRows(rows, "2023-03");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("rejects an extra, unexplained adjacent missing hour", () => {
+    const rows = makeMonthRows(2023, 3);
+    const idx15 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    rows.splice(idx15, 2); // also removes 16:00, only 15:00 is declared known
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("rejects partial coverage of a two-hour gap", () => {
+    const rows = makeMonthRows(2023, 3);
+    const idx15 = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    rows.splice(idx15, 2); // removes 15:00 and 16:00
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"])); // only 15:00 declared
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+
+  it("rejects an archive missing its very first hour of the month, even with an unrelated known closure active (pre-commit review)", () => {
+    const rows = makeMonthRows(2023, 3);
+    rows.shift(); // drop the 00:00 row — no adjacent-pair gap ever sees this, only the row-count check can catch it
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("UNEXPECTED_ROW_COUNT");
+  });
+
+  it("rejects an archive missing its very last hour of the month, even with an unrelated known closure active (pre-commit review)", () => {
+    const rows = makeMonthRows(2023, 3);
+    rows.pop(); // drop the 23:00 row on the last day
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-03-24T15:00:00.000Z"]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("UNEXPECTED_ROW_COUNT");
+  });
+
+  it("a wrong (irrelevant) known-missing entry never explains a real gap", () => {
+    const rows = makeMonthRows(2023, 3);
+    const missingIndex = rows.findIndex((r) => r.openTimeRaw === Date.UTC(2023, 2, 24, 15));
+    rows.splice(missingIndex, 1);
+    const result = validateMonthlyArchiveRows(rows, "2023-03", new Set(["2023-06-01T00:00:00.000Z"]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("GAP_DETECTED");
+  });
+});
+
 describe("checkNoMonthOverlap", () => {
   it("accepts perfectly contiguous months", () => {
     const jan = validateMonthlyArchiveRows(makeMonthRows(2024, 1), "2024-01");

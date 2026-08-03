@@ -48,6 +48,42 @@ function buildFetchMock(months: readonly string[]): ReturnType<typeof vi.fn> {
   });
 }
 
+const KNOWN_CLOSURE_MISSING_OPEN_TIME_MS = Date.parse("2023-03-24T15:00:00.000Z");
+
+/** Identical to `buildFetchMock`, except the 2023-03 archive (for all three symbols) is missing
+ * exactly the real, documented 2023-03-24T15:00:00Z Binance spot outage hour — the exact scenario
+ * binance-known-market-closures.ts's own committed registry entry exists to explain. Every other
+ * month is unaffected. Still never touches the network. */
+function buildFetchMockWithMarch2023Closure(months: readonly string[]): ReturnType<typeof vi.fn> {
+  const bySymbolMonth = new Map<string, Buffer>();
+  for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT"] satisfies BinanceSymbol[]) {
+    for (const month of months) {
+      const [year, mo] = month.split("-").map(Number) as [number, number];
+      const unit = month >= "2025-01" ? "MICROSECONDS" : "MILLISECONDS";
+      let csv = buildBinanceMonthCsv(year!, mo!, unit);
+      if (month === "2023-03") {
+        csv = csv
+          .split("\n")
+          .filter((line) => Number(line.split(",", 1)[0]) !== KNOWN_CLOSURE_MISSING_OPEN_TIME_MS)
+          .join("\n");
+      }
+      const zip = buildZipBuffer(`${symbol}-1h-${month}.csv`, Buffer.from(csv));
+      bySymbolMonth.set(`${symbol}:${month}`, zip);
+    }
+  }
+  return vi.fn(async (url: string) => {
+    for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT"] satisfies BinanceSymbol[]) {
+      for (const month of months) {
+        const location = buildArchiveLocation(symbol, month);
+        const zip = bySymbolMonth.get(`${symbol}:${month}`)!;
+        if (url === location.zipUrl) return jsonResponse(zip);
+        if (url === location.checksumUrl) return jsonResponse(checksumText(computeSha256Hex(zip), location.zipFileName));
+      }
+    }
+    throw new Error(`unmocked URL requested: ${url}`);
+  });
+}
+
 describe("dataset-binance-download-cli", () => {
   let outputRoot: string;
   beforeEach(async () => {
@@ -221,6 +257,71 @@ describe("dataset-binance-download-cli", () => {
 
       const placeholderReplacement = JSON.parse(await fs.readFile(path.join(outputRoot, "manifests", "plan-placeholder-replacement.json"), "utf-8"));
       expect(placeholderReplacement.entries).toHaveLength(6);
+    },
+    20_000,
+  );
+
+  it(
+    "full pipeline accepts and records the exact 2023-03-24T15:00:00Z Binance known market closure, for BTC/ETH/SOL, without synthesizing a candle",
+    async () => {
+      const monthsResult = generateMonthRange("2023-01", "2025-12");
+      if (!monthsResult.ok) throw new Error("bad fixture range");
+      const fetchMock = buildFetchMockWithMarch2023Closure(monthsResult.months);
+      vi.stubGlobal("fetch", fetchMock);
+
+      process.argv = ["node", "cli.ts", "--from", "2023-01", "--to", "2025-12", "--output-root", outputRoot, "--json"];
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      let parsed: Record<string, unknown>;
+      try {
+        const { main } = await import("@/hermes-execution/dataset-binance-download-cli");
+        await main();
+        expect(process.exitCode).not.toBe(1);
+        parsed = JSON.parse(String(logSpy.mock.calls[0]![0]));
+      } finally {
+        logSpy.mockRestore();
+      }
+      expect(parsed.ok).toBe(true);
+
+      // IN_SAMPLE spans 2023-01..2024-12, so it's the only role that includes the March-2023 outage —
+      // exactly one fewer candle than the ordinary full-pipeline test's own 731*24, never a filled-in
+      // 731*24. OUT_OF_SAMPLE (2025) is entirely unaffected.
+      for (const instrument of RESEARCH_INSTRUMENTS) {
+        const inSamplePath = path.join(outputRoot, "prepared", `${instrument}_IN_SAMPLE_1h.json`);
+        const document = JSON.parse(await fs.readFile(inSamplePath, "utf-8"));
+        expect(document.candles).toHaveLength(731 * 24 - 1);
+        expect(document.candles.some((c: { timestamp: string }) => c.timestamp === "2023-03-24T15:00:00.000Z")).toBe(false);
+        expect(document.knownClosures).toHaveLength(1);
+        expect(document.knownClosures[0].missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+        expect(document.knownClosures[0].reasonCode).toBe("EXCHANGE_SYSTEM_OUTAGE");
+        expect(document.knownClosures[0].status).toBe("VERIFIED_EXCEPTION");
+
+        const outOfSamplePath = path.join(outputRoot, "prepared", `${instrument}_OUT_OF_SAMPLE_1h.json`);
+        const outOfSampleDocument = JSON.parse(await fs.readFile(outOfSamplePath, "utf-8"));
+        expect(outOfSampleDocument.candles).toHaveLength(365 * 24);
+        expect(outOfSampleDocument.knownClosures ?? []).toHaveLength(0);
+      }
+
+      const report = JSON.parse(await fs.readFile(path.join(outputRoot, "manifests", "acquisition-report.json"), "utf-8"));
+      // Pre-commit review: the report distinguishes what the registry makes AVAILABLE (registryEntries,
+      // verbatim from the committed registry, regardless of whether this run needed it) from what was
+      // actually APPLIED (below) — never conflated into one list.
+      expect(report.knownMarketClosures.registryEntries).toHaveLength(1);
+      expect(report.knownMarketClosures.registryEntries[0].missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+      expect(report.knownMarketClosures.registryEntries[0].appliesToSymbols).toEqual(["ALL_SPOT"]);
+      expect(report.knownMarketClosures.applied).toHaveLength(3); // BTC, ETH, SOL — each their own IN_SAMPLE dataset
+      for (const applied of report.knownMarketClosures.applied) {
+        expect(applied.role).toBe("IN_SAMPLE");
+        expect(applied.missingOpenTime).toBe("2023-03-24T15:00:00.000Z");
+        expect(applied.reasonCode).toBe("EXCHANGE_SYSTEM_OUTAGE");
+        expect(applied.candleSynthesized).toBe(false);
+      }
+      const instrumentsWithClosure = report.knownMarketClosures.applied.map((a: { instrument: string }) => a.instrument).sort();
+      expect(instrumentsWithClosure).toEqual(["BTC", "ETH", "SOL"]);
+
+      const manifest = JSON.parse(await fs.readFile(path.join(outputRoot, "manifests", "research-plan-manifest.json"), "utf-8"));
+      expect(manifest).toHaveLength(6);
+      const errors = manifest.flatMap((entry: unknown, i: number) => validateDatasetManifestEntry(entry, `[${i}]`));
+      expect(errors).toEqual([]);
     },
     20_000,
   );

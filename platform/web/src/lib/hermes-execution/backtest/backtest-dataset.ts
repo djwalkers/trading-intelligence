@@ -21,8 +21,9 @@ export const BACKTEST_DATASET_SCHEMA_VERSION = 1;
 // an unrecognised field (a misspelling, or an attempt to smuggle in something like a `"leverage"` or
 // `"positionSize"` value this schema has no business carrying at all) is rejected outright, never
 // silently ignored.
-const DATASET_ROOT_KEYS = ["schemaVersion", "instrument", "timeframe", "source", "candles"] as const;
+const DATASET_ROOT_KEYS = ["schemaVersion", "instrument", "timeframe", "source", "candles", "knownClosures"] as const;
 const CANDLE_KEYS = ["timestamp", "open", "high", "low", "close", "volume"] as const;
+const KNOWN_CLOSURE_KEYS = ["provider", "market", "symbol", "timeframe", "missingOpenTime", "reasonCode", "description", "sourceReference", "status", "registryVersion", "closureId"] as const;
 
 // Pre-commit review fix. This engine's own indicator computation is O(n²) in candle count (each bar
 // re-slices the whole causal history — see rule-evaluator.ts's own doc comment) — deliberately
@@ -46,6 +47,47 @@ export interface DatasetCandle {
   volume?: number;
 }
 
+/** Only one status is currently supported — see binance-known-market-closures.ts's own doc comment
+ * for why a fuller lifecycle is deliberately not modelled. */
+export type DatasetKnownClosureStatus = "VERIFIED_EXCEPTION";
+
+/**
+ * ONE pre-verified, source-controlled record explaining exactly one missing hourly candle in this
+ * document's own `candles` array — e.g. a documented exchange-wide outage. Never trusted merely
+ * because it is present: `validateCandleDataset` independently re-checks every field (closed key set,
+ * non-empty strings, `status` literal, an hour-aligned `missingOpenTime`, and that `symbol`/
+ * `timeframe` match this SAME document) before ever letting it explain a gap. This type is
+ * deliberately provider-agnostic (a plain string `provider`/`market`/`symbol`, never an import of any
+ * Binance-specific type) — Phase 2 stays fixed-local-JSON-only and never learns what "Binance" or
+ * "SPOT" mean; a provider-specific registry (e.g. binance-known-market-closures.ts) is solely
+ * responsible for deciding WHICH closures are true and resolving them into this generic shape.
+ */
+export interface DatasetKnownClosure {
+  provider: string;
+  market: string;
+  /** Must equal this document's own `instrument` — a closure declared for a different symbol never
+   * excuses a gap here (see `validateCandleDataset`'s own gap-explanation logic). */
+  symbol: string;
+  /** Must equal this document's own `timeframe`. */
+  timeframe: MarketTimeframe;
+  /** The exact UTC open time of the ONE missing hourly candle this entry explains — canonical
+   * `toISOString()` form, exactly aligned to `timeframe`'s own duration. */
+  missingOpenTime: string;
+  reasonCode: string;
+  description: string;
+  /** Informational citation/reference text only — never fetched or verified remotely by this module. */
+  sourceReference: string;
+  status: DatasetKnownClosureStatus;
+  /** The source registry's own version at the time this record was resolved — carried through so a
+   * later registry change is visible in the dataset's own evidence trail without needing to re-derive
+   * it from the (mutable, external-to-this-file) registry. */
+  registryVersion: number;
+  /** Deterministic identity for this exact (registry entry, resolved symbol) pair — see
+   * binance-known-market-closures.ts's own `closureRecordIdentity`. Never itself re-derived or
+   * re-verified here; it exists purely as an evidence/audit trail. */
+  closureId: string;
+}
+
 /** The exact on-disk shape of a fixed local backtest dataset file — plain JSON, hand-authored or
  * exported once from a trusted source, never fetched live. */
 export interface CandleDatasetDocument {
@@ -58,6 +100,17 @@ export interface CandleDatasetDocument {
    * mirroring strategy-definition.ts's own contentHash-excludes-filePath/loadedAt precedent. */
   source: string;
   candles: DatasetCandle[];
+  /** OPTIONAL. Absent (or omitted) for an ordinary dataset — which remains exactly as strict as
+   * before this field existed: ANY gap is rejected, with no exception. Only when present may a gap in
+   * `candles` be accepted, and only when every missing hourly interval within that gap is exactly,
+   * individually covered by one entry here (see `validateCandleDataset`'s own gap-explanation logic).
+   * Every entry must ALSO actually be exercised — a declared entry that never explains a real gap
+   * (including one whose `missingOpenTime` falls outside the dataset's own candle range entirely) is
+   * rejected outright, never silently carried as inert metadata. Never used to insert, interpolate, or
+   * forward-fill a candle — a covered gap still has NO candle for the missing hour(s) in `candles`.
+   * Part of this document's own content hash (see `computeDatasetHash`) — changing this field changes
+   * the dataset's identity, exactly like changing a candle would. */
+  knownClosures?: DatasetKnownClosure[];
 }
 
 export type DatasetRejectionReason =
@@ -74,7 +127,10 @@ export type DatasetRejectionReason =
   | "NON_FINITE_VALUE"
   | "INVALID_OHLC"
   | "PROHIBITED_FIELD"
-  | "TOO_MANY_CANDLES";
+  | "TOO_MANY_CANDLES"
+  | "MALFORMED_CLOSURE_ENTRY"
+  | "DUPLICATE_CLOSURE_ENTRY"
+  | "UNAPPLIED_CLOSURE_ENTRY";
 
 export interface ValidatedCandleDataset {
   document: CandleDatasetDocument;
@@ -94,6 +150,11 @@ export interface DatasetProvenance {
   candleCount: number;
   firstTimestamp: string;
   lastTimestamp: string;
+  /** Exactly the subset of the document's own `knownClosures` that was actually EXERCISED to explain
+   * a real gap in `candles` — always present, empty when no gap needed explaining (even if
+   * `knownClosures` declared unused entries). Distinguishes "declared" from "actually relied upon" for
+   * the evidence trail. */
+  appliedKnownClosures: DatasetKnownClosure[];
 }
 
 export type DatasetValidationResult = { ok: true; dataset: ValidatedCandleDataset } | { ok: false; reason: DatasetRejectionReason; detail: string };
@@ -111,10 +172,108 @@ function toErrorMessage(error: unknown): string {
  * byte-for-byte identical candle data but different key order, whitespace, or `source` text hash
  * identically; a single changed OHLC value, added/removed candle, or different instrument/timeframe
  * hashes differently. */
-export function computeDatasetHash(document: Pick<CandleDatasetDocument, "schemaVersion" | "instrument" | "timeframe" | "candles">): string {
-  return createHash("sha256")
-    .update(canonicalStringify({ schemaVersion: document.schemaVersion, instrument: document.instrument, timeframe: document.timeframe, candles: document.candles }))
-    .digest("hex");
+export function computeDatasetHash(document: Pick<CandleDatasetDocument, "schemaVersion" | "instrument" | "timeframe" | "candles" | "knownClosures">): string {
+  const hashed: Record<string, unknown> = { schemaVersion: document.schemaVersion, instrument: document.instrument, timeframe: document.timeframe, candles: document.candles };
+  // Only included when present, so a document with NO `knownClosures` hashes byte-identically to how
+  // it hashed before this field existed — an ordinary dataset's hash is completely unaffected.
+  if (document.knownClosures !== undefined) hashed.knownClosures = document.knownClosures;
+  return createHash("sha256").update(canonicalStringify(hashed)).digest("hex");
+}
+
+const CLOSURE_STRING_FIELDS = ["provider", "market", "symbol", "reasonCode", "description", "sourceReference", "closureId"] as const;
+
+type ValidateClosuresResult = { ok: true; closures: DatasetKnownClosure[] } | { ok: false; reason: DatasetRejectionReason; detail: string };
+
+/**
+ * Structural + cross-reference validation of `raw.knownClosures` ONLY — never trusts a single field
+ * merely because it round-trips through JSON. Every entry's own `symbol`/`timeframe` must match THIS
+ * document's `instrument`/`timeframe` exactly (a closure declared for a different symbol or timeframe
+ * never excuses a gap here — see this module's own top-of-file requirement), `missingOpenTime` must be
+ * a canonical, hour-aligned UTC ISO timestamp, and no two entries may cover the identical
+ * (symbol, timeframe, missingOpenTime) triple (duplicate/overlapping closures are rejected outright,
+ * regardless of whether either is ever actually needed to explain a real gap).
+ */
+function validateKnownClosures(rawClosures: unknown, instrument: string, timeframe: MarketTimeframe): ValidateClosuresResult {
+  if (!Array.isArray(rawClosures)) {
+    return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: "knownClosures must be an array when present" };
+  }
+  const expectedIntervalMs = TIMEFRAME_DURATIONS_MS[timeframe];
+  const closures: DatasetKnownClosure[] = [];
+  const seen = new Set<string>();
+  for (const [index, rawEntry] of rawClosures.entries()) {
+    if (!isRecord(rawEntry)) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}]: not an object` };
+    }
+    const extraKeys = Object.keys(rawEntry).filter((k) => !(KNOWN_CLOSURE_KEYS as readonly string[]).includes(k));
+    if (extraKeys.length > 0) {
+      return { ok: false, reason: "PROHIBITED_FIELD", detail: `knownClosures[${index}]: unsupported field(s) ${extraKeys.join(", ")} — never silently ignored` };
+    }
+    for (const field of CLOSURE_STRING_FIELDS) {
+      if (typeof rawEntry[field] !== "string" || (rawEntry[field] as string).trim().length === 0) {
+        return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].${field}: missing or not a non-empty string` };
+      }
+    }
+    if (rawEntry.status !== "VERIFIED_EXCEPTION") {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].status: must be "VERIFIED_EXCEPTION" (got ${JSON.stringify(rawEntry.status)})` };
+    }
+    if (typeof rawEntry.registryVersion !== "number" || !Number.isInteger(rawEntry.registryVersion) || rawEntry.registryVersion < 1) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].registryVersion: must be a positive integer` };
+    }
+    if (rawEntry.timeframe !== timeframe) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].timeframe "${String(rawEntry.timeframe)}" does not match this dataset's own timeframe "${timeframe}" — a closure never applies across timeframes` };
+    }
+    if (rawEntry.symbol !== instrument) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].symbol "${String(rawEntry.symbol)}" does not match this dataset's own instrument "${instrument}" — a closure never applies across symbols` };
+    }
+    const missingOpenTime = rawEntry.missingOpenTime;
+    if (typeof missingOpenTime !== "string" || !Number.isFinite(Date.parse(missingOpenTime)) || new Date(Date.parse(missingOpenTime)).toISOString() !== missingOpenTime) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].missingOpenTime: must be a canonical UTC ISO timestamp (got ${JSON.stringify(missingOpenTime)})` };
+    }
+    if (Date.parse(missingOpenTime) % expectedIntervalMs !== 0) {
+      return { ok: false, reason: "MALFORMED_CLOSURE_ENTRY", detail: `knownClosures[${index}].missingOpenTime "${missingOpenTime}" is not aligned to the declared ${timeframe} interval` };
+    }
+    const dedupeKey = `${rawEntry.symbol}|${rawEntry.timeframe}|${missingOpenTime}`;
+    if (seen.has(dedupeKey)) {
+      return { ok: false, reason: "DUPLICATE_CLOSURE_ENTRY", detail: `knownClosures[${index}]: duplicate/overlapping entry for symbol "${String(rawEntry.symbol)}" at "${missingOpenTime}" — each missing hour may be explained by at most one closure entry` };
+    }
+    seen.add(dedupeKey);
+    closures.push({
+      provider: rawEntry.provider as string,
+      market: rawEntry.market as string,
+      symbol: rawEntry.symbol as string,
+      timeframe: rawEntry.timeframe as MarketTimeframe,
+      missingOpenTime,
+      reasonCode: rawEntry.reasonCode as string,
+      description: rawEntry.description as string,
+      sourceReference: rawEntry.sourceReference as string,
+      status: "VERIFIED_EXCEPTION",
+      registryVersion: rawEntry.registryVersion as number,
+      closureId: rawEntry.closureId as string,
+    });
+  }
+  return { ok: true, closures };
+}
+
+/**
+ * Returns the missing open times (ISO UTC, ascending) between `prevMs` (exclusive) and
+ * `prevMs + gapMs` (exclusive) ONLY if the gap is a whole number of `expectedIntervalMs` intervals
+ * AND every single one of those missing open times has its own entry in `closuresByMissingOpenTime`
+ * — `undefined` for an unknown gap, a partially-covered gap, or a gap that isn't a whole number of
+ * intervals. Symbol/timeframe matching against the document was already enforced when
+ * `closuresByMissingOpenTime` was built (`validateKnownClosures`), so a lookup hit here is already
+ * known to match provider/market/symbol/timeframe.
+ */
+function explainGapWithClosures(prevMs: number, gapMs: number, expectedIntervalMs: number, closuresByMissingOpenTime: ReadonlyMap<string, DatasetKnownClosure>): string[] | undefined {
+  if (gapMs % expectedIntervalMs !== 0) return undefined;
+  const missingCount = gapMs / expectedIntervalMs - 1;
+  if (missingCount <= 0) return undefined;
+  const missing: string[] = [];
+  for (let k = 1; k <= missingCount; k++) {
+    const iso = new Date(prevMs + k * expectedIntervalMs).toISOString();
+    if (!closuresByMissingOpenTime.has(iso)) return undefined;
+    missing.push(iso);
+  }
+  return missing;
 }
 
 /**
@@ -122,11 +281,14 @@ export function computeDatasetHash(document: Pick<CandleDatasetDocument, "schema
  * Rejects explicitly (never silently repairs, trims, sorts, or fills a gap) on: unexpected shape,
  * an unsupported/missing timeframe, fewer than 2 candles (ordering/gap checks are meaningless
  * below that), an unparseable timestamp, out-of-order timestamps, duplicate timestamps, a gap that
- * doesn't exactly equal the declared timeframe's own duration (deliberately strict — a FIXED,
- * already-captured dataset has no live-feed jitter to tolerate, unlike candle-validation.ts's own
- * GAP_TOLERANCE_RATIO for a real-time feed), a non-finite OHLCV value, or malformed OHLC ordering
+ * doesn't exactly equal the declared timeframe's own duration and isn't EXACTLY explained by a
+ * matching, verified `knownClosures` entry (deliberately strict — a FIXED, already-captured dataset
+ * has no live-feed jitter to tolerate, unlike candle-validation.ts's own GAP_TOLERANCE_RATIO for a
+ * real-time feed; see `explainGapWithClosures`), a non-finite OHLCV value, or malformed OHLC ordering
  * (high below low, open/close outside [low, high]), an unrecognised top-level or per-candle field,
- * or more than `MAX_DATASET_CANDLES` rows.
+ * a malformed/duplicate/overlapping/unapplied `knownClosures` entry (every declared closure must
+ * actually explain a real gap in `candles` — a declared-but-unused entry is rejected, never silently
+ * accepted), or more than `MAX_DATASET_CANDLES` rows.
  *
  * Known, documented limitation: this validator does NOT detect duplicate JSON object keys (e.g.
  * `{"close": 1, "close": 2}`) — `JSON.parse` itself silently keeps only the last occurrence before
@@ -160,6 +322,14 @@ export function validateCandleDataset(raw: unknown, filePath: string, loadedAt: 
   }
 
   const source = typeof raw.source === "string" ? raw.source : "";
+
+  let knownClosures: DatasetKnownClosure[] | undefined;
+  if (raw.knownClosures !== undefined) {
+    const closuresResult = validateKnownClosures(raw.knownClosures, instrument, timeframe as MarketTimeframe);
+    if (!closuresResult.ok) return { ok: false, reason: closuresResult.reason, detail: closuresResult.detail };
+    knownClosures = closuresResult.closures;
+  }
+  const closuresByMissingOpenTime = new Map<string, DatasetKnownClosure>((knownClosures ?? []).map((c) => [c.missingOpenTime, c]));
 
   if (!Array.isArray(raw.candles) || raw.candles.length < 2) {
     return { ok: false, reason: "INSUFFICIENT_CANDLES", detail: "candles must be an array of at least 2 rows (ordering/gap checks require at least 2)" };
@@ -212,6 +382,7 @@ export function validateCandleDataset(raw: unknown, filePath: string, loadedAt: 
 
   const expectedIntervalMs = TIMEFRAME_DURATIONS_MS[timeframe as MarketTimeframe];
   const seenTimestamps = new Set<string>();
+  const appliedMissingOpenTimes = new Set<string>();
   for (let i = 0; i < candles.length; i++) {
     const candle = candles[i]!;
     if (seenTimestamps.has(candle.timestamp)) {
@@ -225,16 +396,45 @@ export function validateCandleDataset(raw: unknown, filePath: string, loadedAt: 
       return { ok: false, reason: "OUT_OF_ORDER_TIMESTAMP", detail: `candles[${i}]: timestamp "${candle.timestamp}" is not strictly after candles[${i - 1}]'s "${prev.timestamp}"` };
     }
     if (gapMs !== expectedIntervalMs) {
+      // A gap may ONLY be accepted when it spans exact whole timeframe intervals AND every single
+      // missing interval within it has its own matching, verified `knownClosures` entry — partial
+      // coverage, an extra unexplained adjacent hour, or a non-whole-interval gap all fall straight
+      // through to the exact same GAP_DETECTED rejection an ordinary dataset (no `knownClosures` at
+      // all) has always gotten. No candle is ever inserted for a covered missing hour, here or
+      // anywhere else in this function.
+      const explained = explainGapWithClosures(Date.parse(prev.timestamp), gapMs, expectedIntervalMs, closuresByMissingOpenTime);
+      if (explained === undefined) {
+        return {
+          ok: false,
+          reason: "GAP_DETECTED",
+          detail: `candles[${i}]: gap of ${gapMs}ms between "${prev.timestamp}" and "${candle.timestamp}" does not exactly equal the declared ${timeframe} interval (${expectedIntervalMs}ms), and is not fully covered by a matching, verified knownClosures entry — fixed backtest datasets must be perfectly contiguous or exactly explained, with no tolerance for jitter, missing bars, or partial closure coverage`,
+        };
+      }
+      for (const iso of explained) appliedMissingOpenTimes.add(iso);
+    }
+  }
+
+  // Pre-commit review fix. `knownClosures` is an evidentiary record, not a wishlist — a document
+  // whose declared closure never actually explained a real gap (a stale entry left over from an
+  // earlier version of the candles, a copy-paste from a different dataset, or a fabricated entry
+  // whose `missingOpenTime` doesn't correspond to anything in `candles` at all) is rejected outright,
+  // exactly like a duplicate or malformed entry. This also transitively enforces that every declared
+  // `missingOpenTime` lies within the dataset's own candle range: a timestamp outside `candles`
+  // entirely can never be "applied" by the loop above, so it always lands here.
+  if (knownClosures !== undefined) {
+    const unapplied = knownClosures.filter((c) => !appliedMissingOpenTimes.has(c.missingOpenTime));
+    if (unapplied.length > 0) {
       return {
         ok: false,
-        reason: "GAP_DETECTED",
-        detail: `candles[${i}]: gap of ${gapMs}ms between "${prev.timestamp}" and "${candle.timestamp}" does not exactly equal the declared ${timeframe} interval (${expectedIntervalMs}ms) — fixed backtest datasets must be perfectly contiguous, with no tolerance for jitter or missing bars`,
+        reason: "UNAPPLIED_CLOSURE_ENTRY",
+        detail: `knownClosures declares ${unapplied.length} entr${unapplied.length === 1 ? "y" : "ies"} that do not correspond to any actual gap in candles (never applied, possibly outside the dataset's own date range): ${unapplied.map((c) => c.missingOpenTime).join(", ")}`,
       };
     }
   }
 
-  const document: CandleDatasetDocument = { schemaVersion, instrument, timeframe: timeframe as MarketTimeframe, source, candles };
+  const document: CandleDatasetDocument = { schemaVersion, instrument, timeframe: timeframe as MarketTimeframe, source, candles, ...(knownClosures !== undefined ? { knownClosures } : {}) };
   const datasetHash = computeDatasetHash(document);
+  const appliedKnownClosures = (knownClosures ?? []).filter((c) => appliedMissingOpenTimes.has(c.missingOpenTime));
 
   return {
     ok: true,
@@ -249,6 +449,7 @@ export function validateCandleDataset(raw: unknown, filePath: string, loadedAt: 
         candleCount: candles.length,
         firstTimestamp: candles[0]!.timestamp,
         lastTimestamp: candles[candles.length - 1]!.timestamp,
+        appliedKnownClosures,
       },
     },
   };

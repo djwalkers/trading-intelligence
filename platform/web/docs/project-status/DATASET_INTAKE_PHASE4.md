@@ -301,7 +301,99 @@ array by hand. **The committed example plan is never edited automatically** — 
 produces is staged or committed by it, and everything it writes lives under the gitignored
 `.data/` root.
 
-### Known limitation
+### Known market closures (explained gaps)
+
+By default a gap of any kind — Binance itself never publishes a missing hour except during a genuine
+venue-level event — is rejected outright, by both `validateMonthlyArchiveRows` (per monthly archive)
+and Phase 2's own `validateCandleDataset` (on the final assembled dataset). No candle is ever
+inserted, interpolated, or forward-filled for a missing hour, under any circumstance.
+
+The ONE exception mechanism is a small, hand-reviewed, source-controlled registry:
+`src/lib/hermes-execution/dataset-intake/binance-known-market-closures.ts`
+(`BINANCE_KNOWN_MARKET_CLOSURES`, currently registry version 1). Each entry declares the exact
+provider/market/timeframe, the symbol(s) it applies to (a specific `BinanceSymbol`, or `ALL_SPOT` for
+every symbol this pipeline acquires), the exact missing hourly `missingOpenTime` (UTC ISO, hour-
+aligned), a `reasonCode`, a human `description`, an informational `sourceReference` citation, and
+`status: "VERIFIED_EXCEPTION"`. The registry is never fetched or trusted remotely — it is a plain
+committed array literal, and self-validates at import time (malformed timestamps, empty/unrecognised
+symbol scopes, `"ALL_SPOT"` combined with an explicit symbol in the same entry, or two entries
+covering the same symbol at the same hour all throw immediately). Pre-commit review fix: the
+validated array (and every entry, and every entry's own `appliesToSymbols`) is `Object.freeze`d
+immediately after validation, and `binance-archive.ts`'s own `SUPPORTED_BINANCE_SYMBOLS` (which
+`"ALL_SPOT"` expands against) is frozen too — a runtime mutation of either can no longer silently
+invalidate the self-validation that already ran.
+
+Initial entry — the documented 2023-03-24 Binance spot exchange-wide system outage:
+
+- `provider: "BINANCE"`, `market: "SPOT"`, `appliesToSymbols: ["ALL_SPOT"]`, `timeframe: "1h"`
+- `missingOpenTime: "2023-03-24T15:00:00.000Z"` (previous candle `14:00:00Z`, next candle
+  `16:00:00Z`)
+- `reasonCode: "EXCHANGE_SYSTEM_OUTAGE"`, `status: "VERIFIED_EXCEPTION"`
+
+A gap is accepted ONLY when it spans exact whole 1-hour intervals AND every single missing hour within
+it has its own matching, verified registry entry for that exact symbol/timeframe — an unknown gap, a
+partially-covered gap, an extra unexplained adjacent hour, or an entry declared for the wrong
+symbol/timeframe are all rejected exactly as before this mechanism existed. Duplicate/overlapping
+registry entries (two entries covering the same symbol at the same hour) are rejected outright, never
+silently resolved by "first wins."
+
+Two independent layers apply the registry, both resolving strictly from `binance-archive.ts`'s
+`resolveKnownMissingOpenTimesForSymbolMonth`/`findClosureRecord` — never a CLI flag or runtime
+override:
+
+1. **Per-archive** (`validateMonthlyArchiveRows`): accepts an explained gap within one symbol's one
+   monthly CSV, and reduces that month's own expected row count by exactly the explained hour count.
+2. **Phase 2** (`validateCandleDataset`, via `prepareDataset`'s new `knownClosures` input): the
+   assembled, per-role `CandleDatasetDocument` carries a fully-resolved `knownClosures` array (each
+   entry's `symbol` stamped as the research instrument, e.g. `"BTC"`, matching the document's own
+   `instrument`) attached as an OPTIONAL document field. Absent for any ordinary dataset — which
+   remains exactly as strict as before this field existed. Every declared entry must ALSO actually
+   explain a real gap in the document's own `candles` (pre-commit review fix: a declared-but-unused
+   entry — including one whose `missingOpenTime` falls outside the dataset's own candle range
+   entirely — is rejected outright as `UNAPPLIED_CLOSURE_ENTRY`, never silently carried as inert
+   metadata). The field is part of the document's own content hash (`computeDatasetHash`): a dataset's
+   hash changes if its closure metadata changes, even with identical candles.
+
+This is deliberately Binance-specific, provider-agnostic-at-Phase-2 design: `backtest-dataset.ts`
+itself never imports or knows about "Binance"/"SPOT" — it only validates the generic, closed
+`DatasetKnownClosure` shape it's handed and cross-checks `symbol`/`timeframe` against the document
+carrying it. A future non-Binance provider would define its own registry and resolve it into the same
+generic shape, never touching Phase 2's own gap logic.
+
+Research implications: the missing hour represents a genuine market outage, never missing/incomplete
+downloaded data — no candle is ever synthesized for it. Indicator calculations and backtests simply
+continue from the next available REAL candle (e.g. `16:00:00Z` directly follows `14:00:00Z`); crossover
+and next-bar execution use that next actual candle, never a pretend intermediate bar. No strategy could
+have traded Binance spot during the closure. `MAX_BARS_HELD` remains bar-count based (unaffected — it
+was never timestamp-based); trade entry/exit timestamps and elapsed-time/duration metrics are computed
+from the real candle timestamps the backtest engine already uses (`backtest-engine.ts` never assumes
+fixed inter-candle spacing), so they correctly reflect the true elapsed wall-clock time across a
+covered gap rather than pretending the missing hour existed. Results remain Binance-spot-specific, like
+every other output of this pipeline.
+
+Evidence is recorded in three places for every dataset an accepted closure applies to: the prepared
+dataset document itself (`knownClosures`, hashed), its provenance
+(`DatasetIntakeProvenance.appliedKnownClosures` / Phase 2's own `DatasetProvenance.appliedKnownClosures`
+— exactly the entries actually exercised, not merely declared), and `acquisition-report.json`'s own
+`knownMarketClosures` section, which clearly separates `registryEntries` (every entry the committed
+registry declares, verbatim, regardless of whether this run needed it — what was AVAILABLE) from
+`applied` (per-dataset entries with `missingOpenTime`, `reasonCode`, `closureId`, and an explicit
+`candleSynthesized: false` confirmation — what was actually EXERCISED).
+
+### Known limitations
 
 No cross-process file locking — see `manifest-writer.ts`'s own doc comment (shared with
 `dataset:prepare`). Run one acquisition at a time against a given `--output-root`.
+
+Phase 2's `validateCandleDataset` deliberately stays provider-agnostic (never imports
+binance-known-market-closures.ts or knows what "Binance" means) and therefore cannot, by itself,
+cross-check a `knownClosures` entry's `reasonCode`/`closureId`/etc. against the real committed
+registry — it can only confirm internal well-formedness (closed keys, matching symbol/timeframe,
+no duplicates, and — pre-commit review fix — that every declared entry is actually exercised by a
+real gap). The ONE production path that ever attaches `knownClosures` to a file this pipeline writes
+(`dataset-binance-download-cli.ts`'s `resolveDocumentKnownClosures`) computes it entirely from the
+registry, never from CLI input, so a document produced by this tool is always trustworthy. A
+hand-edited prepared JSON file loaded independently (e.g. via `loadCandleDataset` outside this CLI)
+could still self-declare a structurally well-formed but factually fabricated closure; guarding against
+that would require either importing the registry into Phase 2 (breaking its provider-agnostic design)
+or a separate, provider-aware re-verification step at load time — neither exists today.
