@@ -205,3 +205,103 @@ invented or guessed by this phase; the plan stays honestly non-runnable until re
 - No automatic promotion: this phase has no `status`/`usableForDemo`-shaped field anywhere in its
   output, and nothing it produces is ever wired into any approval, execution, lifecycle, or live-
   trading path.
+
+## Binance historical dataset acquisition (`dataset:binance-download`)
+
+Operator-run download-and-assembly workflow that produces the first REAL BTC/ETH/SOL datasets for
+CRYPTO_EMA_TREND_V1's research plan, from Binance's own official public archive. Files:
+`src/lib/hermes-execution/dataset-intake/binance-archive.ts` (pure: URLs, month ranges, checksum
+parsing, timestamp-unit detection, archive-shape validation), `binance-zip.ts` (pure: minimal
+single-entry ZIP reader), `binance-downloader.ts` (the ONLY network I/O — plain `fetch`, no
+credentials), and `src/hermes-execution/dataset-binance-download-cli.ts` (orchestrates both stages and
+hands the assembled rows to Phase 4's own `prepareDataset` — never a second, parallel dataset
+validator; the final `datasetHash` is always Phase 2's own `computeDatasetHash`, reached only via that
+existing path).
+
+### Official source convention
+
+`https://data.binance.vision/data/spot/monthly/klines/<SYMBOL>/1h/<SYMBOL>-1h-YYYY-MM.zip` plus its
+matching `.CHECKSUM` file — never an unofficial mirror; the base URL is one fixed constant. Every
+archive's SHA-256 is verified against its freshly-downloaded `.CHECKSUM` file before extraction ever
+runs; a mismatch is rejected outright and the bad bytes are never written to disk.
+
+### Binance column mapping
+
+Monthly kline CSVs have no header row and 12 columns; only the first six (open time, open, high, low,
+close, volume) are consumed — every other column (close time, quote volume, trade count, taker
+volumes, the trailing "ignore" column) is discarded at this adapter boundary, never carried forward.
+
+### The 2025 timestamp-unit change
+
+Binance represents `open time` in **milliseconds** for archives through 2024, and in **microseconds**
+from 2025 onward. The unit is detected per archive, purely by numeric magnitude (millisecond-epoch
+values for realistic dates are ~13 digits; microsecond-epoch values are ~16 digits) — never by the
+month number itself, and never guessed for a value that doesn't land cleanly in one of those two
+ranges (a seconds-scale, nanoseconds-scale, or otherwise ambiguous value is rejected). Every row within
+one archive must use the SAME unit as that archive's own first row — a unit change mid-file is
+rejected (`MIXED_TIMESTAMP_UNITS`), never silently reinterpreted.
+
+### Selected date ranges
+
+- **IN_SAMPLE**: 2023-01-01T00:00:00Z (inclusive) to 2025-01-01T00:00:00Z (exclusive) — 731 days × 24h
+  = 17,544 candles.
+- **OUT_OF_SAMPLE**: 2025-01-01T00:00:00Z (inclusive) to 2026-01-01T00:00:00Z (exclusive) — 365 days ×
+  24h = 8,760 candles.
+
+2026 data is never acquired or assembled — enforced as a fixed constant independent of any CLI flag or
+the host machine's current date.
+
+### USDT-pair limitation
+
+All three instruments are acquired as their Binance **spot, USDT-quoted** pair (`BTCUSDT`, `ETHUSDT`,
+`SOLUSDT`). This is Binance spot market data only — never futures, never an exchange-independent
+reference price — and results are specific to this venue and quote asset; they do not necessarily
+generalise to any other pair, venue, or asset class.
+
+### Commands
+
+```
+# List exactly which URLs would be requested — no network call, no filesystem write.
+npm run dataset:binance-download -- --from 2023-01 --to 2025-12 --output-root .data/hermes-execution/research-datasets --dry-run --json
+
+# Download, verify, and (once all 36 required months are cached) assemble + validate + write outputs.
+npm run dataset:binance-download -- --from 2023-01 --to 2025-12 --output-root .data/hermes-execution/research-datasets
+```
+
+`--from`/`--to` control which months are DOWNLOADED in this invocation (useful for resuming a partial
+run a few months at a time); the assembly stage always checks the full, fixed 2023-01..2025-12
+requirement against whatever is verified in the local cache, from ANY prior invocation — so repeated,
+incremental runs correctly converge once every required archive is present. Downloaded archives are
+cached under `<output-root>/source/binance/`; a cached file is reused only if it still matches its own
+freshly re-verified checksum, and is otherwise re-downloaded, never silently trusted.
+
+Retries are bounded (3 attempts), timeouts are explicit (30s), and every request carries a fixed,
+descriptive User-Agent — no credentials, no API key, no broker endpoint is ever contacted.
+
+### Expected six outputs
+
+Written to `<output-root>/prepared/`, each an exact Phase 2 `CandleDatasetDocument` that has passed
+Phase 2's own validator: `BTC_IN_SAMPLE_1h.json`, `BTC_OUT_OF_SAMPLE_1h.json`, `ETH_IN_SAMPLE_1h.json`,
+`ETH_OUT_OF_SAMPLE_1h.json`, `SOL_IN_SAMPLE_1h.json`, `SOL_OUT_OF_SAMPLE_1h.json` — `source` set to
+`BINANCE_SPOT_<SYMBOL>` (e.g. `BINANCE_SPOT_BTCUSDT`). Output writes are atomic and create-only,
+identical to `dataset:prepare`'s own convention — no `--overwrite` exists.
+
+### Manifest and plan-placeholder replacement
+
+A Phase 3-compatible manifest (all 6 entries, reusing `validateDatasetManifestEntry`/
+`checkNoDuplicateManifestEntries` directly) is written to
+`<output-root>/manifests/research-plan-manifest.json`, plus an `acquisition-report.json` (provider,
+market, quote asset, symbols, archive months, source URLs/checksums, input byte hashes, detected
+timestamp units, row counts, first/last timestamps, final dataset hashes, converter version,
+generatedAt, warnings/limitations — including an explicit statement that successful validation never
+establishes future profitability) and a `plan-placeholder-replacement.json` listing the exact
+instrument/role/relative-path/hash values to copy into
+`strategies/research-plans/CRYPTO_EMA_TREND_V1_BASELINE_NEIGHBOURHOOD__1.0.0.json`'s own `datasets`
+array by hand. **The committed example plan is never edited automatically** — nothing this tool
+produces is staged or committed by it, and everything it writes lives under the gitignored
+`.data/` root.
+
+### Known limitation
+
+No cross-process file locking — see `manifest-writer.ts`'s own doc comment (shared with
+`dataset:prepare`). Run one acquisition at a time against a given `--output-root`.
