@@ -10,7 +10,7 @@ import type { CandleBias } from "@/lib/hermes-execution/mock-candle-generator";
 import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
 import type { MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
 import { runMarketDecisionCycleWithLifecycle } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-runner";
-import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
+import { countConfirmedEntriesForUtcDay, TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
@@ -205,7 +205,8 @@ export async function main(): Promise<void> {
   // Milestone 6 — Trade Lifecycle & Performance Tracking. In-memory only for this CLI demo, per
   // this milestone's own "no filesystem/database persistence yet" constraint — a real deployment
   // would inject a persistent TradeLifecycleStore here without changing anything else.
-  const lifecycleService = new TradeLifecycleService({ store: new InMemoryTradeLifecycleStore(), auditTrail, executionRunId });
+  const lifecycleStore = new InMemoryTradeLifecycleStore();
+  const lifecycleService = new TradeLifecycleService({ store: lifecycleStore, auditTrail, executionRunId });
 
   // Cycle 1: under "mock", a bullish market context — the scenario this milestone's example
   // ruleset (EMA20>EMA50, healthy RSI, Bullish trend, no position) is designed to satisfy. Under
@@ -228,11 +229,13 @@ export async function main(): Promise<void> {
     orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
     brokerProvider: "etoro-demo",
     // brokerAvailable: true — the connect() + resolveInstrument() calls above already succeeded,
-    // so the broker is known-reachable at this point in the cycle. dailyTradeCount: this run's own
-    // completed-trade count so far — this demo CLI has no persistent cross-run trade counter.
+    // so the broker is known-reachable at this point in the cycle. Max-daily-trades risk counter
+    // fix: dailyTradeCount is confirmed-OPEN-today entries from the durable lifecycle store (this
+    // demo CLI's own store is in-memory and resets every run, same as before — the fix is using the
+    // SAME correct definition production uses, never `broker.getCompletedTrades().length`).
     portfolioRisk: {
       config: PORTFOLIO_RISK_CONFIG,
-      dailyTradeCount: broker.getCompletedTrades().length,
+      dailyTradeCount: countConfirmedEntriesForUtcDay(await lifecycleStore.list(), new Date(firstContext.timestamp), { strategyId: strategy.strategyId }),
       brokerAvailable: true,
     },
     lifecycleService,
@@ -269,9 +272,11 @@ export async function main(): Promise<void> {
       amount: config.etoro.testAmount,
       orderSizingMode: BROKER_CAPABILITIES["etoro-demo"].orderSizingMode,
       brokerProvider: "etoro-demo",
+      // Max-daily-trades risk counter fix: same durable, UTC-day, confirmed-OPEN definition as
+      // cycle 1 above — never `broker.getCompletedTrades().length`.
       portfolioRisk: {
         config: PORTFOLIO_RISK_CONFIG,
-        dailyTradeCount: broker.getCompletedTrades().length,
+        dailyTradeCount: countConfirmedEntriesForUtcDay(await lifecycleStore.list(), new Date(secondContext.timestamp), { strategyId: strategy.strategyId }),
         brokerAvailable: true,
       },
       lifecycleService,

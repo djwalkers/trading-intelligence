@@ -6,7 +6,7 @@ import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, Run
 import { MarketDataProviderError, type MarketDataFailureDetail, type MarketDataProvider } from "../market-data/market-data-provider";
 import { MarketDecisionEngine, type MarketDecision } from "../market-decision-engine";
 import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
-import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
+import { countConfirmedEntriesForUtcDay, type TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
 import type { TradeLifecycleRecord } from "../trade-lifecycle/types";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
@@ -1376,6 +1376,15 @@ export class TradingRuntime {
         }
       }
 
+      // Max-daily-trades risk counter fix. Recomputed fresh on every iteration (never hoisted above
+      // this loop) from the durable TradeLifecycleStore — never `broker.getCompletedTrades().length`
+      // (an unscoped, unbounded, in-memory, process-restart-resetting history, not a UTC-day count).
+      // Freshness matters here exactly like the original code's own per-iteration
+      // `getCompletedTrades().length` did: a position this SAME loop already opened for an earlier
+      // candidate this cycle must count toward a later candidate's own check.
+      const dailyTradeCount = countConfirmedEntriesForUtcDay(await this.deps.lifecycleStore.list(), now, {
+        strategyId: this.deps.strategy.strategyId,
+      });
       const outcome = await executeApprovedTradeCandidate({
         repository: this.deps.tradeCandidateRepository,
         broker: this.deps.broker,
@@ -1384,7 +1393,7 @@ export class TradingRuntime {
         lifecycleService: this.deps.lifecycleService,
         portfolioRisk: {
           config: this.deps.portfolioRiskConfig,
-          dailyTradeCount: this.deps.broker.getCompletedTrades().length,
+          dailyTradeCount,
           // The broker was already connected before this runtime was constructed (the CLI's own
           // responsibility, mirroring market-decide.ts's identical assumption) — true here
           // reflects that, not a fresh connectivity probe every cycle.

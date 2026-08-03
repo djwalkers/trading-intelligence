@@ -273,6 +273,35 @@ describe("approveTradeCandidate", () => {
     expect(outcome.outcome).toBe("not-found");
   });
 
+  // "AUTO_DEM" typo review. The reviewed line reads `approvalSource: isSystemApproval ? "AUTO_DEMO"
+  // : undefined` — already the correct 5-character literal in the current source (verified by
+  // reading trade-candidate-service.ts directly), not "AUTO_DEM". This pins the exact persisted
+  // string so any future accidental truncation is caught immediately.
+  it("persists approvalSource as exactly the 5-character string \"AUTO_DEMO\" for a system approval, never a truncated \"AUTO_DEM\"", async () => {
+    const repository = new InMemoryTradeCandidateRepository();
+    const auditTrail = new InMemoryAuditTrail();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const candidate = await createBuyCandidate(repository, auditTrail, now);
+
+    const outcome = await approveTradeCandidate({
+      repository,
+      auditTrail,
+      executionRunId: "test-run",
+      candidateId: candidate.id,
+      approvedByUserId: AUTO_DEMO_APPROVER_ID,
+      now,
+    });
+
+    expect(outcome.outcome).toBe("approved");
+    if (outcome.outcome !== "approved") throw new Error("unreachable");
+    expect(outcome.candidate.approvalSource).toBe("AUTO_DEMO");
+    expect(outcome.candidate.approvalSource).toHaveLength(9);
+    expect(outcome.candidate.approvalSource).not.toBe("AUTO_DEM");
+
+    const stored = await repository.getById(candidate.id);
+    expect(stored?.approvalSource).toBe("AUTO_DEMO");
+  });
+
   it("expires (rather than approves) a candidate whose expiresAt has already passed", async () => {
     const repository = new InMemoryTradeCandidateRepository();
     const auditTrail = new InMemoryAuditTrail();
@@ -687,6 +716,218 @@ describe("executeApprovedTradeCandidate", () => {
     }
     const stored = await repository.getById(candidate.id);
     expect(stored?.status).toBe("FAILED");
+  });
+
+  // Approved-candidate sequencing fix (production incident: candidate 9f177a8f-a6cb-4ddc-9fc5-
+  // d277ff15ce8b — an ETH BUY approved at 0.82 confidence failed with "decision was no longer
+  // executable" purely because the NEXT cycle's fresh Hermes decision had moved to HOLD).
+  describe("approved-candidate sequencing fix — executes from its own persisted snapshot, never re-derives the decision", () => {
+    it("a BUY candidate executes without ever calling MarketDecisionEngine.evaluate again", async () => {
+      const repository = new InMemoryTradeCandidateRepository();
+      const auditTrail = new InMemoryAuditTrail();
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const candidate = await createBuyCandidate(repository, auditTrail, now);
+      const approved = await approveTradeCandidate({
+        repository,
+        auditTrail,
+        executionRunId: "test-run",
+        candidateId: candidate.id,
+        approvedByUserId: "user-1",
+        now,
+      });
+      expect(approved.outcome).toBe("approved");
+      if (approved.outcome !== "approved") throw new Error("unreachable");
+
+      const evaluateSpy = vi.spyOn(MarketDecisionEngine, "evaluate");
+      const broker = makeMockBroker();
+      const lifecycleService = makeLifecycleService(auditTrail, now);
+      try {
+        const outcome = await executeApprovedTradeCandidate({
+          repository,
+          broker,
+          auditTrail,
+          executionRunId: "test-run",
+          lifecycleService,
+          portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+          candidate: approved.candidate,
+          now,
+          brokerProvider: "etoro-demo",
+        });
+        expect(outcome.outcome).toBe("executed");
+        // The defect: this used to re-run MarketDecisionEngine.evaluate() against the frozen
+        // snapshot — if that re-evaluation ever produced HOLD (as it did in production), the
+        // already-approved BUY failed with "decision was no longer executable". It must never be
+        // called at all for an approved-candidate BUY execution.
+        expect(evaluateSpy).not.toHaveBeenCalled();
+      } finally {
+        evaluateSpy.mockRestore();
+      }
+    });
+
+    it("executes the approved BUY even when the runtime's OWN current-cycle decision (computed independently, from fresh market data) is HOLD", async () => {
+      const repository = new InMemoryTradeCandidateRepository();
+      const auditTrail = new InMemoryAuditTrail();
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const candidate = await createBuyCandidate(repository, auditTrail, now);
+      const approved = await approveTradeCandidate({
+        repository,
+        auditTrail,
+        executionRunId: "test-run",
+        candidateId: candidate.id,
+        approvedByUserId: "user-1",
+        now,
+      });
+      expect(approved.outcome).toBe("approved");
+      if (approved.outcome !== "approved") throw new Error("unreachable");
+
+      // Simulates "next cycle ETH decision became HOLD": a completely independent, freshly-computed
+      // decision from NEW market data (never the candidate's own frozen snapshot) — exactly what
+      // trading-runtime.ts's own per-cycle MarketDecisionEngine.evaluate() call produces. Neutral
+      // RSI/EMA/trend inputs reliably yield HOLD under the real, unmodified engine.
+      const freshCurrentContext = makeMarketContext({ ema20: 100, ema50: 100, rsi14: 50, trend: "Sideways" });
+      const freshCurrentDecision = await MarketDecisionEngine.evaluate(freshCurrentContext);
+      expect(freshCurrentDecision.action).toBe("HOLD");
+
+      const broker = makeMockBroker();
+      const lifecycleService = makeLifecycleService(auditTrail, now);
+      // The fresh HOLD decision above is never passed to (or consulted by) executeApprovedTradeCandidate
+      // at all — proving by construction that a later HOLD cannot invalidate this approved BUY.
+      const outcome = await executeApprovedTradeCandidate({
+        repository,
+        broker,
+        auditTrail,
+        executionRunId: "test-run",
+        lifecycleService,
+        portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+        candidate: approved.candidate,
+        now,
+        brokerProvider: "etoro-demo",
+      });
+
+      expect(outcome.outcome).toBe("executed");
+      expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    });
+
+    it("uses the persisted candidate's own entryPrice/stopLoss/takeProfit/confidence, never re-derived values", async () => {
+      const repository = new InMemoryTradeCandidateRepository();
+      const auditTrail = new InMemoryAuditTrail();
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const candidate = await createBuyCandidate(repository, auditTrail, now);
+      const approved = await approveTradeCandidate({
+        repository,
+        auditTrail,
+        executionRunId: "test-run",
+        candidateId: candidate.id,
+        approvedByUserId: "user-1",
+        now,
+      });
+      expect(approved.outcome).toBe("approved");
+      if (approved.outcome !== "approved") throw new Error("unreachable");
+
+      const broker = makeMockBroker();
+      const lifecycleService = makeLifecycleService(auditTrail, now);
+      await executeApprovedTradeCandidate({
+        repository,
+        broker,
+        auditTrail,
+        executionRunId: "test-run",
+        lifecycleService,
+        portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+        candidate: approved.candidate,
+        now,
+        brokerProvider: "etoro-demo",
+      });
+
+      expect(broker.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({ price: approved.candidate.entryPrice, side: "BUY" }));
+      const openRecords = await lifecycleService.findOpenRecord(approved.candidate.strategyId, approved.candidate.instrument);
+      expect(openRecords?.stopLoss).toBe(approved.candidate.stopLoss);
+      expect(openRecords?.takeProfit).toBe(approved.candidate.takeProfit);
+      expect(openRecords?.confidence).toBe(approved.candidate.confidence);
+    });
+
+    it("still fails closed (never executes) when a current risk check genuinely blocks the persisted snapshot", async () => {
+      const repository = new InMemoryTradeCandidateRepository();
+      const auditTrail = new InMemoryAuditTrail();
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const candidate = await createBuyCandidate(repository, auditTrail, now);
+      const approved = await approveTradeCandidate({
+        repository,
+        auditTrail,
+        executionRunId: "test-run",
+        candidateId: candidate.id,
+        approvedByUserId: "user-1",
+        now,
+      });
+      expect(approved.outcome).toBe("approved");
+      if (approved.outcome !== "approved") throw new Error("unreachable");
+
+      const broker = makeMockBroker();
+      const lifecycleService = makeLifecycleService(auditTrail, now);
+      const strictRiskConfig: PortfolioRiskConfig = { ...PERMISSIVE_RISK_CONFIG, maxDailyTrades: 0 };
+
+      const outcome = await executeApprovedTradeCandidate({
+        repository,
+        broker,
+        auditTrail,
+        executionRunId: "test-run",
+        lifecycleService,
+        portfolioRisk: { config: strictRiskConfig, dailyTradeCount: 0, brokerAvailable: true },
+        candidate: approved.candidate,
+        now,
+        brokerProvider: "etoro-demo",
+      });
+
+      expect(outcome.outcome).toBe("failed");
+      expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+      if (outcome.outcome === "failed") {
+        expect(outcome.reason).toMatch(/trade\(s\) today already at the configured maximum/);
+      }
+    });
+
+    it("executes a candidate no more than once — re-processing it (as the runtime would, on a freshly reloaded APPROVED list) is a no-op once EXECUTED", async () => {
+      const repository = new InMemoryTradeCandidateRepository();
+      const auditTrail = new InMemoryAuditTrail();
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const candidate = await createBuyCandidate(repository, auditTrail, now);
+      const approved = await approveTradeCandidate({
+        repository,
+        auditTrail,
+        executionRunId: "test-run",
+        candidateId: candidate.id,
+        approvedByUserId: "user-1",
+        now,
+      });
+      expect(approved.outcome).toBe("approved");
+      if (approved.outcome !== "approved") throw new Error("unreachable");
+
+      const broker = makeMockBroker();
+      const lifecycleService = makeLifecycleService(auditTrail, now);
+      const execute = (c: typeof approved.candidate) =>
+        executeApprovedTradeCandidate({
+          repository,
+          broker,
+          auditTrail,
+          executionRunId: "test-run",
+          lifecycleService,
+          portfolioRisk: { config: PERMISSIVE_RISK_CONFIG, dailyTradeCount: 0, brokerAvailable: true },
+          candidate: c,
+          now,
+          brokerProvider: "etoro-demo",
+        });
+
+      const first = await execute(approved.candidate);
+      expect(first.outcome).toBe("executed");
+
+      // Mirrors trading-runtime.ts's own real flow: it always re-fetches the APPROVED list fresh
+      // every cycle (`tradeCandidateRepository.list({status:"APPROVED",...})`) — an already-EXECUTED
+      // candidate is never re-fetched with a stale "APPROVED" status, so this is the realistic
+      // re-processing scenario to guard against.
+      const reloaded = await repository.getById(candidate.id);
+      expect(reloaded?.status).toBe("EXECUTED");
+      const second = await execute(reloaded!);
+      expect(second.outcome).toBe("already-handled");
+      expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    });
   });
 });
 

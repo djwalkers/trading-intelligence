@@ -314,3 +314,80 @@ export class TradeLifecycleService {
     });
   }
 }
+
+// --- Daily trade count (max-daily-trades risk counter fix) --------------------------------------
+
+/** A record whose `status` durably proves it reached (or passed through) a confirmed OPEN position
+ * at some point — the ONLY records `openedAt` is ever set on (see `recordOpened`). A later terminal
+ * status (CLOSED/CLOSE_FAILED/CLOSED_UNRECONCILED) never erases the fact that today's new-entry
+ * allowance was already spent opening it. */
+const EVER_REACHED_OPEN_STATUSES = new Set<TradeLifecycleStatus>(["OPEN", "CLOSE_REQUESTED", "CLOSED", "CLOSE_FAILED", "CLOSED_UNRECONCILED"]);
+
+export interface ConfirmedEntryCountScope {
+  /** Matches the same strategyId granularity PortfolioRiskEngine's own maxDailyTrades rule is
+   * evaluated per — the same scope trade-candidate-repository.ts's own `list({ strategyId, ... })`
+   * and TradeLifecycleService.findOpenRecord already use. */
+  strategyId: string;
+}
+
+/**
+ * Max-daily-trades risk counter fix. Counts distinct TradeLifecycleRecords that reached a confirmed
+ * OPEN position (a new BUY position, durably recorded via `recordOpened`) during the current UTC
+ * calendar day of `now` — start inclusive at `now`'s own UTC midnight, end exclusive at the NEXT UTC
+ * midnight. Deliberately NEVER `broker.getCompletedTrades().length` (an unscoped, unbounded,
+ * in-memory, process-restart-resetting history — not a UTC-day count of anything) and never derived
+ * from candidate/approval/submission/failure/rejection/close counts.
+ *
+ * A record counts ONCE, keyed by its own `openedAt`, regardless of what its CURRENT status is:
+ * - opened today and still OPEN: counts.
+ * - opened today then CLOSED/CLOSE_FAILED/CLOSED_UNRECONCILED today: still counts once — closing a
+ *   position never refunds today's new-entry allowance.
+ * - opened YESTERDAY and closed today: does not count today (its `openedAt` falls outside today's
+ *   window) — closing an old position never consumes today's own allowance either.
+ * - never reached OPEN at all (DECISION_CREATED, RISK_REJECTED, APPROVED, EXECUTION_SUBMITTED still
+ *   pending, EXECUTION_FAILED, EXECUTION_ABANDONED, an EXECUTION_RECONCILIATION_REQUIRED never later
+ *   confirmed OPEN): has no `openedAt` at all, so it is never counted, in any status.
+ * - EXECUTION_RECONCILIATION_REQUIRED later resolved to OPEN, or a record adopted from an orphaned
+ *   broker position (position-reconciliation.ts/lifecycle-recovery.ts): both set a real `openedAt`
+ *   exactly like the normal candidate-execution path, so both are handled identically here — no
+ *   special-casing needed.
+ *
+ * Restart-resilient by construction: `records` comes from the durable TradeLifecycleStore, never
+ * from any in-process counter, so a fresh process re-derives the identical count from what's already
+ * persisted.
+ *
+ * Fails closed: a record whose `status` PROVES it reached OPEN (see EVER_REACHED_OPEN_STATUSES)
+ * but has a missing or unparseable `openedAt` throws immediately, rather than silently skipping it —
+ * silently skipping would UNDER-count today's real entries, letting MORE trades through than the
+ * configured maximum actually permits.
+ */
+export function countConfirmedEntriesForUtcDay(records: readonly TradeLifecycleRecord[], now: Date, scope: ConfirmedEntryCountScope): number {
+  const dayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+
+  let count = 0;
+  for (const record of records) {
+    if (record.strategyId !== scope.strategyId) continue;
+
+    if (record.openedAt === undefined) {
+      if (EVER_REACHED_OPEN_STATUSES.has(record.status)) {
+        throw new Error(
+          `TradeLifecycleRecord "${record.id}" has status "${record.status}" (which requires having reached a confirmed OPEN ` +
+            `position) but no openedAt — cannot safely compute today's confirmed-entry count. Refusing to silently under-count.`,
+        );
+      }
+      continue; // never reached OPEN — correctly excluded, not an error.
+    }
+
+    const openedMs = Date.parse(record.openedAt);
+    if (!Number.isFinite(openedMs)) {
+      throw new Error(
+        `TradeLifecycleRecord "${record.id}" has an unparseable openedAt "${record.openedAt}" — cannot safely compute today's ` +
+          `confirmed-entry count. Refusing to silently under-count.`,
+      );
+    }
+
+    if (openedMs >= dayStartMs && openedMs < dayEndMs) count++;
+  }
+  return count;
+}

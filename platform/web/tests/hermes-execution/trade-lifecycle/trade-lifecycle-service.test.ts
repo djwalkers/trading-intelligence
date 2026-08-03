@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
+import { countConfirmedEntriesForUtcDay, TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
-import { InvalidTradeLifecycleTransitionError } from "@/lib/hermes-execution/trade-lifecycle/types";
+import { InvalidTradeLifecycleTransitionError, type TradeLifecycleRecord, type TradeLifecycleStatus } from "@/lib/hermes-execution/trade-lifecycle/types";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import type { MarketDataSnapshot } from "@/lib/hermes-execution/market-data/market-data-provider";
 import type { MarketDecision, MarketDecisionContext } from "@/lib/hermes-execution/market-decision-engine";
@@ -497,5 +497,140 @@ describe("TradeLifecycleService.findOpenRecord", () => {
     const { service } = makeService();
     await openRecord(service); // symbol BTC
     expect(await service.findOpenRecord("STRAT-0001", "ETH")).toBeUndefined();
+  });
+});
+
+// --- countConfirmedEntriesForUtcDay (max-daily-trades risk counter fix) -------------------------
+
+const SCOPE = { strategyId: "STRAT-0001" };
+const TODAY = new Date("2026-01-05T12:00:00.000Z");
+
+let nextRecordId = 0;
+function makeRecord(overrides: Partial<TradeLifecycleRecord> = {}): TradeLifecycleRecord {
+  nextRecordId += 1;
+  return {
+    id: `record-${nextRecordId}`,
+    strategyId: "STRAT-0001",
+    strategyVersion: 1,
+    brokerProvider: "etoro-demo",
+    symbol: "BTC",
+    side: "BUY",
+    quantity: 10,
+    sizingMode: "UNITS",
+    decision: "BUY",
+    confidence: 0.8,
+    decisionReasons: [],
+    status: "OPEN",
+    createdAt: "2026-01-05T09:00:00.000Z",
+    updatedAt: "2026-01-05T09:00:00.000Z",
+    openedAt: "2026-01-05T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("countConfirmedEntriesForUtcDay", () => {
+  it("returns 0 when there are no confirmed opens today", () => {
+    expect(countConfirmedEntriesForUtcDay([], TODAY, SCOPE)).toBe(0);
+  });
+
+  it("counts one OPEN record opened today once", () => {
+    const records = [makeRecord({ status: "OPEN", openedAt: "2026-01-05T00:00:00.001Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("counts a record opened today then CLOSED once — closing never refunds today's allowance", () => {
+    const records = [makeRecord({ status: "CLOSED", openedAt: "2026-01-05T09:00:00.000Z", closedAt: "2026-01-05T10:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("counts a record opened today then CLOSE_FAILED once", () => {
+    const records = [makeRecord({ status: "CLOSE_FAILED", openedAt: "2026-01-05T09:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("counts a record opened today then CLOSED_UNRECONCILED once", () => {
+    const records = [makeRecord({ status: "CLOSED_UNRECONCILED", openedAt: "2026-01-05T09:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("does not count a position opened yesterday and closed today", () => {
+    const records = [makeRecord({ status: "CLOSED", openedAt: "2026-01-04T23:00:00.000Z", closedAt: "2026-01-05T01:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(0);
+  });
+
+  it("does not count records that never reached OPEN (DECISION_CREATED/RISK_REJECTED/APPROVED/EXECUTION_SUBMITTED/EXECUTION_FAILED/EXECUTION_ABANDONED/EXECUTION_RECONCILIATION_REQUIRED)", () => {
+    const neverOpenedStatuses: TradeLifecycleStatus[] = [
+      "DECISION_CREATED",
+      "RISK_REJECTED",
+      "APPROVED",
+      "EXECUTION_SUBMITTED",
+      "EXECUTION_FAILED",
+      "EXECUTION_ABANDONED",
+      "EXECUTION_RECONCILIATION_REQUIRED",
+    ];
+    const records = neverOpenedStatuses.map((status) => makeRecord({ status, openedAt: undefined }));
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(0);
+  });
+
+  it("does not double-count a single logical record regardless of which terminal status it reached", () => {
+    // One record, one row in the store snapshot — its FINAL status is CLOSED, not a separate entry
+    // per state it passed through on the way there.
+    const records = [makeRecord({ status: "CLOSED", openedAt: "2026-01-05T09:00:00.000Z", closedAt: "2026-01-05T11:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("UTC midnight boundary is start-inclusive", () => {
+    const records = [makeRecord({ openedAt: "2026-01-05T00:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(1);
+  });
+
+  it("UTC midnight boundary is end-exclusive", () => {
+    const records = [makeRecord({ openedAt: "2026-01-06T00:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(0);
+  });
+
+  it("a process restart does not change the count when the same durable records are re-supplied", () => {
+    const records = [makeRecord({ openedAt: "2026-01-05T09:00:00.000Z" }), makeRecord({ status: "CLOSED", openedAt: "2026-01-05T10:00:00.000Z", closedAt: "2026-01-05T11:00:00.000Z" })];
+    // Simulates two independent processes (or one process before/after a restart) both re-deriving
+    // the count from the SAME durable snapshot — a pure function of its input, never an in-memory
+    // counter that would reset.
+    const firstProcess = countConfirmedEntriesForUtcDay(records, TODAY, SCOPE);
+    const afterRestart = countConfirmedEntriesForUtcDay(records, TODAY, SCOPE);
+    expect(firstProcess).toBe(2);
+    expect(afterRestart).toBe(2);
+  });
+
+  it("only counts records within the given strategy scope", () => {
+    const records = [makeRecord({ strategyId: "STRAT-OTHER", openedAt: "2026-01-05T09:00:00.000Z" })];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(0);
+  });
+
+  it("multiple confirmed opens today for the same strategy all count", () => {
+    const records = [
+      makeRecord({ symbol: "BTC", openedAt: "2026-01-05T01:00:00.000Z" }),
+      makeRecord({ symbol: "ETH", openedAt: "2026-01-05T02:00:00.000Z" }),
+      makeRecord({ symbol: "SOL", status: "CLOSED", openedAt: "2026-01-05T03:00:00.000Z", closedAt: "2026-01-05T04:00:00.000Z" }),
+    ];
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(3);
+  });
+
+  it("throws for a record whose status proves it reached OPEN but has no openedAt (fails closed, never under-counts)", () => {
+    const records = [makeRecord({ status: "OPEN", openedAt: undefined })];
+    expect(() => countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toThrow(/no openedAt/);
+  });
+
+  it("throws for a record with an unparseable openedAt", () => {
+    const records = [makeRecord({ openedAt: "not-a-timestamp" })];
+    expect(() => countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toThrow(/unparseable openedAt/);
+  });
+
+  it("integrates with real TradeLifecycleService-produced records (openedAt set via recordOpened, not fabricated)", async () => {
+    const { service, store } = makeService({ clock: ["2026-01-05T09:00:00.000Z", "2026-01-05T09:00:01.000Z", "2026-01-05T09:00:02.000Z"] });
+    await openRecord(service);
+    const records = await store.list();
+    // openRecord's own fixture pins openedAt to 2026-01-01, not TODAY — confirms the helper reads
+    // the real persisted field rather than any service-internal clock.
+    expect(countConfirmedEntriesForUtcDay(records, new Date("2026-01-01T12:00:00.000Z"), SCOPE)).toBe(1);
+    expect(countConfirmedEntriesForUtcDay(records, TODAY, SCOPE)).toBe(0);
   });
 });

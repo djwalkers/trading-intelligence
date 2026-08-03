@@ -137,6 +137,7 @@ function makeRuntime(
     broker?: PaperBroker;
     tradeCandidateRepository?: InMemoryTradeCandidateRepository;
     lifecycleStore?: InMemoryTradeLifecycleStore;
+    portfolioRiskConfig?: PortfolioRiskConfig;
   } = {},
 ): RuntimeHarness {
   const broker = (overrides.broker ?? makeMockBroker(overrides.openPositions ?? [])) as ReturnType<typeof makeMockBroker>;
@@ -161,7 +162,7 @@ function makeRuntime(
     amount: 10,
     orderSizingMode: "UNITS",
     brokerProvider: "etoro-demo",
-    portfolioRiskConfig: PERMISSIVE_RISK_CONFIG,
+    portfolioRiskConfig: overrides.portfolioRiskConfig ?? PERMISSIVE_RISK_CONFIG,
     lifecycleService,
     lifecycleStore,
     auditTrail,
@@ -1340,6 +1341,221 @@ describe("TradingRuntime — EXECUTION_RECONCILIATION_REQUIRED defers approved c
     const stored = await lifecycleStore.getById("lifecycle-1");
     expect(stored?.status).toBe("EXECUTION_RECONCILIATION_REQUIRED");
     expect((await lifecycleStore.list()).length).toBe(1); // never a second record created
+
+    await runtime.stop();
+  });
+
+  // Approved-candidate sequencing fix (production incident: candidate 9f177a8f-a6cb-4ddc-9fc5-
+  // d277ff15ce8b — an ETH BUY approved at 0.82 confidence failed with "decision was no longer
+  // executable" purely because the NEXT cycle's fresh Hermes decision had moved to HOLD).
+  it("executes a durably-APPROVED BUY candidate even when this cycle's own fresh, independently-computed decision is HOLD", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+
+    const candidate = await tradeCandidateRepository.create({
+      analysisRunId: undefined,
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      instrument: "BTC",
+      direction: "BUY",
+      confidence: 0.82,
+      entryPrice: 64_948.33,
+      stopLoss: 60_000,
+      takeProfit: 70_000,
+      riskReward: 2,
+      reasoning: ["EMA20 above EMA50", "Bullish trend"],
+      validationNotes: [],
+      expiresAt: "2026-01-02T00:00:00.000Z", // far in the future — never expires mid-test
+      execution: {
+        amount: 10,
+        sizingMode: "NOTIONAL",
+        marketContext: {
+          instrument: "BTC",
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          midPrice: 100.025,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          positionOpen: false,
+          strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+          recentCandles: [],
+          ema20: 110,
+          ema50: 100,
+          rsi14: 55,
+          atr14: 1.5,
+          volume: 120,
+          dailyHigh: 112,
+          dailyLow: 98,
+          volatility24h: 0.01,
+          marketSession: "Crypto Always Open",
+          trend: "Bullish",
+        },
+        marketDataSnapshot: {
+          instrument: "BTC",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          candles: [],
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          latestPrice: 100.025,
+          volume: 120,
+        },
+      },
+    });
+    await tradeCandidateRepository.transition(candidate.id, "PENDING", {
+      status: "APPROVED",
+      approvedAt: NOW.toISOString(),
+      approvedByUserId: "user-1",
+    });
+
+    const broker = makeMockBroker([]);
+    // The runtime's own live market data for THIS cycle is bearish — its OWN fresh
+    // MarketDecisionEngine.evaluate() call produces HOLD (no position exists yet to SELL), a
+    // completely different action than the candidate's own frozen, already-approved BUY.
+    const bearishProvider = new MockMarketDataProvider({ bias: "bearish", seed: 42, now: NOW });
+    const { runtime, clock, auditTrail } = makeRuntime({
+      broker,
+      tradeCandidateRepository,
+      lifecycleStore,
+      marketDataProvider: bearishProvider,
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    expect(runtime.getStatus().successfulRunCount).toBe(1);
+    expect(runtime.getStatus().failedRunCount).toBe(0);
+
+    // The approved BUY executed — a later/independent HOLD never invalidated it.
+    expect(broker.placeMarketOrder).toHaveBeenCalledOnce();
+    const executed = await tradeCandidateRepository.getById(candidate.id);
+    expect(executed?.status).toBe("EXECUTED");
+    expect(executed?.entryPrice).toBe(64_948.33); // the persisted snapshot's own price, never re-derived
+
+    const openRecord = await lifecycleStore.list();
+    const opened = openRecord.find((r) => r.candidateId === candidate.id);
+    expect(opened?.status).toBe("OPEN");
+    expect(opened?.stopLoss).toBe(60_000);
+    expect(opened?.takeProfit).toBe(70_000);
+    expect(opened?.confidence).toBe(0.82);
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("TRADE_CANDIDATE_EXECUTED");
+    expect(events).not.toContain("TRADE_CANDIDATE_EXECUTION_FAILED");
+
+    await runtime.stop();
+  });
+
+  // Max-daily-trades risk counter fix (production incident: risk checks reported "10 trade(s) today
+  // already at the configured maximum of 10" shortly after UTC midnight, purely because the broker
+  // process had accumulated 10 completedTrades before midnight — not a genuine UTC-day count).
+  it("the approved-candidate execution loop's dailyTradeCount is sourced from the durable lifecycle store's confirmed-OPEN-today entries, never broker.getCompletedTrades()", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+
+    // A confirmed OPEN position, opened earlier TODAY (NOW is 2026-01-01T12:00:00Z) for this same
+    // strategy — the durable evidence a correct dailyTradeCount must be built from.
+    await lifecycleStore.create({
+      id: "lifecycle-already-open-today",
+      candidateId: undefined,
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "ETH", // different instrument — dailyTradeCount is strategy-scoped, not instrument-scoped
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "UNITS",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: "2026-01-01T01:00:00.000Z",
+      updatedAt: "2026-01-01T01:00:00.000Z",
+      openedAt: "2026-01-01T01:00:00.000Z",
+      entryPrice: 3000,
+      brokerOrderId: "seed-order-1",
+    });
+
+    const candidate = await tradeCandidateRepository.create({
+      analysisRunId: undefined,
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      instrument: "BTC",
+      direction: "BUY",
+      confidence: 0.8,
+      entryPrice: 64_948.33,
+      stopLoss: 60_000,
+      takeProfit: 70_000,
+      riskReward: 2,
+      reasoning: ["seed"],
+      validationNotes: [],
+      expiresAt: "2026-01-02T00:00:00.000Z",
+      execution: {
+        amount: 10,
+        sizingMode: "NOTIONAL",
+        marketContext: {
+          instrument: "BTC",
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          midPrice: 100.025,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          positionOpen: false,
+          strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+          recentCandles: [],
+          ema20: 110,
+          ema50: 100,
+          rsi14: 55,
+          atr14: 1.5,
+          volume: 120,
+          dailyHigh: 112,
+          dailyLow: 98,
+          volatility24h: 0.01,
+          marketSession: "Crypto Always Open",
+          trend: "Bullish",
+        },
+        marketDataSnapshot: {
+          instrument: "BTC",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          candles: [],
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          latestPrice: 100.025,
+          volume: 120,
+        },
+      },
+    });
+    await tradeCandidateRepository.transition(candidate.id, "PENDING", {
+      status: "APPROVED",
+      approvedAt: NOW.toISOString(),
+      approvedByUserId: "user-1",
+    });
+
+    const broker = makeMockBroker([]);
+    // The broker's own completedTrades is EMPTY — if dailyTradeCount were still (incorrectly)
+    // sourced from broker.getCompletedTrades().length, this candidate would wrongly be permitted.
+    expect(broker.getCompletedTrades()).toEqual([]);
+
+    const { runtime, clock, auditTrail } = makeRuntime({
+      broker,
+      tradeCandidateRepository,
+      lifecycleStore,
+      portfolioRiskConfig: { ...PERMISSIVE_RISK_CONFIG, maxDailyTrades: 1 },
+    });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    // Blocked: the durable ETH OPEN record already spent today's ONE allowed entry for this
+    // strategy — never permitted just because the broker's own completedTrades is empty.
+    expect(broker.placeMarketOrder).not.toHaveBeenCalled();
+    const stored = await tradeCandidateRepository.getById(candidate.id);
+    expect(stored?.status).toBe("FAILED");
+    expect(stored?.failureReason).toMatch(/trade\(s\) today already at the configured maximum of 1/);
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("TRADE_CANDIDATE_EXECUTION_FAILED");
 
     await runtime.stop();
   });

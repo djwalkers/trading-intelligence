@@ -1,12 +1,12 @@
 import type { MarketDecision, MarketDecisionContext } from "../market-decision-engine";
-import { runMarketDecisionCycleWithLifecycle } from "../trade-lifecycle/trade-lifecycle-runner";
+import { runMarketDecisionCycleWithLifecycle, type TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
 import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
 import type { PaperBroker } from "../paper-broker";
 import type { AuditTrail } from "../audit-trail";
-import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
+import { PortfolioRiskEngine, type PortfolioRiskConfig } from "../portfolio-risk-engine";
 import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import { assertOrderSizingMode } from "../order-sizing";
-import type { OrderSizingMode } from "../types";
+import type { OrderRequest, OrderSizingMode } from "../types";
 import { buildTradeCandidateInput } from "./build-trade-candidate";
 import type { TradeCandidate } from "./types";
 import type { TradeCandidateRepository } from "./trade-candidate-repository";
@@ -362,14 +362,112 @@ export interface ExecuteApprovedTradeCandidateInput {
 }
 
 /**
- * Runs the EXACT existing, unmodified pipeline (runMarketDecisionCycleWithLifecycle — the same
- * function TradingRuntime called automatically before this phase existed) against the candidate's
- * own frozen execution snapshot (never re-fetched market data, never a re-decided action — the
- * human approved exactly what was reviewed). That function re-evaluates MarketDecisionEngine
- * (deterministic, same context -> same decision) and, for BUY, re-runs PortfolioRiskEngine — state
- * (cash, open positions) may have changed since the candidate was created, so a BUY approved
- * minutes ago can still be legitimately blocked now; that is reported as FAILED here, not silently
- * downgraded or retried.
+ * Approved-candidate sequencing fix. A BUY candidate executes directly from its own immutable,
+ * persisted snapshot (`candidate.direction`/`entryPrice`/`stopLoss`/`takeProfit`/`execution.amount`)
+ * — it never re-derives a decision via `MarketDecisionEngine.evaluate()`. It is still subject to
+ * CURRENT deterministic safety/risk checks: PortfolioRiskEngine.evaluate runs against the broker's
+ * live account/open-positions state and this cycle's own dailyTradeCount/brokerAvailable, exactly as
+ * a fresh BUY would be — a candidate approved minutes ago can still be legitimately blocked now
+ * (cash, exposure, daily-trade-count, open-position-count, broker availability), reported as FAILED
+ * here, never silently downgraded or retried. The one thing that can no longer happen: a LATER
+ * cycle's fresh Hermes decision moving to HOLD/SELL invalidates the approval — that later signal is
+ * recorded independently (the runtime's own fresh-decision path) and never reaches or rewrites this
+ * candidate. Mirrors the same audit events / lifecycle transitions
+ * (createFromDecision -> [recordRiskRejected | recordApproved -> recordExecutionSubmitted ->
+ * recordOpened]) `runMarketDecisionCycleWithLifecycle`'s own BUY branch already produces, so nothing
+ * downstream (audit trail shape, TradeLifecycleRecord fields) changes for a BUY.
+ */
+async function executeApprovedBuyFromSnapshot(args: {
+  broker: PaperBroker;
+  lifecycleService: TradeLifecycleService;
+  portfolioRisk: { config: PortfolioRiskConfig; dailyTradeCount: number; brokerAvailable: boolean };
+  candidate: TradeCandidate;
+  now: Date;
+  brokerProvider: string;
+  sizingMode: OrderSizingMode;
+}): Promise<TradeLifecycleCycleResult> {
+  const { broker, lifecycleService, portfolioRisk, candidate, now, brokerProvider, sizingMode } = args;
+  const { marketContext } = candidate.execution;
+
+  const decision: MarketDecision = {
+    action: "BUY",
+    confidence: candidate.confidence,
+    reasoning: candidate.reasoning,
+    validationNotes: candidate.validationNotes,
+  };
+
+  let record = await lifecycleService.createFromDecision({
+    strategyId: candidate.strategyId,
+    strategyVersion: candidate.strategyVersion,
+    symbol: candidate.instrument,
+    side: "BUY",
+    quantity: candidate.execution.amount,
+    sizingMode,
+    candidateId: candidate.id,
+    brokerProvider,
+    stopLoss: candidate.stopLoss,
+    takeProfit: candidate.takeProfit,
+    decision,
+    marketDataSnapshot: candidate.execution.marketDataSnapshot,
+    intelligenceSummary: marketContext,
+  });
+
+  const proposedOrder: OrderRequest = {
+    strategyId: candidate.strategyId,
+    strategyVersion: candidate.strategyVersion,
+    sourceType: marketContext.strategy.sourceType,
+    instrument: candidate.instrument,
+    side: "BUY",
+    quantity: candidate.execution.amount,
+    price: candidate.entryPrice,
+    timestamp: now.toISOString(),
+  };
+
+  const riskDecision = PortfolioRiskEngine.evaluate({
+    account: broker.getAccount(),
+    openPositions: broker.getOpenPositions(),
+    dailyTradeCount: portfolioRisk.dailyTradeCount,
+    brokerAvailable: portfolioRisk.brokerAvailable,
+    proposedOrder,
+    config: portfolioRisk.config,
+    sizingMode,
+  });
+
+  if (!riskDecision.permitted) {
+    record = await lifecycleService.recordRiskRejected(record, riskDecision);
+    return { decision, executed: false, blockedReasons: riskDecision.blockedReasons, lifecycleRecord: record };
+  }
+
+  record = await lifecycleService.recordApproved(record, riskDecision);
+  record = await lifecycleService.recordExecutionSubmitted(record);
+
+  let placed: Awaited<ReturnType<PaperBroker["placeMarketOrder"]>>;
+  try {
+    placed = await broker.placeMarketOrder(proposedOrder);
+  } catch (error) {
+    // Mirrors runMarketDecisionCycleWithLifecycle's own identical broker-call try/catch — the
+    // lifecycle record must never be left stuck at EXECUTION_SUBMITTED with no terminal-ish status
+    // recorded just because this path no longer routes through that wrapper.
+    await lifecycleService.recordExecutionFailed(record, { message: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+
+  record = await lifecycleService.recordOpened(record, {
+    entryPrice: placed.position.entryPrice,
+    brokerOrderId: placed.orderId,
+    brokerPositionId: placed.position.brokerPositionId,
+  });
+
+  return { decision, executed: true, position: placed.position, orderId: placed.orderId, lifecycleRecord: record };
+}
+
+/**
+ * A SELL candidate still runs the EXISTING, unmodified pipeline (runMarketDecisionCycleWithLifecycle)
+ * against the candidate's own frozen execution snapshot — closing an existing position is never
+ * risk-gated (see market-decision-runner.ts's own SELL branch), so re-deriving the decision here
+ * carries none of the "later HOLD silently blocks an already-safe BUY" risk the snapshot-driven BUY
+ * path above exists to close; a SELL candidate whose re-derived decision drifted to HOLD simply fails
+ * and is retried by the runtime's own next-cycle exit/close handling, same as before this fix.
  */
 export async function executeApprovedTradeCandidate(input: ExecuteApprovedTradeCandidateInput): Promise<ExecutionOutcome> {
   const { repository, broker, auditTrail, executionRunId, lifecycleService, portfolioRisk, candidate, now, brokerProvider } = input;
@@ -396,21 +494,24 @@ export async function executeApprovedTradeCandidate(input: ExecuteApprovedTradeC
     // before this field existed — see TradeCandidateExecutionSnapshot's own doc comment.
     const sizingMode = assertOrderSizingMode(candidate.execution.sizingMode, `trade candidate "${candidate.id}"`);
 
-    const result = await runMarketDecisionCycleWithLifecycle({
-      broker,
-      auditTrail,
-      executionRunId,
-      marketContext: candidate.execution.marketContext,
-      amount: candidate.execution.amount,
-      orderSizingMode: sizingMode,
-      portfolioRisk,
-      lifecycleService,
-      marketDataSnapshot: candidate.execution.marketDataSnapshot,
-      brokerProvider,
-      candidateId: candidate.id,
-      stopLoss: candidate.stopLoss,
-      takeProfit: candidate.takeProfit,
-    });
+    const result =
+      candidate.direction === "BUY"
+        ? await executeApprovedBuyFromSnapshot({ broker, lifecycleService, portfolioRisk, candidate, now, brokerProvider, sizingMode })
+        : await runMarketDecisionCycleWithLifecycle({
+            broker,
+            auditTrail,
+            executionRunId,
+            marketContext: candidate.execution.marketContext,
+            amount: candidate.execution.amount,
+            orderSizingMode: sizingMode,
+            portfolioRisk,
+            lifecycleService,
+            marketDataSnapshot: candidate.execution.marketDataSnapshot,
+            brokerProvider,
+            candidateId: candidate.id,
+            stopLoss: candidate.stopLoss,
+            takeProfit: candidate.takeProfit,
+          });
 
     if (!result.executed) {
       const reason = result.blockedReasons?.join("; ") ?? "Execution did not occur (unexpected: decision was no longer executable).";
