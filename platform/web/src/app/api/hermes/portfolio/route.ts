@@ -59,20 +59,22 @@ async function computeRealisedPnlSummary(): Promise<RealisedPnlSummary> {
 
   try {
     const store = new SupabaseTradeLifecycleStore(client, persistenceConfig.ownerUserId);
-    const [closed, unreconciled] = await Promise.all([store.listClosed(), store.listUnreconciled()]);
-
-    // listClosed() already excludes CLOSED_UNRECONCILED/EXECUTION_ABANDONED server-side (status ===
-    // "CLOSED" only) — this filter only guards against a CLOSED record that, unexpectedly, never
-    // got a confirmed realisedPnl written; such a record is excluded from the sum/count rather than
-    // treated as a $0 trade.
-    const confirmedClosed = closed.filter((record) => record.realisedPnl !== undefined);
-    const realisedPnl = confirmedClosed.reduce((sum, record) => sum + (record.realisedPnl ?? 0), 0);
+    // Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota,
+    // dashboard polling this route every 30s): this used to be store.listClosed() +
+    // store.listUnreconciled() — both full-row select("*") queries, JSONB `detail` blob (candles,
+    // market/decision snapshots) included, even though only realised_pnl and a row COUNT were ever
+    // used. sumRealisedPnlForClosedTrades() selects only realised_pnl; countUnreconciledClosedTrades()
+    // is a count-only (head: true) query — no unreconciled rows are ever transferred.
+    const [{ realisedPnl, realisedTradeCount }, unreconciledClosedTradeCount] = await Promise.all([
+      store.sumRealisedPnlForClosedTrades(),
+      store.countUnreconciledClosedTrades(),
+    ]);
 
     return {
       realisedPnl,
       realisedPnlScope: REALISED_PNL_SCOPE_DURABLE,
-      realisedTradeCount: confirmedClosed.length,
-      unreconciledClosedTradeCount: unreconciled.length,
+      realisedTradeCount,
+      unreconciledClosedTradeCount,
     };
   } catch (error) {
     return {

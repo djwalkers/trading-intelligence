@@ -10,8 +10,18 @@ import type { MarketDataSnapshot } from "../market-data/market-data-provider";
 import type { MarketDecision, MarketDecisionAction, MarketDecisionContext } from "../market-decision-engine";
 import type { PortfolioRiskDecision } from "../portfolio-risk-engine";
 import type { OrderSide } from "../types";
-import { TradeLifecycleUniqueConstraintViolationError, type TradeLifecycleStore } from "./trade-lifecycle-store";
+import {
+  TradeLifecycleUniqueConstraintViolationError,
+  type ClosedTradeRealisedPnlAggregate,
+  type LifecycleRecordsByStrategyInstrumentScope,
+  type RecoverableLifecycleRecordsScope,
+  type TradeLifecycleStore,
+} from "./trade-lifecycle-store";
+import { EVER_REACHED_OPEN_STATUSES, type ConfirmedEntryCountRangeScope } from "./confirmed-entry-count";
 import type { TradeLifecycleError, TradeLifecycleRecord, TradeLifecycleStatus } from "./types";
+import { withQueryTelemetry } from "./query-telemetry";
+
+const TABLE_NAME = "trade_lifecycle_records";
 
 export interface TradeLifecycleRecordRow {
   id: string;
@@ -232,13 +242,13 @@ export class SupabaseTradeLifecycleStore implements TradeLifecycleStore {
   ) {}
 
   async create(record: TradeLifecycleRecord): Promise<void> {
-    const { error } = await this.client.from("trade_lifecycle_records").insert(toRow(record, this.userId));
+    const { error } = await this.client.from(TABLE_NAME).insert(toRow(record, this.userId));
     if (error) throw toPersistenceError(error);
   }
 
   async getById(id: string): Promise<TradeLifecycleRecord | null> {
     const { data, error } = await this.client
-      .from("trade_lifecycle_records")
+      .from(TABLE_NAME)
       .select("*")
       .eq("id", id)
       .eq("user_id", this.userId)
@@ -250,7 +260,7 @@ export class SupabaseTradeLifecycleStore implements TradeLifecycleStore {
   async update(record: TradeLifecycleRecord): Promise<void> {
     const row = toRow(record, this.userId);
     const { error, count } = await this.client
-      .from("trade_lifecycle_records")
+      .from(TABLE_NAME)
       .update({ ...row, updated_at: new Date().toISOString() }, { count: "exact" })
       .eq("id", record.id)
       .eq("user_id", this.userId);
@@ -261,14 +271,14 @@ export class SupabaseTradeLifecycleStore implements TradeLifecycleStore {
   }
 
   async list(): Promise<TradeLifecycleRecord[]> {
-    const { data, error } = await this.client.from("trade_lifecycle_records").select("*").eq("user_id", this.userId);
+    const { data, error } = await this.client.from(TABLE_NAME).select("*").eq("user_id", this.userId);
     if (error) throw toPersistenceError(error);
     return ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
   }
 
   async listOpen(): Promise<TradeLifecycleRecord[]> {
     const { data, error } = await this.client
-      .from("trade_lifecycle_records")
+      .from(TABLE_NAME)
       .select("*")
       .eq("user_id", this.userId)
       .in("status", OPEN_STATUSES as unknown as string[]);
@@ -277,18 +287,140 @@ export class SupabaseTradeLifecycleStore implements TradeLifecycleStore {
   }
 
   async listClosed(): Promise<TradeLifecycleRecord[]> {
-    const { data, error } = await this.client.from("trade_lifecycle_records").select("*").eq("user_id", this.userId).eq("status", "CLOSED");
+    const { data, error } = await this.client.from(TABLE_NAME).select("*").eq("user_id", this.userId).eq("status", "CLOSED");
     if (error) throw toPersistenceError(error);
     return ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
   }
 
   async listUnreconciled(): Promise<TradeLifecycleRecord[]> {
     const { data, error } = await this.client
-      .from("trade_lifecycle_records")
+      .from(TABLE_NAME)
       .select("*")
       .eq("user_id", this.userId)
       .eq("status", "CLOSED_UNRECONCILED");
     if (error) throw toPersistenceError(error);
     return ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
+  }
+
+  // --- Egress-containment fix — bounded, server-side-filtered queries -------------------------
+  // Production incident: Supabase egress ~800% over the Free-plan quota, traced to
+  // list()/listOpen()-shaped full-table `select("*")` calls (JSONB `detail` blob — full OHLCV candle
+  // arrays, market/decision snapshots — included) running unconditionally every runtime cycle. Every
+  // method below is scoped by an indexed WHERE clause so its result size no longer grows with total
+  // table size, only with genuinely in-scope rows (by construction of migration 0026's own active-
+  // uniqueness indexes, at most a handful for the strategy+instrument/broker-position-id methods).
+
+  async countConfirmedEntriesForUtcDay(scope: ConfirmedEntryCountRangeScope): Promise<number> {
+    return withQueryTelemetry({ operation: "countConfirmedEntriesForUtcDay", table: TABLE_NAME, countOnly: true }, async () => {
+      // Fail-closed corruption guard, bounded to a handful of ids (never the full table): a record
+      // for this strategy whose status proves it reached a confirmed OPEN position but has no
+      // opened_at recorded can't be safely excluded from today's count — see
+      // confirmed-entry-count.ts's own doc comment for the semantics this must preserve exactly.
+      const { data: corrupted, error: corruptionError } = await this.client
+        .from(TABLE_NAME)
+        .select("id")
+        .eq("user_id", this.userId)
+        .eq("strategy_id", scope.strategyId)
+        .in("status", EVER_REACHED_OPEN_STATUSES as unknown as string[])
+        .is("opened_at", null)
+        .limit(5);
+      if (corruptionError) throw toPersistenceError(corruptionError);
+      if (corrupted && corrupted.length > 0) {
+        const first = corrupted[0] as { id: string };
+        throw new TradeLifecycleRecordCorruptionError(
+          first.id,
+          `has a status requiring a confirmed OPEN position but no opened_at — cannot safely compute today's confirmed-entry ` +
+            `count for strategy "${scope.strategyId}". Refusing to silently under-count.`,
+        );
+      }
+
+      // The count itself: Postgres performs the filtering AND the counting — head:true means no
+      // matching rows are ever transferred, only the count.
+      const { count, error } = await this.client
+        .from(TABLE_NAME)
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", this.userId)
+        .eq("strategy_id", scope.strategyId)
+        .gte("opened_at", scope.startInclusive)
+        .lt("opened_at", scope.endExclusive);
+      if (error) throw toPersistenceError(error);
+      return { result: count ?? 0, rowCount: count ?? 0 };
+    });
+  }
+
+  async listActiveLifecycleRecords(scope: LifecycleRecordsByStrategyInstrumentScope): Promise<TradeLifecycleRecord[]> {
+    return withQueryTelemetry({ operation: "listActiveLifecycleRecords", table: TABLE_NAME }, async () => {
+      const { data, error } = await this.client
+        .from(TABLE_NAME)
+        .select("*")
+        .eq("user_id", this.userId)
+        .eq("strategy_id", scope.strategyId)
+        .eq("instrument", scope.instrument)
+        .in("status", scope.statuses as unknown as string[]);
+      if (error) throw toPersistenceError(error);
+      const records = ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
+      return { result: records, rowCount: records.length };
+    });
+  }
+
+  async listRecoverableLifecycleRecords(scope: RecoverableLifecycleRecordsScope): Promise<TradeLifecycleRecord[]> {
+    return withQueryTelemetry({ operation: "listRecoverableLifecycleRecords", table: TABLE_NAME }, async () => {
+      const { data, error } = await this.client
+        .from(TABLE_NAME)
+        .select("*")
+        .eq("user_id", this.userId)
+        .eq("strategy_id", scope.strategyId)
+        .eq("instrument", scope.instrument)
+        .in("status", scope.statuses as unknown as string[])
+        .lte("updated_at", scope.updatedBefore);
+      if (error) throw toPersistenceError(error);
+      const records = ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
+      return { result: records, rowCount: records.length };
+    });
+  }
+
+  async findLifecycleRecordsByBrokerPositionId(brokerPositionId: string): Promise<TradeLifecycleRecord[]> {
+    return withQueryTelemetry({ operation: "findLifecycleRecordsByBrokerPositionId", table: TABLE_NAME }, async () => {
+      const { data, error } = await this.client
+        .from(TABLE_NAME)
+        .select("*")
+        .eq("user_id", this.userId)
+        .eq("broker_position_id", brokerPositionId);
+      if (error) throw toPersistenceError(error);
+      const records = ((data ?? []) as TradeLifecycleRecordRow[]).map(fromRow);
+      return { result: records, rowCount: records.length };
+    });
+  }
+
+  async sumRealisedPnlForClosedTrades(): Promise<ClosedTradeRealisedPnlAggregate> {
+    return withQueryTelemetry({ operation: "sumRealisedPnlForClosedTrades", table: TABLE_NAME }, async () => {
+      // Only the realised_pnl column — never the JSONB detail blob select("*") would also pull in.
+      const { data, error } = await this.client.from(TABLE_NAME).select("realised_pnl").eq("user_id", this.userId).eq("status", "CLOSED");
+      if (error) throw toPersistenceError(error);
+      const rows = (data ?? []) as { realised_pnl: number | string | null }[];
+      let realisedPnl = 0;
+      let realisedTradeCount = 0;
+      for (const row of rows) {
+        // Defensive only — migration 0026's own trade_lifecycle_records_closed_requires_exit_fields
+        // constraint guarantees a CLOSED row always has realised_pnl, but this never fabricates a
+        // figure for a row that, unexpectedly, does not.
+        if (row.realised_pnl === null) continue;
+        realisedPnl += typeof row.realised_pnl === "number" ? row.realised_pnl : Number(row.realised_pnl);
+        realisedTradeCount += 1;
+      }
+      return { result: { realisedPnl, realisedTradeCount }, rowCount: rows.length };
+    });
+  }
+
+  async countUnreconciledClosedTrades(): Promise<number> {
+    return withQueryTelemetry({ operation: "countUnreconciledClosedTrades", table: TABLE_NAME, countOnly: true }, async () => {
+      const { count, error } = await this.client
+        .from(TABLE_NAME)
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", this.userId)
+        .eq("status", "CLOSED_UNRECONCILED");
+      if (error) throw toPersistenceError(error);
+      return { result: count ?? 0, rowCount: count ?? 0 };
+    });
   }
 }

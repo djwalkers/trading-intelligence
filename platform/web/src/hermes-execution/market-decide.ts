@@ -10,8 +10,9 @@ import type { CandleBias } from "@/lib/hermes-execution/mock-candle-generator";
 import { MarketDataProviderFactory } from "@/lib/hermes-execution/market-data/market-data-provider-factory";
 import type { MarketDataProvider } from "@/lib/hermes-execution/market-data/market-data-provider";
 import { runMarketDecisionCycleWithLifecycle } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-runner";
-import { countConfirmedEntriesForUtcDay, TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
+import { TradeLifecycleService } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-service";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
+import { utcDayBoundaries } from "@/lib/hermes-execution/trade-lifecycle/confirmed-entry-count";
 import type { PortfolioRiskConfig } from "@/lib/hermes-execution/portfolio-risk-engine";
 import { JsonFileAuditTrail } from "@/lib/hermes-execution/json-file-audit-trail";
 import type { EtoroResolvedInstrument } from "@/lib/hermes-execution/etoro/etoro-demo-broker";
@@ -235,7 +236,12 @@ export async function main(): Promise<void> {
     // SAME correct definition production uses, never `broker.getCompletedTrades().length`).
     portfolioRisk: {
       config: PORTFOLIO_RISK_CONFIG,
-      dailyTradeCount: countConfirmedEntriesForUtcDay(await lifecycleStore.list(), new Date(firstContext.timestamp), { strategyId: strategy.strategyId }),
+      // Same store-level, bounded-query call production's trading-runtime.ts now uses — "same
+      // semantics in runtime and market-decide" (egress-containment fix).
+      dailyTradeCount: await lifecycleStore.countConfirmedEntriesForUtcDay({
+        strategyId: strategy.strategyId,
+        ...utcDayBoundaries(new Date(firstContext.timestamp)),
+      }),
       brokerAvailable: true,
     },
     lifecycleService,
@@ -276,7 +282,10 @@ export async function main(): Promise<void> {
       // cycle 1 above — never `broker.getCompletedTrades().length`.
       portfolioRisk: {
         config: PORTFOLIO_RISK_CONFIG,
-        dailyTradeCount: countConfirmedEntriesForUtcDay(await lifecycleStore.list(), new Date(secondContext.timestamp), { strategyId: strategy.strategyId }),
+        dailyTradeCount: await lifecycleStore.countConfirmedEntriesForUtcDay({
+          strategyId: strategy.strategyId,
+          ...utcDayBoundaries(new Date(secondContext.timestamp)),
+        }),
         brokerAvailable: true,
       },
       lifecycleService,

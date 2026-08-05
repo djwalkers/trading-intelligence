@@ -69,31 +69,30 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isStale(record: TradeLifecycleRecord, now: Date, thresholdMs: number): boolean {
-  const updatedAtMs = Date.parse(record.updatedAt);
-  if (!Number.isFinite(updatedAtMs)) return false; // never act on a record with an unparseable timestamp
-  return now.getTime() - updatedAtMs >= thresholdMs;
-}
-
 /**
  * Scans every DECISION_CREATED/APPROVED/EXECUTION_SUBMITTED/EXECUTION_RECONCILIATION_REQUIRED
  * lifecycle record for this exact strategy+instrument older than `recoveryThresholdMs`, and
  * resolves each one. At most one such record can exist at a time — the active-uniqueness invariant
  * (trade-lifecycle-store.ts's own ACTIVE_STRATEGY_INSTRUMENT_STATUSES, mirrored by migration 0026)
  * guarantees it — but this still loops defensively rather than assuming exactly one.
+ *
+ * Egress-containment fix (production incident: this sweep ran unconditionally at the top of every
+ * instrument's every cycle, and previously did so via lifecycleStore.list() — a full-table
+ * `select("*")`, JSONB `detail` blob included, downloaded and then filtered client-side). Now scoped
+ * server-side to this exact strategy+instrument+status+staleness window via
+ * listRecoverableLifecycleRecords — by construction of the active-uniqueness invariant above, at
+ * most one row can ever match.
  */
 export async function recoverStaleLifecycleRecords(input: RecoverStaleLifecycleRecordsInput): Promise<void> {
   const { broker, instrument, strategy, brokerProvider, lifecycleStore, tradeCandidateRepository, auditTrail, executionRunId, now, recoveryThresholdMs } =
     input;
 
-  const all = await lifecycleStore.list();
-  const stale = all.filter(
-    (record) =>
-      record.strategyId === strategy.strategyId &&
-      record.symbol === instrument &&
-      PRE_OPEN_RECOVERABLE_STATUSES.has(record.status) &&
-      isStale(record, now, recoveryThresholdMs),
-  );
+  const stale = await lifecycleStore.listRecoverableLifecycleRecords({
+    strategyId: strategy.strategyId,
+    instrument,
+    statuses: [...PRE_OPEN_RECOVERABLE_STATUSES],
+    updatedBefore: new Date(now.getTime() - recoveryThresholdMs).toISOString(),
+  });
 
   for (const record of stale) {
     // Defensive, shared guard: a candidate already EXECUTED contradicts ANY pre-OPEN lifecycle
@@ -263,9 +262,10 @@ async function recoverAmbiguousSubmission(record: TradeLifecycleRecord, ctx: Rec
 
   // Already tracked by a DIFFERENT local record? Then this stale record's own attempt did not
   // produce it — some other flow already resolved it — so THIS record is abandoned, never
-  // double-attached to a position another record already owns.
-  const allRecords = await lifecycleStore.list();
-  const alreadyClaimedBy = allRecords.find((r) => r.id !== record.id && r.brokerPositionId === brokerPositionId);
+  // double-attached to a position another record already owns. Bounded to this exact
+  // broker_position_id (indexed) — never the whole table (egress-containment fix).
+  const matchingRecords = await lifecycleStore.findLifecycleRecordsByBrokerPositionId(brokerPositionId);
+  const alreadyClaimedBy = matchingRecords.find((r) => r.id !== record.id);
   if (alreadyClaimedBy) {
     await abandon(
       record,

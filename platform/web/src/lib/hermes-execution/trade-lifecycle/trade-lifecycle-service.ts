@@ -7,6 +7,7 @@ import type { PortfolioRiskDecision } from "../portfolio-risk-engine";
 import { calculateHoldingDurationMs, calculateRealisedPnl, calculateRealisedPnlPercent, updateExcursionValues } from "./calculations";
 import { assertValidTransition, type TradeLifecycleError, type TradeLifecycleRecord, type TradeLifecycleStatus } from "./types";
 import type { TradeLifecycleStore } from "./trade-lifecycle-store";
+import { countConfirmedEntriesForUtcDayFromRecords, utcDayBoundaries, type ConfirmedEntryCountScope } from "./confirmed-entry-count";
 
 // Milestone 6 — Trade Lifecycle & Performance Tracking. The one place a TradeLifecycleRecord is
 // ever created or mutated — everything upstream (the pipeline integration in
@@ -317,18 +318,7 @@ export class TradeLifecycleService {
 
 // --- Daily trade count (max-daily-trades risk counter fix) --------------------------------------
 
-/** A record whose `status` durably proves it reached (or passed through) a confirmed OPEN position
- * at some point — the ONLY records `openedAt` is ever set on (see `recordOpened`). A later terminal
- * status (CLOSED/CLOSE_FAILED/CLOSED_UNRECONCILED) never erases the fact that today's new-entry
- * allowance was already spent opening it. */
-const EVER_REACHED_OPEN_STATUSES = new Set<TradeLifecycleStatus>(["OPEN", "CLOSE_REQUESTED", "CLOSED", "CLOSE_FAILED", "CLOSED_UNRECONCILED"]);
-
-export interface ConfirmedEntryCountScope {
-  /** Matches the same strategyId granularity PortfolioRiskEngine's own maxDailyTrades rule is
-   * evaluated per — the same scope trade-candidate-repository.ts's own `list({ strategyId, ... })`
-   * and TradeLifecycleService.findOpenRecord already use. */
-  strategyId: string;
-}
+export type { ConfirmedEntryCountScope, ConfirmedEntryCountRangeScope } from "./confirmed-entry-count";
 
 /**
  * Max-daily-trades risk counter fix. Counts distinct TradeLifecycleRecords that reached a confirmed
@@ -362,32 +352,6 @@ export interface ConfirmedEntryCountScope {
  * configured maximum actually permits.
  */
 export function countConfirmedEntriesForUtcDay(records: readonly TradeLifecycleRecord[], now: Date, scope: ConfirmedEntryCountScope): number {
-  const dayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
-
-  let count = 0;
-  for (const record of records) {
-    if (record.strategyId !== scope.strategyId) continue;
-
-    if (record.openedAt === undefined) {
-      if (EVER_REACHED_OPEN_STATUSES.has(record.status)) {
-        throw new Error(
-          `TradeLifecycleRecord "${record.id}" has status "${record.status}" (which requires having reached a confirmed OPEN ` +
-            `position) but no openedAt — cannot safely compute today's confirmed-entry count. Refusing to silently under-count.`,
-        );
-      }
-      continue; // never reached OPEN — correctly excluded, not an error.
-    }
-
-    const openedMs = Date.parse(record.openedAt);
-    if (!Number.isFinite(openedMs)) {
-      throw new Error(
-        `TradeLifecycleRecord "${record.id}" has an unparseable openedAt "${record.openedAt}" — cannot safely compute today's ` +
-          `confirmed-entry count. Refusing to silently under-count.`,
-      );
-    }
-
-    if (openedMs >= dayStartMs && openedMs < dayEndMs) count++;
-  }
-  return count;
+  const { startInclusive, endExclusive } = utcDayBoundaries(now);
+  return countConfirmedEntriesForUtcDayFromRecords(records, { strategyId: scope.strategyId, startInclusive, endExclusive });
 }

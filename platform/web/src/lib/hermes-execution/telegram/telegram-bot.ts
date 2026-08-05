@@ -72,12 +72,10 @@ export class TelegramBot {
         await this.reply(formatPnl(await this.deps.lifecycleStore.listClosed()));
         return;
       case "/reconciliation": {
-        // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility. Neither
-        // listOpen() nor listClosed() ever returns a CLOSED_UNRECONCILED record (by design — see
-        // trade-lifecycle-store.ts's own doc comments) — list() + a client-side filter is the
-        // correct, deliberate way to surface it, not a workaround.
-        const all = await this.deps.lifecycleStore.list();
-        await this.reply(formatReconciliation(all.filter((record) => record.status === "CLOSED_UNRECONCILED")));
+        // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility. Egress-
+        // containment fix: listUnreconciled() already filters to status = CLOSED_UNRECONCILED
+        // server-side — no need for list() (a full-table select("*")) plus a client-side filter.
+        await this.reply(formatReconciliation(await this.deps.lifecycleStore.listUnreconciled()));
         return;
       }
       case "/pause":

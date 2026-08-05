@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { reconcileBrokerPosition } from "@/lib/hermes-execution/runtime/position-reconciliation";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import { InMemoryTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
@@ -429,6 +429,25 @@ function makeFixedRecordsStore(records: TradeLifecycleRecord[]) {
     async listUnreconciled() {
       return records.filter((r) => r.status === "CLOSED_UNRECONCILED");
     },
+    async countConfirmedEntriesForUtcDay(): Promise<number> {
+      throw new Error("not exercised — this fake store is read-only");
+    },
+    async listActiveLifecycleRecords(scope: { strategyId: string; instrument: string; statuses: readonly string[] }) {
+      const statuses = new Set(scope.statuses);
+      return records.filter((r) => r.strategyId === scope.strategyId && r.symbol === scope.instrument && statuses.has(r.status));
+    },
+    async listRecoverableLifecycleRecords(): Promise<TradeLifecycleRecord[]> {
+      throw new Error("not exercised — this fake store is read-only");
+    },
+    async findLifecycleRecordsByBrokerPositionId(brokerPositionId: string) {
+      return records.filter((r) => r.brokerPositionId === brokerPositionId);
+    },
+    async sumRealisedPnlForClosedTrades(): Promise<never> {
+      throw new Error("not exercised — this fake store is read-only");
+    },
+    async countUnreconciledClosedTrades(): Promise<number> {
+      throw new Error("not exercised — this fake store is read-only");
+    },
   };
 }
 
@@ -554,5 +573,37 @@ describe("reconcileBrokerPosition — database uniqueness violation during orpha
     // Never left as a silently-adopted duplicate — the pre-existing record is untouched, and no
     // second record was created.
     expect((await lifecycleStore.list()).length).toBe(1);
+  });
+});
+
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota).
+// reconcileBrokerPosition ran unconditionally on every instrument's every cycle — its own local-
+// active-record pre-check used to call lifecycleStore.list() (a full-table select("*")) every time.
+// Pinning that it now calls the bounded, scoped alternatives is the regression test proving this
+// specific egress source cannot silently come back.
+describe("reconcileBrokerPosition — egress-containment regression", () => {
+  it("never calls lifecycleStore.list() — the local-active-record pre-check uses listActiveLifecycleRecords instead", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const listActiveSpy = vi.spyOn(lifecycleStore, "listActiveLifecycleRecords");
+
+    await reconcileBrokerPosition(baseInput({ lifecycleStore }));
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(listActiveSpy).toHaveBeenCalledWith(expect.objectContaining({ strategyId: "DEMO-0001", instrument: "BTC" }));
+  });
+
+  it("the broker-position-discovered path also never calls list() — uses findLifecycleRecordsByBrokerPositionId instead", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const broker = makeFakeEtoroLikeBroker([
+      { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64948.33 },
+    ]);
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const findByBrokerPositionIdSpy = vi.spyOn(lifecycleStore, "findLifecycleRecordsByBrokerPositionId");
+
+    await reconcileBrokerPosition(baseInput({ broker, lifecycleStore }));
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(findByBrokerPositionIdSpy).toHaveBeenCalledWith("3568040809");
   });
 });

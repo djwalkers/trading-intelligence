@@ -21,6 +21,11 @@ function createQueryBuilder(result: { data: unknown; error: unknown; count?: num
     update: vi.fn(() => builder),
     eq: vi.fn(() => builder),
     in: vi.fn(() => builder),
+    is: vi.fn(() => builder),
+    gte: vi.fn(() => builder),
+    lt: vi.fn(() => builder),
+    lte: vi.fn(() => builder),
+    limit: vi.fn(() => builder),
     maybeSingle: vi.fn(() => Promise.resolve(result)),
     then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
   };
@@ -31,6 +36,21 @@ function makeFakeClient(result: { data: unknown; error: unknown; count?: number 
   const builder = createQueryBuilder(result);
   const from = vi.fn(() => builder);
   return { client: { from } as never, builder, from };
+}
+
+/** Egress-containment fix — for store methods that issue MORE THAN ONE sequential Supabase query
+ * (e.g. countConfirmedEntriesForUtcDay's corruption-check query followed by its count query): each
+ * successive `.from()` call gets its OWN builder/result, taken from `results` in order, rather than
+ * every call sharing one builder/result the way single-query methods' tests can. */
+function makeSequencedFakeClient(results: Array<{ data: unknown; error: unknown; count?: number }>) {
+  const builders = results.map((result) => createQueryBuilder(result));
+  let callIndex = 0;
+  const from = vi.fn(() => {
+    const builder = builders[callIndex] ?? builders[builders.length - 1]!;
+    callIndex += 1;
+    return builder;
+  });
+  return { client: { from } as never, builders, from };
 }
 
 const USER_ID = "user-1";
@@ -280,5 +300,177 @@ describe("toRow / fromRow — CLOSED_UNRECONCILED (reconciliation hardening)", (
     expect(restored.realisedPnl).toBeUndefined();
     expect(restored.closedAt).toBe("2026-01-02T00:00:00.000Z");
     expect(restored.exitReason).toBe("reconciled-broker-position-absent");
+  });
+});
+
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota,
+// traced to full-table select("*") calls — JSONB `detail` blob, full OHLCV candle arrays included —
+// running unconditionally on every runtime cycle). Every method below must filter server-side rather
+// than downloading the whole table and filtering client-side — asserted here via the exact
+// eq/in/gte/lt/lte/select arguments the fake query builder recorded, never by inspecting row counts
+// alone (a mock always returns exactly what it's told to, regardless of whether the store applied a
+// bounded filter — the filter *arguments* are the only real evidence of boundedness).
+describe("SupabaseTradeLifecycleStore — egress-containment bounded queries", () => {
+  describe("countConfirmedEntriesForUtcDay", () => {
+    const SCOPE = { strategyId: "DEMO-0001", startInclusive: "2026-01-05T00:00:00.000Z", endExclusive: "2026-01-06T00:00:00.000Z" };
+
+    it("performs a count-only (head: true) query, never downloading matching rows", async () => {
+      const { client, builders } = makeSequencedFakeClient([
+        { data: [], error: null }, // corruption-check query — none found
+        { data: null, error: null, count: 3 }, // the actual count query
+      ]);
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const count = await store.countConfirmedEntriesForUtcDay(SCOPE);
+
+      expect(count).toBe(3);
+      const countQueryBuilder = builders[1]!;
+      expect(countQueryBuilder.select).toHaveBeenCalledWith("id", { count: "exact", head: true });
+      expect(countQueryBuilder.eq).toHaveBeenCalledWith("user_id", USER_ID);
+      expect(countQueryBuilder.eq).toHaveBeenCalledWith("strategy_id", SCOPE.strategyId);
+      expect(countQueryBuilder.gte).toHaveBeenCalledWith("opened_at", SCOPE.startInclusive);
+      expect(countQueryBuilder.lt).toHaveBeenCalledWith("opened_at", SCOPE.endExclusive);
+    });
+
+    it("never selects '*' — no JSONB detail blob is ever requested for this operation", async () => {
+      const { client, builders } = makeSequencedFakeClient([
+        { data: [], error: null },
+        { data: null, error: null, count: 0 },
+      ]);
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      await store.countConfirmedEntriesForUtcDay(SCOPE);
+
+      for (const builder of builders) {
+        expect(builder.select).not.toHaveBeenCalledWith("*");
+      }
+    });
+
+    it("bounds the fail-closed corruption guard to a handful of ids (limit 5), scoped by strategy + status + null opened_at", async () => {
+      const { client, builders } = makeSequencedFakeClient([
+        { data: [], error: null },
+        { data: null, error: null, count: 0 },
+      ]);
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      await store.countConfirmedEntriesForUtcDay(SCOPE);
+
+      const corruptionQueryBuilder = builders[0]!;
+      expect(corruptionQueryBuilder.select).toHaveBeenCalledWith("id");
+      expect(corruptionQueryBuilder.eq).toHaveBeenCalledWith("strategy_id", SCOPE.strategyId);
+      expect(corruptionQueryBuilder.in).toHaveBeenCalledWith(
+        "status",
+        expect.arrayContaining(["OPEN", "CLOSE_REQUESTED", "CLOSED", "CLOSE_FAILED", "CLOSED_UNRECONCILED"]),
+      );
+      expect(corruptionQueryBuilder.is).toHaveBeenCalledWith("opened_at", null);
+      expect(corruptionQueryBuilder.limit).toHaveBeenCalledWith(5);
+    });
+
+    it("fails closed (throws) when a record proves it reached OPEN but has no opened_at, without ever downloading the full table", async () => {
+      const { client } = makeSequencedFakeClient([{ data: [{ id: "lifecycle-corrupt-1" }], error: null }]);
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      await expect(store.countConfirmedEntriesForUtcDay(SCOPE)).rejects.toThrow(TradeLifecycleRecordCorruptionError);
+    });
+
+    it("propagates a persistence error from the count query", async () => {
+      const { client } = makeSequencedFakeClient([
+        { data: [], error: null },
+        { data: null, error: { message: "connection reset", code: "08006" } },
+      ]);
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      await expect(store.countConfirmedEntriesForUtcDay(SCOPE)).rejects.toThrow(TradeLifecyclePersistenceError);
+    });
+  });
+
+  describe("listActiveLifecycleRecords", () => {
+    it("filters by user_id + strategy_id + instrument + status IN — never the whole table", async () => {
+      const { client, builder } = makeFakeClient({ data: [makeRow({ status: "OPEN" })], error: null });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const results = await store.listActiveLifecycleRecords({
+        strategyId: "DEMO-0001",
+        instrument: "BTC",
+        statuses: ["OPEN", "CLOSE_REQUESTED", "CLOSE_FAILED", "EXECUTION_RECONCILIATION_REQUIRED"],
+      });
+
+      expect(builder.eq).toHaveBeenCalledWith("user_id", USER_ID);
+      expect(builder.eq).toHaveBeenCalledWith("strategy_id", "DEMO-0001");
+      expect(builder.eq).toHaveBeenCalledWith("instrument", "BTC");
+      expect(builder.in).toHaveBeenCalledWith("status", ["OPEN", "CLOSE_REQUESTED", "CLOSE_FAILED", "EXECUTION_RECONCILIATION_REQUIRED"]);
+      expect(results).toHaveLength(1);
+    });
+  });
+
+  describe("listRecoverableLifecycleRecords", () => {
+    it("filters by user_id + strategy_id + instrument + status IN + updated_at <= updatedBefore", async () => {
+      const { client, builder } = makeFakeClient({ data: [makeRow({ status: "APPROVED" })], error: null });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      await store.listRecoverableLifecycleRecords({
+        strategyId: "DEMO-0001",
+        instrument: "BTC",
+        statuses: ["DECISION_CREATED", "APPROVED", "EXECUTION_SUBMITTED", "EXECUTION_RECONCILIATION_REQUIRED"],
+        updatedBefore: "2026-01-05T00:00:00.000Z",
+      });
+
+      expect(builder.eq).toHaveBeenCalledWith("strategy_id", "DEMO-0001");
+      expect(builder.eq).toHaveBeenCalledWith("instrument", "BTC");
+      expect(builder.in).toHaveBeenCalledWith("status", ["DECISION_CREATED", "APPROVED", "EXECUTION_SUBMITTED", "EXECUTION_RECONCILIATION_REQUIRED"]);
+      expect(builder.lte).toHaveBeenCalledWith("updated_at", "2026-01-05T00:00:00.000Z");
+    });
+  });
+
+  describe("findLifecycleRecordsByBrokerPositionId", () => {
+    it("filters by user_id + broker_position_id — never the whole table", async () => {
+      const { client, builder } = makeFakeClient({ data: [makeRow()], error: null });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const results = await store.findLifecycleRecordsByBrokerPositionId("3568040809");
+
+      expect(builder.eq).toHaveBeenCalledWith("user_id", USER_ID);
+      expect(builder.eq).toHaveBeenCalledWith("broker_position_id", "3568040809");
+      expect(results).toHaveLength(1);
+    });
+  });
+
+  describe("sumRealisedPnlForClosedTrades", () => {
+    it("selects only realised_pnl (never '*' / the JSONB detail blob) and sums across CLOSED rows", async () => {
+      const { client, builder } = makeFakeClient({
+        data: [{ realised_pnl: "120.5" }, { realised_pnl: 79.5 }],
+        error: null,
+      });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const result = await store.sumRealisedPnlForClosedTrades();
+
+      expect(builder.select).toHaveBeenCalledWith("realised_pnl");
+      expect(builder.select).not.toHaveBeenCalledWith("*");
+      expect(builder.eq).toHaveBeenCalledWith("status", "CLOSED");
+      expect(result).toEqual({ realisedPnl: 200, realisedTradeCount: 2 });
+    });
+
+    it("never fabricates a figure for a CLOSED row unexpectedly missing realised_pnl", async () => {
+      const { client } = makeFakeClient({ data: [{ realised_pnl: 100 }, { realised_pnl: null }], error: null });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const result = await store.sumRealisedPnlForClosedTrades();
+
+      expect(result).toEqual({ realisedPnl: 100, realisedTradeCount: 1 });
+    });
+  });
+
+  describe("countUnreconciledClosedTrades", () => {
+    it("performs a count-only (head: true) query filtered to CLOSED_UNRECONCILED — no rows transferred", async () => {
+      const { client, builder } = makeFakeClient({ data: null, error: null, count: 2 });
+      const store = new SupabaseTradeLifecycleStore(client, USER_ID);
+
+      const count = await store.countUnreconciledClosedTrades();
+
+      expect(count).toBe(2);
+      expect(builder.select).toHaveBeenCalledWith("id", { count: "exact", head: true });
+      expect(builder.eq).toHaveBeenCalledWith("status", "CLOSED_UNRECONCILED");
+    });
   });
 });

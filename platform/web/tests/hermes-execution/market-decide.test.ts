@@ -11,16 +11,22 @@ describe("market-decide.ts — dailyTradeCount source", () => {
     expect(source).not.toMatch(/dailyTradeCount:\s*broker\.getCompletedTrades\(\)\.length/);
   });
 
-  it("both portfolioRisk blocks use the shared countConfirmedEntriesForUtcDay helper", async () => {
+  // Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota).
+  // Both portfolioRisk blocks now call the store's own bounded countConfirmedEntriesForUtcDay method
+  // — "same semantics in runtime and market-decide" — never the old
+  // countConfirmedEntriesForUtcDay(await lifecycleStore.list(), ...) pattern that downloaded the
+  // entire lifecycle table (harmless here, since this CLI's own store is in-memory, but the whole
+  // point of this file is to mirror production's exact call shape).
+  it("both portfolioRisk blocks use the store's own bounded countConfirmedEntriesForUtcDay method", async () => {
     const source = await fs.readFile("src/hermes-execution/market-decide.ts", "utf-8");
-    expect(source).toMatch(/import\s*{\s*countConfirmedEntriesForUtcDay/);
-    const occurrences = source.match(/dailyTradeCount:\s*countConfirmedEntriesForUtcDay\(/g) ?? [];
+    expect(source).toMatch(/import\s*{\s*utcDayBoundaries\s*}/);
+    const occurrences = source.match(/dailyTradeCount:\s*await lifecycleStore\.countConfirmedEntriesForUtcDay\(/g) ?? [];
     expect(occurrences).toHaveLength(2); // cycle 1 and cycle 2 — both relevant call sites
   });
 
-  it("keeps the durable lifecycle store reference so dailyTradeCount can be recomputed each cycle", async () => {
+  it("never calls lifecycleStore.list() to compute dailyTradeCount — the egress source this file must not reintroduce", async () => {
     const source = await fs.readFile("src/hermes-execution/market-decide.ts", "utf-8");
     expect(source).toMatch(/const lifecycleStore = new InMemoryTradeLifecycleStore\(\)/);
-    expect(source).toMatch(/await lifecycleStore\.list\(\)/);
+    expect(source).not.toMatch(/lifecycleStore\.list\(\)/);
   });
 });

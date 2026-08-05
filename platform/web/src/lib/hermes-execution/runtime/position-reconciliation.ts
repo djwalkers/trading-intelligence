@@ -153,20 +153,22 @@ function isReconcilableToClosedUnreconciled(status: TradeLifecycleStatus): boole
   return status === "OPEN" || status === "CLOSE_REQUESTED" || status === "CLOSE_FAILED";
 }
 
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota).
+// Both helpers previously called store.list() — a full-table `select("*")`, JSONB `detail` blob
+// included — unconditionally on every instrument's every cycle, then filtered client-side. Now
+// delegate to the store's own bounded, server-side-filtered methods; by construction of migration
+// 0026's own active-uniqueness indexes, each can only ever match a handful of rows.
+
 async function findLocalActiveRecordsForStrategyInstrument(
   store: TradeLifecycleStore,
   strategyId: string,
   instrument: string,
 ): Promise<TradeLifecycleRecord[]> {
-  const all = await store.list();
-  return all.filter(
-    (record) => record.strategyId === strategyId && record.symbol === instrument && LOCAL_ACTIVE_POSITION_STATUSES.has(record.status),
-  );
+  return store.listActiveLifecycleRecords({ strategyId, instrument, statuses: [...LOCAL_ACTIVE_POSITION_STATUSES] });
 }
 
 async function findLocalRecordsByBrokerPositionId(store: TradeLifecycleStore, brokerPositionId: string): Promise<TradeLifecycleRecord[]> {
-  const all = await store.list();
-  return all.filter((record) => record.brokerPositionId === brokerPositionId);
+  return store.findLifecycleRecordsByBrokerPositionId(brokerPositionId);
 }
 
 interface ReconcileMismatchInput {

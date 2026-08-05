@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkForDuplicateEntry } from "@/lib/hermes-execution/trade-approval/duplicate-prevention";
 import { InMemoryTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
 import { InMemoryTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/trade-lifecycle-store";
@@ -207,5 +207,27 @@ describe("checkForDuplicateEntry — existing open/in-flight lifecycle record (s
       instrument: "BTC",
     });
     expect(result.duplicate).toBe(false);
+  });
+});
+
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota).
+// checkForDuplicateEntry runs before every fresh BUY decision — it used to call lifecycleStore.list()
+// (a full-table select("*")) every time. Pinning that it now calls the bounded, scoped alternative is
+// the regression test proving this specific egress source cannot silently come back.
+describe("checkForDuplicateEntry — egress-containment regression", () => {
+  it("never calls lifecycleStore.list() — uses the bounded listActiveLifecycleRecords instead", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const listActiveSpy = vi.spyOn(lifecycleStore, "listActiveLifecycleRecords");
+
+    await checkForDuplicateEntry({
+      tradeCandidateRepository: new InMemoryTradeCandidateRepository(),
+      lifecycleStore,
+      strategyId: "DEMO-0001",
+      instrument: "BTC",
+    });
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(listActiveSpy).toHaveBeenCalledWith(expect.objectContaining({ strategyId: "DEMO-0001", instrument: "BTC" }));
   });
 });

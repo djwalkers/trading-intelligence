@@ -1,4 +1,5 @@
 import type { TradeLifecycleStore } from "../trade-lifecycle/trade-lifecycle-store";
+import type { TradeLifecycleStatus } from "../trade-lifecycle/types";
 import type { TradeCandidateRepository } from "./trade-candidate-repository";
 
 // Restart-Resilient Autonomy Phase — Phase 6 (Duplicate prevention). One shared check, called from
@@ -34,7 +35,7 @@ export type DuplicateEntryCheckResult = { duplicate: false } | { duplicate: true
 // — an unresolved ambiguous record must keep blocking a fresh entry until a later recovery sweep
 // resolves it one way or the other. EXECUTION_ABANDONED deliberately excluded — terminal, frees the
 // slot, same as CLOSED_UNRECONCILED.
-const IN_FLIGHT_STATUSES = new Set([
+const IN_FLIGHT_STATUSES = new Set<TradeLifecycleStatus>([
   "DECISION_CREATED",
   "APPROVED",
   "EXECUTION_SUBMITTED",
@@ -50,7 +51,11 @@ export async function checkForDuplicateEntry(input: CheckForDuplicateEntryInput)
   const [pendingCandidates, approvedCandidates, lifecycleRecords] = await Promise.all([
     tradeCandidateRepository.list({ status: "PENDING", strategyId, instrument }),
     tradeCandidateRepository.list({ status: "APPROVED", strategyId, instrument }),
-    lifecycleStore.list(),
+    // Egress-containment fix: was lifecycleStore.list() — a full-table select("*"), JSONB `detail`
+    // blob included — called before every fresh BUY decision. Bounded server-side to this exact
+    // strategy+instrument+status set instead (at most one matching row, by construction of migration
+    // 0026's own active-strategy-instrument uniqueness index).
+    lifecycleStore.listActiveLifecycleRecords({ strategyId, instrument, statuses: [...IN_FLIGHT_STATUSES] }),
   ]);
 
   const pendingBuy = pendingCandidates.find((c) => c.direction === "BUY");

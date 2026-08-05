@@ -1,4 +1,5 @@
 import type { TradeLifecycleRecord, TradeLifecycleStatus } from "./types";
+import { countConfirmedEntriesForUtcDayFromRecords, type ConfirmedEntryCountRangeScope } from "./confirmed-entry-count";
 
 // Milestone 6 — Trade Lifecycle & Performance Tracking. Same "clean, swappable persistence
 // adapter" pattern as PaperBrokerStore (paper-broker-store.ts) and RegistryClient — the execution
@@ -6,10 +7,39 @@ import type { TradeLifecycleRecord, TradeLifecycleStatus } from "./types";
 // swaps in without touching TradeLifecycleService or anything upstream of it. Deliberately no such
 // implementation exists yet in this milestone — see the mission report's Limitations section.
 
+/** Egress-containment fix. Scopes a strategy+instrument lookup to an explicit status set — shared
+ * shape for every store method below whose caller only ever needs the (by construction, at most a
+ * handful of rows) active/in-flight records for ONE strategy+instrument, never the whole table. */
+export interface LifecycleRecordsByStrategyInstrumentScope {
+  strategyId: string;
+  instrument: string;
+  statuses: readonly TradeLifecycleStatus[];
+}
+
+/** Egress-containment fix. Same shape as LifecycleRecordsByStrategyInstrumentScope, plus the
+ * staleness cutoff runtime/lifecycle-recovery.ts's own sweep needs — only a record last updated
+ * BEFORE `updatedBefore` is stale enough to act on. */
+export interface RecoverableLifecycleRecordsScope extends LifecycleRecordsByStrategyInstrumentScope {
+  /** ISO 8601 — only records whose updatedAt is at or before this are returned (matches the original
+   * `now - updatedAtMs >= thresholdMs` staleness check: caller computes `now - recoveryThresholdMs`
+   * once and passes it here). */
+  updatedBefore: string;
+}
+
+export interface ClosedTradeRealisedPnlAggregate {
+  realisedPnl: number;
+  realisedTradeCount: number;
+}
+
 export interface TradeLifecycleStore {
   create(record: TradeLifecycleRecord): Promise<void>;
   getById(id: string): Promise<TradeLifecycleRecord | null>;
   update(record: TradeLifecycleRecord): Promise<void>;
+  /** Downloads every record this user owns — every JSONB `detail` blob included. Egress-containment
+   * fix: NEVER call this from a per-cycle runtime hot path or a polled API route — see this file's
+   * own confirmedEntryCount/listActive/listRecoverable/findByBrokerPositionId methods below for the
+   * bounded, purpose-built alternative every such caller has been migrated to. Retained for
+   * genuinely whole-table use cases only (operator tooling, tests). */
   list(): Promise<TradeLifecycleRecord[]>;
   /** Records whose position is currently live on the broker — status OPEN (fully live) or
    * CLOSE_REQUESTED (a close is in flight but not yet confirmed, so the position still exists).
@@ -30,6 +60,37 @@ export interface TradeLifecycleStore {
    * can see that some closed positions are excluded from the realised-P/L total rather than
    * concluding there simply were none. */
   listUnreconciled(): Promise<TradeLifecycleRecord[]>;
+
+  /** Egress-containment fix (production incident — Supabase egress ~800% over the Free-plan quota,
+   * traced to this exact call downloading the entire table every runtime cycle). Bounded, server-side
+   * count of confirmed-OPEN-today entries for one strategy — see confirmed-entry-count.ts's own doc
+   * comment for the full counting semantics this must reproduce exactly. The Supabase implementation
+   * performs the filtering and counting in Postgres (`count: "exact", head: true`), never downloading
+   * matching rows, let alone the whole table. */
+  countConfirmedEntriesForUtcDay(scope: ConfirmedEntryCountRangeScope): Promise<number>;
+
+  /** Egress-containment fix. The bounded replacement for "download every record, then filter by
+   * strategy+instrument+status client-side" — used by position-reconciliation.ts's local-active-
+   * record check and duplicate-prevention.ts's in-flight check. By construction of migration 0026's
+   * own active-strategy-instrument uniqueness index, at most one row can ever match. */
+  listActiveLifecycleRecords(scope: LifecycleRecordsByStrategyInstrumentScope): Promise<TradeLifecycleRecord[]>;
+
+  /** Egress-containment fix. The bounded replacement for lifecycle-recovery.ts's own "download every
+   * record, then filter by strategy+instrument+status+staleness client-side" crash-window sweep. */
+  listRecoverableLifecycleRecords(scope: RecoverableLifecycleRecordsScope): Promise<TradeLifecycleRecord[]>;
+
+  /** Egress-containment fix. The bounded replacement for "download every record, then filter by
+   * brokerPositionId client-side" — filters on the already-indexed broker_position_id column. */
+  findLifecycleRecordsByBrokerPositionId(brokerPositionId: string): Promise<TradeLifecycleRecord[]>;
+
+  /** Egress-containment fix. Realised P/L for GET /api/hermes/portfolio previously came from
+   * downloading every CLOSED record's full row (JSONB `detail` blob included) just to sum one
+   * numeric column. Selects/sums only `realised_pnl`. */
+  sumRealisedPnlForClosedTrades(): Promise<ClosedTradeRealisedPnlAggregate>;
+
+  /** Egress-containment fix. The same route previously downloaded every CLOSED_UNRECONCILED
+   * record's full row just to read `.length`. Count-only. */
+  countUnreconciledClosedTrades(): Promise<number>;
 }
 
 const OPEN_STATUSES = new Set(["OPEN", "CLOSE_REQUESTED"]);
@@ -137,19 +198,68 @@ export class InMemoryTradeLifecycleStore implements TradeLifecycleStore {
     this.records.set(record.id, structuredClone(record));
   }
 
-  async list(): Promise<TradeLifecycleRecord[]> {
+  /** Every list-shaped method (including the new bounded ones below) reads through here rather than
+   * through the public list() — so a caller/test that specifically wants to prove "this code path
+   * never fetches the whole table" can spy on list() and see it genuinely uncalled, matching what a
+   * bounded Supabase query call site actually achieves (it never issues the unbounded query either).
+   * No egress cost of its own either way (in-process Map) — this is about keeping the two store
+   * implementations' call-site-visible behaviour equivalent, not performance. */
+  private snapshot(): TradeLifecycleRecord[] {
     return [...this.records.values()].map((record) => structuredClone(record));
   }
 
+  async list(): Promise<TradeLifecycleRecord[]> {
+    return this.snapshot();
+  }
+
   async listOpen(): Promise<TradeLifecycleRecord[]> {
-    return (await this.list()).filter((record) => OPEN_STATUSES.has(record.status));
+    return this.snapshot().filter((record) => OPEN_STATUSES.has(record.status));
   }
 
   async listClosed(): Promise<TradeLifecycleRecord[]> {
-    return (await this.list()).filter((record) => record.status === "CLOSED");
+    return this.snapshot().filter((record) => record.status === "CLOSED");
   }
 
   async listUnreconciled(): Promise<TradeLifecycleRecord[]> {
-    return (await this.list()).filter((record) => record.status === "CLOSED_UNRECONCILED");
+    return this.snapshot().filter((record) => record.status === "CLOSED_UNRECONCILED");
+  }
+
+  // --- Egress-containment fix — bounded methods. No egress cost of its own (in-process Map), so
+  // these simply reuse snapshot() + the same filtering a bounded Supabase query expresses server-side
+  // — see supabase-trade-lifecycle-store.ts's own equivalents for the actual bounded queries these
+  // exist to make production runtime code able to call identically regardless of store backend.
+
+  async countConfirmedEntriesForUtcDay(scope: ConfirmedEntryCountRangeScope): Promise<number> {
+    return countConfirmedEntriesForUtcDayFromRecords(this.snapshot(), scope);
+  }
+
+  async listActiveLifecycleRecords(scope: LifecycleRecordsByStrategyInstrumentScope): Promise<TradeLifecycleRecord[]> {
+    const statuses = new Set(scope.statuses);
+    return this.snapshot().filter(
+      (record) => record.strategyId === scope.strategyId && record.symbol === scope.instrument && statuses.has(record.status),
+    );
+  }
+
+  async listRecoverableLifecycleRecords(scope: RecoverableLifecycleRecordsScope): Promise<TradeLifecycleRecord[]> {
+    const statuses = new Set(scope.statuses);
+    const updatedBeforeMs = Date.parse(scope.updatedBefore);
+    return this.snapshot().filter((record) => {
+      if (record.strategyId !== scope.strategyId || record.symbol !== scope.instrument || !statuses.has(record.status)) return false;
+      const updatedAtMs = Date.parse(record.updatedAt);
+      return Number.isFinite(updatedAtMs) && updatedAtMs <= updatedBeforeMs;
+    });
+  }
+
+  async findLifecycleRecordsByBrokerPositionId(brokerPositionId: string): Promise<TradeLifecycleRecord[]> {
+    return this.snapshot().filter((record) => record.brokerPositionId === brokerPositionId);
+  }
+
+  async sumRealisedPnlForClosedTrades(): Promise<ClosedTradeRealisedPnlAggregate> {
+    const closed = this.snapshot().filter((record) => record.status === "CLOSED" && record.realisedPnl !== undefined);
+    return { realisedPnl: closed.reduce((sum, record) => sum + (record.realisedPnl ?? 0), 0), realisedTradeCount: closed.length };
+  }
+
+  async countUnreconciledClosedTrades(): Promise<number> {
+    return this.snapshot().filter((record) => record.status === "CLOSED_UNRECONCILED").length;
   }
 }

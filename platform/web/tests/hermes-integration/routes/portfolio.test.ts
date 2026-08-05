@@ -10,12 +10,19 @@ const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 const mockGetBrokerSnapshot = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-integration/broker-snapshot", () => ({ getBrokerSnapshot: mockGetBrokerSnapshot }));
 
-const { getServiceRoleClientMock, buildAnalysisPersistenceConfigMock, listClosedMock, listUnreconciledMock } = vi.hoisted(() => ({
-  getServiceRoleClientMock: vi.fn(),
-  buildAnalysisPersistenceConfigMock: vi.fn(),
-  listClosedMock: vi.fn(),
-  listUnreconciledMock: vi.fn(),
-}));
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota,
+// this exact route polled every 30s by the dashboard): the route no longer calls listClosed()/
+// listUnreconciled() (full-row select("*"), JSONB `detail` blob included) — it calls the store's own
+// bounded aggregate methods instead (sumRealisedPnlForClosedTrades selects only realised_pnl;
+// countUnreconciledClosedTrades is a count-only query). Mocked here at that same boundary.
+const { getServiceRoleClientMock, buildAnalysisPersistenceConfigMock, sumRealisedPnlForClosedTradesMock, countUnreconciledClosedTradesMock } = vi.hoisted(
+  () => ({
+    getServiceRoleClientMock: vi.fn(),
+    buildAnalysisPersistenceConfigMock: vi.fn(),
+    sumRealisedPnlForClosedTradesMock: vi.fn(),
+    countUnreconciledClosedTradesMock: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/supabase/service-role-client", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
 vi.mock("@/lib/hermes-execution/analysis/analysis-persistence-config", () => ({
@@ -24,7 +31,7 @@ vi.mock("@/lib/hermes-execution/analysis/analysis-persistence-config", () => ({
 vi.mock("@/lib/hermes-execution/trade-lifecycle/supabase-trade-lifecycle-store", () => ({
   // A `function` expression, not an arrow function — the route calls `new SupabaseTradeLifecycleStore(...)`.
   SupabaseTradeLifecycleStore: vi.fn().mockImplementation(function SupabaseTradeLifecycleStore() {
-    return { listClosed: listClosedMock, listUnreconciled: listUnreconciledMock };
+    return { sumRealisedPnlForClosedTrades: sumRealisedPnlForClosedTradesMock, countUnreconciledClosedTrades: countUnreconciledClosedTradesMock };
   }),
 }));
 
@@ -73,11 +80,8 @@ describe("GET /api/hermes/portfolio", () => {
 
     buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: true, ownerUserId: "owner-1" });
     getServiceRoleClientMock.mockReturnValue({});
-    listClosedMock.mockResolvedValue([
-      { id: "t1", status: "CLOSED", realisedPnl: 25 },
-      { id: "t2", status: "CLOSED", realisedPnl: -5 },
-    ]);
-    listUnreconciledMock.mockResolvedValue([]);
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 20, realisedTradeCount: 2 }); // 25 + (-5)
+    countUnreconciledClosedTradesMock.mockResolvedValue(0);
   });
 
   afterEach(() => {
@@ -114,8 +118,11 @@ describe("GET /api/hermes/portfolio", () => {
   });
 
   it("excludes CLOSED_UNRECONCILED trades from the realised P/L sum but reports their count separately", async () => {
-    listClosedMock.mockResolvedValue([{ id: "t1", status: "CLOSED", realisedPnl: 25 }]);
-    listUnreconciledMock.mockResolvedValue([{ id: "t2", status: "CLOSED_UNRECONCILED" }, { id: "t3", status: "CLOSED_UNRECONCILED" }]);
+    // The store's own sumRealisedPnlForClosedTrades/countUnreconciledClosedTrades already exclude
+    // CLOSED_UNRECONCILED from the sum server-side (status = CLOSED only) / count it separately
+    // (status = CLOSED_UNRECONCILED only) — this route trusts those pre-aggregated figures verbatim.
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 25, realisedTradeCount: 1 });
+    countUnreconciledClosedTradesMock.mockResolvedValue(2);
 
     const response = await GET(makeRequest());
     const body = await response.json();
@@ -125,10 +132,11 @@ describe("GET /api/hermes/portfolio", () => {
   });
 
   it("never counts a CLOSED record with no confirmed realisedPnl as a zero-P/L trade", async () => {
-    listClosedMock.mockResolvedValue([
-      { id: "t1", status: "CLOSED", realisedPnl: 25 },
-      { id: "t2", status: "CLOSED" }, // realisedPnl missing — must be excluded, never treated as 0
-    ]);
+    // sumRealisedPnlForClosedTrades itself is responsible for this exclusion now (never fabricating
+    // a figure for a CLOSED row missing realised_pnl) — see its own dedicated store-level tests
+    // (trade-lifecycle-store.test.ts / supabase-trade-lifecycle-store.test.ts) for that guarantee;
+    // this route-level test only pins that the route reports whatever the store returns verbatim.
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 25, realisedTradeCount: 1 });
 
     const response = await GET(makeRequest());
     const body = await response.json();
@@ -147,7 +155,7 @@ describe("GET /api/hermes/portfolio", () => {
   });
 
   it("returns realisedPnl: null (never throws) when the trade lifecycle store query fails", async () => {
-    listClosedMock.mockRejectedValue(new Error("connection reset"));
+    sumRealisedPnlForClosedTradesMock.mockRejectedValue(new Error("connection reset"));
     const response = await GET(makeRequest());
     expect(response.status).toBe(200);
     const body = await response.json();

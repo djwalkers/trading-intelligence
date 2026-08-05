@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { recoverStaleLifecycleRecords } from "@/lib/hermes-execution/runtime/lifecycle-recovery";
 import { InMemoryAuditTrail } from "@/lib/hermes-execution/audit-trail";
 import { InMemoryTradeCandidateRepository } from "@/lib/hermes-execution/trade-approval/trade-candidate-repository";
@@ -415,5 +415,41 @@ describe("recoverStaleLifecycleRecords — recovery audit failure blocks automat
     ).rejects.toThrow(/disk full/);
 
     expect((await lifecycleStore.getById("lifecycle-1"))?.status).toBe("EXECUTION_SUBMITTED");
+  });
+});
+
+// Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota).
+// recoverStaleLifecycleRecords ran unconditionally at the top of every instrument's every cycle —
+// this used to call lifecycleStore.list() (a full-table select("*")) every single time, regardless
+// of whether anything was actually stale. Pinning that it now calls the bounded, scoped alternative
+// instead is the regression test proving this specific egress source cannot silently come back.
+describe("recoverStaleLifecycleRecords — egress-containment regression", () => {
+  it("never calls lifecycleStore.list() — uses the bounded listRecoverableLifecycleRecords instead", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create(makeRecord({ status: "DECISION_CREATED" }));
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const listRecoverableSpy = vi.spyOn(lifecycleStore, "listRecoverableLifecycleRecords");
+
+    await recoverStaleLifecycleRecords(baseInput({ lifecycleStore, broker: makePlainBroker([]) }));
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(listRecoverableSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ strategyId: "DEMO-0001", instrument: "BTC" }),
+    );
+  });
+
+  it("the crash-window ambiguous-submission path also never calls list() — uses findLifecycleRecordsByBrokerPositionId instead", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create(makeRecord({ status: "EXECUTION_SUBMITTED" }));
+    const broker = makeEtoroLikeBroker([
+      { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 },
+    ]);
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const findByBrokerPositionIdSpy = vi.spyOn(lifecycleStore, "findLifecycleRecordsByBrokerPositionId");
+
+    await recoverStaleLifecycleRecords(baseInput({ lifecycleStore, broker: broker as never }));
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(findByBrokerPositionIdSpy).toHaveBeenCalledWith("3568040809");
   });
 });

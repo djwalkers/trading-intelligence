@@ -6,7 +6,8 @@ import type { BrokerProvider, ExecutionApprovalMode, MarketDataProviderType, Run
 import { MarketDataProviderError, type MarketDataFailureDetail, type MarketDataProvider } from "../market-data/market-data-provider";
 import { MarketDecisionEngine, type MarketDecision } from "../market-decision-engine";
 import type { TradeLifecycleCycleResult } from "../trade-lifecycle/trade-lifecycle-runner";
-import { countConfirmedEntriesForUtcDay, type TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
+import type { TradeLifecycleService } from "../trade-lifecycle/trade-lifecycle-service";
+import { utcDayBoundaries } from "../trade-lifecycle/confirmed-entry-count";
 import type { TradeLifecycleRecord } from "../trade-lifecycle/types";
 import type { PaperBroker } from "../paper-broker";
 import type { PortfolioRiskConfig } from "../portfolio-risk-engine";
@@ -1382,8 +1383,17 @@ export class TradingRuntime {
       // Freshness matters here exactly like the original code's own per-iteration
       // `getCompletedTrades().length` did: a position this SAME loop already opened for an earlier
       // candidate this cycle must count toward a later candidate's own check.
-      const dailyTradeCount = countConfirmedEntriesForUtcDay(await this.deps.lifecycleStore.list(), now, {
+      //
+      // Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan
+      // quota): this used to be countConfirmedEntriesForUtcDay(await lifecycleStore.list(), now,
+      // scope) — a full-table select("*"), JSONB `detail` blob included, downloaded fresh on every
+      // approved-candidate iteration. The store now performs the filtering AND the counting
+      // server-side (count: "exact", head: true) — no rows are ever transferred.
+      const { startInclusive, endExclusive } = utcDayBoundaries(now);
+      const dailyTradeCount = await this.deps.lifecycleStore.countConfirmedEntriesForUtcDay({
         strategyId: this.deps.strategy.strategyId,
+        startInclusive,
+        endExclusive,
       });
       const outcome = await executeApprovedTradeCandidate({
         repository: this.deps.tradeCandidateRepository,

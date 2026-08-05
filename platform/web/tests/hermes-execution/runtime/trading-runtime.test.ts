@@ -1559,4 +1559,84 @@ describe("TradingRuntime — EXECUTION_RECONCILIATION_REQUIRED defers approved c
 
     await runtime.stop();
   });
+
+  // Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota,
+  // traced to this exact call — countConfirmedEntriesForUtcDay(await lifecycleStore.list(), ...) —
+  // downloading the entire trade_lifecycle_records table, JSONB `detail` blob included, on every
+  // approved-candidate iteration of every cycle). Pinning that the runtime now calls the store's own
+  // bounded, count-only method instead is the regression test proving this specific egress source
+  // cannot silently come back.
+  it("the approved-candidate execution loop never calls lifecycleStore.list() for the daily trade count — uses the bounded countConfirmedEntriesForUtcDay instead", async () => {
+    const tradeCandidateRepository = new InMemoryTradeCandidateRepository();
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const listSpy = vi.spyOn(lifecycleStore, "list");
+    const countSpy = vi.spyOn(lifecycleStore, "countConfirmedEntriesForUtcDay");
+
+    const candidate = await tradeCandidateRepository.create({
+      analysisRunId: undefined,
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      instrument: "BTC",
+      direction: "BUY",
+      confidence: 0.8,
+      entryPrice: 64_948.33,
+      stopLoss: 60_000,
+      takeProfit: 70_000,
+      riskReward: 2,
+      reasoning: ["seed"],
+      validationNotes: [],
+      expiresAt: "2026-01-02T00:00:00.000Z",
+      execution: {
+        amount: 10,
+        sizingMode: "NOTIONAL",
+        marketContext: {
+          instrument: "BTC",
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          midPrice: 100.025,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          positionOpen: false,
+          strategy: { strategyId: "DEMO-0001", version: 1, sourceType: "HERMES_APPROVED" },
+          recentCandles: [],
+          ema20: 110,
+          ema50: 100,
+          rsi14: 55,
+          atr14: 1.5,
+          volume: 120,
+          dailyHigh: 112,
+          dailyLow: 98,
+          volatility24h: 0.01,
+          marketSession: "Crypto Always Open",
+          trend: "Bullish",
+        },
+        marketDataSnapshot: {
+          instrument: "BTC",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          candles: [],
+          bid: 100,
+          ask: 100.05,
+          spread: 0.05,
+          latestPrice: 100.025,
+          volume: 120,
+        },
+      },
+    });
+    await tradeCandidateRepository.transition(candidate.id, "PENDING", {
+      status: "APPROVED",
+      approvedAt: NOW.toISOString(),
+      approvedByUserId: "user-1",
+    });
+
+    const broker = makeMockBroker([]);
+    const { runtime, clock } = makeRuntime({ broker, tradeCandidateRepository, lifecycleStore, portfolioRiskConfig: PERMISSIVE_RISK_CONFIG });
+
+    await runtime.start();
+    await clock.advance(0);
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(countSpy).toHaveBeenCalledWith(expect.objectContaining({ strategyId: "DEMO-0001" }));
+
+    await runtime.stop();
+  });
 });

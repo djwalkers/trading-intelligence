@@ -252,3 +252,136 @@ describe("InMemoryTradeLifecycleStore — active-record uniqueness invariants", 
     await expect(store.update(makeRecord("a", "OPEN", { brokerPositionId: "555", confidence: 0.9 }))).resolves.toBeUndefined();
   });
 });
+
+// Egress-containment fix. InMemoryTradeLifecycleStore has no egress cost of its own, but its new
+// bounded methods must still reproduce the SAME filtering semantics SupabaseTradeLifecycleStore's
+// server-side queries express — these tests pin that contract so both implementations stay
+// interchangeable for callers (trading-runtime.ts, market-decide.ts, lifecycle-recovery.ts, ...).
+describe("InMemoryTradeLifecycleStore — egress-containment bounded methods", () => {
+  describe("countConfirmedEntriesForUtcDay", () => {
+    it("counts confirmed-OPEN-today entries for the scoped strategy within [startInclusive, endExclusive)", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("a", "OPEN", { openedAt: "2026-01-05T09:00:00.000Z" }));
+      await store.create(makeRecord("b", "CLOSED", { symbol: "ETH", openedAt: "2026-01-04T23:00:00.000Z", closedAt: "2026-01-05T01:00:00.000Z" }));
+      await store.create(makeRecord("c", "DECISION_CREATED", { symbol: "SOL", openedAt: undefined }));
+
+      const count = await store.countConfirmedEntriesForUtcDay({
+        strategyId: "STRAT-0001",
+        startInclusive: "2026-01-05T00:00:00.000Z",
+        endExclusive: "2026-01-06T00:00:00.000Z",
+      });
+      expect(count).toBe(1); // "a" only — "b" opened yesterday, "c" never reached OPEN.
+    });
+
+    it("scopes by strategyId — a confirmed-open record for a different strategy never counts", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("a", "OPEN", { strategyId: "STRAT-OTHER", openedAt: "2026-01-05T09:00:00.000Z" }));
+
+      const count = await store.countConfirmedEntriesForUtcDay({
+        strategyId: "STRAT-0001",
+        startInclusive: "2026-01-05T00:00:00.000Z",
+        endExclusive: "2026-01-06T00:00:00.000Z",
+      });
+      expect(count).toBe(0);
+    });
+
+    it("fails closed for a record whose status proves OPEN but has no openedAt", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      // Bypasses create()'s own active-uniqueness clash check via update() semantics is unnecessary
+      // here — a single directly-created corrupt row is enough to exercise the guard.
+      await store.create(makeRecord("a", "CLOSED", { openedAt: undefined, closedAt: "2026-01-05T10:00:00.000Z", exitPrice: 100, exitReason: "tp", realisedPnl: 5 }));
+
+      await expect(
+        store.countConfirmedEntriesForUtcDay({
+          strategyId: "STRAT-0001",
+          startInclusive: "2026-01-05T00:00:00.000Z",
+          endExclusive: "2026-01-06T00:00:00.000Z",
+        }),
+      ).rejects.toThrow(/cannot safely compute/);
+    });
+  });
+
+  describe("listActiveLifecycleRecords", () => {
+    it("returns only records matching strategyId + instrument + one of the given statuses", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("a", "OPEN", { symbol: "BTC" }));
+      await store.create(makeRecord("b", "OPEN", { symbol: "ETH" })); // different instrument
+      await store.create(makeRecord("c", "RISK_REJECTED", { symbol: "BTC" })); // not in the requested status set — different strategy+instrument slot anyway (RISK_REJECTED is terminal)
+
+      const results = await store.listActiveLifecycleRecords({
+        strategyId: "STRAT-0001",
+        instrument: "BTC",
+        statuses: ["OPEN", "CLOSE_REQUESTED", "CLOSE_FAILED", "EXECUTION_RECONCILIATION_REQUIRED"],
+      });
+      expect(results.map((r) => r.id)).toEqual(["a"]);
+    });
+
+    it("returns an empty array when nothing matches", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      const results = await store.listActiveLifecycleRecords({ strategyId: "STRAT-0001", instrument: "BTC", statuses: ["OPEN"] });
+      expect(results).toEqual([]);
+    });
+  });
+
+  describe("listRecoverableLifecycleRecords", () => {
+    it("returns only records matching strategyId + instrument + status + updatedAt at or before updatedBefore", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("stale", "APPROVED", { updatedAt: "2026-01-05T09:00:00.000Z" }));
+
+      const recoverable = await store.listRecoverableLifecycleRecords({
+        strategyId: "STRAT-0001",
+        instrument: "BTC",
+        statuses: ["DECISION_CREATED", "APPROVED", "EXECUTION_SUBMITTED", "EXECUTION_RECONCILIATION_REQUIRED"],
+        updatedBefore: "2026-01-05T09:00:00.000Z", // exactly equal — must be included (matches the original >= threshold semantics)
+      });
+      expect(recoverable.map((r) => r.id)).toEqual(["stale"]);
+    });
+
+    it("excludes a record updated AFTER updatedBefore — not stale enough yet", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("fresh", "APPROVED", { updatedAt: "2026-01-05T09:00:01.000Z" }));
+
+      const recoverable = await store.listRecoverableLifecycleRecords({
+        strategyId: "STRAT-0001",
+        instrument: "BTC",
+        statuses: ["APPROVED"],
+        updatedBefore: "2026-01-05T09:00:00.000Z",
+      });
+      expect(recoverable).toEqual([]);
+    });
+  });
+
+  describe("findLifecycleRecordsByBrokerPositionId", () => {
+    it("returns every record carrying the given brokerPositionId, regardless of strategy/instrument", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("a", "OPEN", { symbol: "BTC", brokerPositionId: "555" }));
+      await store.create(makeRecord("b", "CLOSED", { symbol: "ETH", brokerPositionId: "999" }));
+
+      const results = await store.findLifecycleRecordsByBrokerPositionId("555");
+      expect(results.map((r) => r.id)).toEqual(["a"]);
+    });
+
+    it("returns an empty array when no record carries that brokerPositionId", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      expect(await store.findLifecycleRecordsByBrokerPositionId("does-not-exist")).toEqual([]);
+    });
+  });
+
+  describe("sumRealisedPnlForClosedTrades / countUnreconciledClosedTrades", () => {
+    it("sums realisedPnl across CLOSED records and counts CLOSED_UNRECONCILED separately", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      await store.create(makeRecord("a", "CLOSED", { symbol: "BTC", closedAt: "2026-01-05T10:00:00.000Z", exitPrice: 100, exitReason: "tp", realisedPnl: 40 }));
+      await store.create(makeRecord("b", "CLOSED", { symbol: "ETH", closedAt: "2026-01-05T10:00:00.000Z", exitPrice: 100, exitReason: "tp", realisedPnl: 60 }));
+      await store.create(makeRecord("c", "CLOSED_UNRECONCILED", { symbol: "SOL", closedAt: "2026-01-05T10:00:00.000Z", exitReason: "reconciled-absent" }));
+
+      expect(await store.sumRealisedPnlForClosedTrades()).toEqual({ realisedPnl: 100, realisedTradeCount: 2 });
+      expect(await store.countUnreconciledClosedTrades()).toBe(1);
+    });
+
+    it("returns zero/empty for a store with no closed trades", async () => {
+      const store = new InMemoryTradeLifecycleStore();
+      expect(await store.sumRealisedPnlForClosedTrades()).toEqual({ realisedPnl: 0, realisedTradeCount: 0 });
+      expect(await store.countUnreconciledClosedTrades()).toBe(0);
+    });
+  });
+});
