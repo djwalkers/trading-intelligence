@@ -16,6 +16,34 @@ vi.mock("@/lib/hermes-integration/broker-snapshot", () => ({ getBrokerSnapshot: 
 const mockReadAuditLog = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-integration/audit-log-reader", () => ({ readHermesRuntimeAuditLog: mockReadAuditLog }));
 
+// Realised-P/L restart-consistency fix. GET /api/hermes/summary now sources realisedPnl from the
+// SAME durable-realised-pnl.ts helper GET /api/hermes/portfolio uses — mocked here at the exact same
+// boundary portfolio.test.ts mocks (getServiceRoleClient / buildAnalysisPersistenceConfig /
+// SupabaseTradeLifecycleStore), never from the runtime audit log any more.
+const { getServiceRoleClientMock, buildAnalysisPersistenceConfigMock, sumRealisedPnlForClosedTradesMock, countUnreconciledClosedTradesMock } = vi.hoisted(
+  () => ({
+    getServiceRoleClientMock: vi.fn(),
+    buildAnalysisPersistenceConfigMock: vi.fn(),
+    sumRealisedPnlForClosedTradesMock: vi.fn(),
+    countUnreconciledClosedTradesMock: vi.fn(),
+  }),
+);
+
+vi.mock("@/lib/supabase/service-role-client", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
+vi.mock("@/lib/hermes-execution/analysis/analysis-persistence-config", () => ({
+  buildAnalysisPersistenceConfig: buildAnalysisPersistenceConfigMock,
+}));
+vi.mock("@/lib/hermes-execution/trade-lifecycle/supabase-trade-lifecycle-store", () => ({
+  // A `function` expression, not an arrow function — the shared helper calls
+  // `new SupabaseTradeLifecycleStore(...)`. Deliberately exposes ONLY the two bounded aggregate
+  // methods — no list()/listClosed()/listUnreconciled() on this mock at all, so if the summary
+  // route (or the shared helper) ever regressed to calling one of those, it would throw
+  // "... is not a function" rather than silently succeeding.
+  SupabaseTradeLifecycleStore: vi.fn().mockImplementation(function SupabaseTradeLifecycleStore() {
+    return { sumRealisedPnlForClosedTrades: sumRealisedPnlForClosedTradesMock, countUnreconciledClosedTrades: countUnreconciledClosedTradesMock };
+  }),
+}));
+
 import { GET } from "@/app/api/hermes/summary/route";
 
 function makeRequest(): NextRequest {
@@ -35,6 +63,13 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     mockGetConfig.mockReturnValue(BASE_CONFIG);
     mockGetBrokerSnapshot.mockResolvedValue({ ok: true, provider: "etoro-demo", accountMode: "demo", cash: 100, positions: [], positionsAreLiveGroundTruth: true });
     mockReadAuditLog.mockResolvedValue({ events: [], available: true });
+
+    // Durable persistence configured and healthy by default — individual tests override to
+    // exercise degradation paths.
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: true, ownerUserId: "owner-1" });
+    getServiceRoleClientMock.mockReturnValue({});
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 42, realisedTradeCount: 3 });
+    countUnreconciledClosedTradesMock.mockResolvedValue(1);
   });
 
   afterEach(() => {
@@ -51,6 +86,7 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     const body = await response.json();
     expect(body.ok).toBe(true);
     expect(body.data.portfolio).not.toBeNull();
+    expect(body.data.portfolio.realisedPnl).toBe(42);
     expect(body.data.warnings).toEqual([]);
   });
 
@@ -84,6 +120,9 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     expect(body.data.runtime).toBeNull();
     expect(body.data.latestDecision).toBeNull();
     expect(body.data.portfolio).not.toBeNull(); // broker subsystem is independent, still succeeded
+    // Realised-P/L restart-consistency fix. realisedPnl is independent of the audit log entirely —
+    // an audit-log read failure must never take the durable realised P/L figure down with it.
+    expect(body.data.portfolio.realisedPnl).toBe(42);
     expect(body.data.warnings.some((w: string) => w.includes("disk read failed"))).toBe(true);
   });
 
@@ -94,6 +133,8 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     const body = await response.json();
     expect(body.data.runtime).toBeNull();
     expect(body.data.warnings.length).toBeGreaterThan(0);
+    // Same independence guarantee as the read-rejection case above.
+    expect(body.data.portfolio.realisedPnl).toBe(42);
   });
 
   it("does not crash when getHermesExecutionConfig() throws", async () => {
@@ -124,7 +165,9 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
   });
 
   // Restart-Resilient Autonomy Phase — CLOSED_UNRECONCILED operator visibility (deployment safety
-  // review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics").
+  // review, required test 12: "CLOSED_UNRECONCILED appears in summary/Telegram diagnostics"). Detail
+  // records (timestamp/instrument/strategyId/lifecycleRecordId) have no durable equivalent — only a
+  // durable COUNT exists (countUnreconciledClosedTrades) — so this stays audit-log-derived.
   it("surfaces a CLOSED_UNRECONCILED closure in both unreconciledClosures and warnings", async () => {
     mockReadAuditLog.mockResolvedValue({
       events: [
@@ -151,5 +194,124 @@ describe("GET /api/hermes/summary — subsystem failure degradation", () => {
     const response = await GET(makeRequest());
     const body = await response.json();
     expect(body.data.unreconciledClosures).toEqual([]);
+  });
+});
+
+// Realised-P/L restart-consistency fix. Production evidence: GET /api/hermes/portfolio correctly
+// reported a durable realisedPnl after a runtime restart, but GET /api/hermes/summary reported null
+// — traced to summary's own former sumRealisedPnlSinceLastStart(auditLog.events), a process-session
+// scan that returns null whenever no position has closed since the CURRENT process's own most recent
+// TRADING_RUNTIME_STARTED event. These tests pin the fix and guard against regressing back to it.
+describe("GET /api/hermes/summary — realised P/L restart consistency", () => {
+  beforeEach(() => {
+    process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
+    resetHermesIntegrationConfigCacheForTests();
+    vi.clearAllMocks();
+    mockGetConfig.mockReturnValue(BASE_CONFIG);
+    mockGetBrokerSnapshot.mockResolvedValue({ ok: true, provider: "etoro-demo", accountMode: "demo", cash: 100, positions: [], positionsAreLiveGroundTruth: true });
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: true, ownerUserId: "owner-1" });
+    getServiceRoleClientMock.mockReturnValue({});
+  });
+
+  afterEach(() => {
+    if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
+    else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
+    resetHermesIntegrationConfigCacheForTests();
+  });
+
+  it("returns the durable realised P/L after a simulated runtime restart with no closes yet this process run", async () => {
+    // Mirrors the production evidence exactly: a fresh TRADING_RUNTIME_STARTED event (a restart
+    // just happened) with no TRADE_CLOSED event anywhere after it — the old audit-log-scoped
+    // calculation would return null here; the durable store has 37 historical closed trades.
+    mockReadAuditLog.mockResolvedValue({
+      events: [
+        { timestamp: "2026-08-05T09:00:00.000Z", eventType: "TRADING_RUNTIME_STARTED", executionRunId: "run-2", instrument: "BTC", strategyId: "DEMO-0001", details: {} },
+      ],
+      available: true,
+    });
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: -0.12692509766610416, realisedTradeCount: 37 });
+    countUnreconciledClosedTradesMock.mockResolvedValue(11);
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.portfolio.realisedPnl).toBe(-0.12692509766610416);
+    expect(body.data.warnings).toEqual([]);
+  });
+
+  it("summary and portfolio report the same realisedPnl for the same durable data — both derive it from the identical shared helper", async () => {
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 156.78, realisedTradeCount: 9 });
+    countUnreconciledClosedTradesMock.mockResolvedValue(2);
+
+    const { getDurableRealisedPnlSummary } = await import("@/lib/hermes-integration/durable-realised-pnl");
+    const directResult = await getDurableRealisedPnlSummary();
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.data.portfolio.realisedPnl).toBe(directResult.realisedPnl);
+    expect(body.data.portfolio.realisedPnl).toBe(156.78);
+  });
+
+  it("never uses an audit-log-derived realised P/L figure — a TRADE_CLOSED event's own detail.realisedPnl is ignored entirely", async () => {
+    // If summary still summed TRADE_CLOSED events (the removed code path), this would report 999 —
+    // asserting it reports the durable mock's value instead proves that path is gone.
+    mockReadAuditLog.mockResolvedValue({
+      events: [
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          eventType: "TRADE_CLOSED",
+          executionRunId: "run-1",
+          instrument: "BTC",
+          strategyId: "DEMO-0001",
+          details: { realisedPnl: 999 },
+        },
+      ],
+      available: true,
+    });
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 5, realisedTradeCount: 1 });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.portfolio.realisedPnl).toBe(5);
+    expect(body.data.portfolio.realisedPnl).not.toBe(999);
+  });
+
+  it("degrades safely (ok:true, realisedPnl:null, clear warning) when durable persistence is not configured", async () => {
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: false, ownerUserId: undefined });
+    const response = await GET(makeRequest());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.portfolio.realisedPnl).toBeNull();
+    expect(body.data.warnings.some((w: string) => w.includes("Durable realised P/L unavailable") && w.includes("not configured"))).toBe(true);
+  });
+
+  it("degrades safely (ok:true, realisedPnl:null, clear warning) when the durable store query itself fails", async () => {
+    sumRealisedPnlForClosedTradesMock.mockRejectedValue(new Error("connection reset"));
+    const response = await GET(makeRequest());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.portfolio.realisedPnl).toBeNull();
+    expect(body.data.warnings.some((w: string) => w.includes("Durable realised P/L unavailable") && w.includes("connection reset"))).toBe(true);
+  });
+
+  it("never calls a full-row lifecycle list query — only the two bounded aggregate methods, each exactly once", async () => {
+    sumRealisedPnlForClosedTradesMock.mockResolvedValue({ realisedPnl: 1, realisedTradeCount: 1 });
+    countUnreconciledClosedTradesMock.mockResolvedValue(0);
+
+    await GET(makeRequest());
+
+    // The mocked SupabaseTradeLifecycleStore instance exposes ONLY these two methods — no list()/
+    // listClosed()/listUnreconciled() at all — so calling either of those would have thrown, not
+    // silently succeeded. Asserting call count 1 (never repeated — see requirement "avoid two
+    // identical Supabase queries inside one summary request") completes the proof.
+    expect(sumRealisedPnlForClosedTradesMock).toHaveBeenCalledTimes(1);
+    expect(sumRealisedPnlForClosedTradesMock).toHaveBeenCalledWith();
+    expect(countUnreconciledClosedTradesMock).toHaveBeenCalledTimes(1);
+    expect(countUnreconciledClosedTradesMock).toHaveBeenCalledWith();
   });
 });

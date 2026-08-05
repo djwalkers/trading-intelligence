@@ -9,8 +9,8 @@ import {
   latestFailureOrWarning,
   listDecisions,
   listUnreconciledClosures,
-  sumRealisedPnlSinceLastStart,
 } from "@/lib/hermes-integration/audit-derivations";
+import { getDurableRealisedPnlSummary } from "@/lib/hermes-integration/durable-realised-pnl";
 import { getHermesExecutionConfig } from "@/lib/hermes-execution/config";
 import type { HealthStatus } from "@/lib/health/health-status";
 
@@ -24,6 +24,16 @@ import type { HealthStatus } from "@/lib/health/health-status";
 // one never prevents the others from being reported, and never makes this endpoint itself fail —
 // see the individual try/catches below. The response is always `ok: true` (the request itself
 // succeeded); degradation is visible only in `warnings` and in individual fields being `null`.
+//
+// Realised-P/L restart-consistency fix. `portfolio.realisedPnl` used to be
+// sumRealisedPnlSinceLastStart(auditLog.events) — scoped to the CURRENT process's own uptime, so it
+// silently returned null the instant the runtime restarted and no position had closed yet this
+// process run, even though GET /api/hermes/portfolio (durable, Supabase-backed) reported the real,
+// unchanged figure the whole time. Now sourced from the exact same getDurableRealisedPnlSummary()
+// that route calls — one shared helper, one durable source, both endpoints always agree. No longer
+// derived from the audit log at all; the audit log here is used only for runtime state, decision/
+// failure history, and unreconciled-closure DETAIL records (see listUnreconciledClosures below —
+// the durable store has no per-closure detail equivalent, only a count).
 
 export async function GET(request: NextRequest) {
   return withHermesGuard(request, async () => {
@@ -57,7 +67,7 @@ export async function GET(request: NextRequest) {
           provider: snapshot.provider,
           cash: snapshot.cash,
           investedValue: snapshot.positions.reduce((sum, position) => sum + (position.quantity ?? 0), 0),
-          realisedPnl: null, // filled in below, once the audit log has been read
+          realisedPnl: null, // filled in below, once the durable trade lifecycle store has been read
           openPositionCount: snapshot.positions.length,
         };
       } else {
@@ -67,6 +77,24 @@ export async function GET(request: NextRequest) {
     } catch (error) {
       brokerStatus = "unavailable";
       warnings.push(`Broker/portfolio check failed unexpectedly: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+
+    // Realised-P/L restart-consistency fix. Independent of both the broker-snapshot fetch above and
+    // the audit-log read below — this is the same durable, Supabase-backed source GET
+    // /api/hermes/portfolio uses, via the same shared helper (one call here — never repeated —
+    // covers both realisedPnl and unreconciledClosedTradeCount in one round trip, avoiding two
+    // identical Supabase queries within this one request).
+    let durableRealisedPnl: Awaited<ReturnType<typeof getDurableRealisedPnlSummary>> | null = null;
+    try {
+      durableRealisedPnl = await getDurableRealisedPnlSummary();
+      if (durableRealisedPnl.realisedPnl === null) {
+        warnings.push(`Durable realised P/L unavailable: ${durableRealisedPnl.realisedPnlScope}`);
+      }
+    } catch (error) {
+      warnings.push(`Durable realised P/L check failed unexpectedly: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+    if (portfolio) {
+      portfolio.realisedPnl = durableRealisedPnl?.realisedPnl ?? null;
     }
 
     let runtimeSummary: {
@@ -91,10 +119,6 @@ export async function GET(request: NextRequest) {
         };
         if (observed.state === "STOPPED") warnings.push("Trading runtime is not currently running.");
         if (observed.state === "PAUSED") warnings.push("Trading runtime is currently paused.");
-
-        if (portfolio) {
-          portfolio.realisedPnl = sumRealisedPnlSinceLastStart(auditLog.events);
-        }
 
         const decisions = listDecisions(auditLog.events, { limit: 1 });
         latestDecision = decisions[0] ?? null;

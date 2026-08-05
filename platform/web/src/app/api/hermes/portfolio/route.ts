@@ -2,9 +2,7 @@ import type { NextRequest } from "next/server";
 import { withHermesGuard } from "@/lib/hermes-integration/auth";
 import { successEnvelope, errorEnvelope } from "@/lib/hermes-integration/response-envelope";
 import { getBrokerSnapshot } from "@/lib/hermes-integration/broker-snapshot";
-import { getServiceRoleClient } from "@/lib/supabase/service-role-client";
-import { buildAnalysisPersistenceConfig } from "@/lib/hermes-execution/analysis/analysis-persistence-config";
-import { SupabaseTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecycle/supabase-trade-lifecycle-store";
+import { getDurableRealisedPnlSummary } from "@/lib/hermes-integration/durable-realised-pnl";
 
 // Hermes Integration API v1. GET /api/hermes/portfolio: cash + positions read live from the
 // connected broker (getBrokerSnapshot — see broker-snapshot.ts), realised P/L aggregated from the
@@ -22,69 +20,12 @@ import { SupabaseTradeLifecycleStore } from "@/lib/hermes-execution/trade-lifecy
 // which is authoritative for confirmed-closed trades independent of process restarts; unrealised
 // P/L and equity are computed from broker-ground-truth open positions + live prices (see
 // broker-snapshot.ts's own priceOpenPositions()).
-
-const REALISED_PNL_SCOPE_DURABLE =
-  "Since trade lifecycle tracking began — aggregated from durable, Supabase-backed trade lifecycle records " +
-  "(survives trading-runtime restarts; not scoped to the current process's own uptime).";
-
-interface RealisedPnlSummary {
-  realisedPnl: number | null;
-  realisedPnlScope: string;
-  realisedTradeCount: number;
-  unreconciledClosedTradeCount: number;
-}
-
-async function computeRealisedPnlSummary(): Promise<RealisedPnlSummary> {
-  const persistenceConfig = buildAnalysisPersistenceConfig();
-  if (!persistenceConfig.enabled || !persistenceConfig.ownerUserId) {
-    return {
-      realisedPnl: null,
-      realisedPnlScope:
-        "Unavailable — durable trade lifecycle persistence is not configured on this deployment " +
-        "(HERMES_SUPABASE_USER_ID / Supabase service role).",
-      realisedTradeCount: 0,
-      unreconciledClosedTradeCount: 0,
-    };
-  }
-
-  const client = getServiceRoleClient();
-  if (!client) {
-    return {
-      realisedPnl: null,
-      realisedPnlScope: "Unavailable — the Supabase service role client is not configured.",
-      realisedTradeCount: 0,
-      unreconciledClosedTradeCount: 0,
-    };
-  }
-
-  try {
-    const store = new SupabaseTradeLifecycleStore(client, persistenceConfig.ownerUserId);
-    // Egress-containment fix (production incident: Supabase egress ~800% over the Free-plan quota,
-    // dashboard polling this route every 30s): this used to be store.listClosed() +
-    // store.listUnreconciled() — both full-row select("*") queries, JSONB `detail` blob (candles,
-    // market/decision snapshots) included, even though only realised_pnl and a row COUNT were ever
-    // used. sumRealisedPnlForClosedTrades() selects only realised_pnl; countUnreconciledClosedTrades()
-    // is a count-only (head: true) query — no unreconciled rows are ever transferred.
-    const [{ realisedPnl, realisedTradeCount }, unreconciledClosedTradeCount] = await Promise.all([
-      store.sumRealisedPnlForClosedTrades(),
-      store.countUnreconciledClosedTrades(),
-    ]);
-
-    return {
-      realisedPnl,
-      realisedPnlScope: REALISED_PNL_SCOPE_DURABLE,
-      realisedTradeCount,
-      unreconciledClosedTradeCount,
-    };
-  } catch (error) {
-    return {
-      realisedPnl: null,
-      realisedPnlScope: `Unavailable — could not read trade lifecycle records: ${error instanceof Error ? error.message : "unknown error"}.`,
-      realisedTradeCount: 0,
-      unreconciledClosedTradeCount: 0,
-    };
-  }
-}
+//
+// Realised-P/L restart-consistency fix. computeRealisedPnlSummary() used to live here as this
+// route's own private helper — now getDurableRealisedPnlSummary() (durable-realised-pnl.ts),
+// shared with GET /api/hermes/summary so both routes report the exact same durable figure from the
+// exact same bounded Supabase queries, never two independently-computed (and previously
+// inconsistent) realised-P/L numbers for the same account.
 
 export async function GET(request: NextRequest) {
   return withHermesGuard(request, async () => {
@@ -108,7 +49,7 @@ export async function GET(request: NextRequest) {
     const equity = unrealisedPnl !== null ? snapshot.cash + investedValue + unrealisedPnl : null;
     const equitySource: "BROKER" | "CALCULATED" | "UNAVAILABLE" = equity !== null ? "CALCULATED" : "UNAVAILABLE";
 
-    const realisedPnlSummary = await computeRealisedPnlSummary();
+    const realisedPnlSummary = await getDurableRealisedPnlSummary();
 
     return successEnvelope({
       accountMode: snapshot.accountMode,
