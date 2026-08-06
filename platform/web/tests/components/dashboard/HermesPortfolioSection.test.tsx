@@ -181,7 +181,80 @@ describe("HermesPortfolioSection", () => {
     await flushMicrotasks();
 
     const kpis = screen.getByTestId("hermes-portfolio-kpis");
-    expect(kpis).toHaveTextContent("2 closed trade(s) excluded");
+    expect(kpis).toHaveTextContent("2 unreconciled trades excluded");
+  });
+
+  it("uses singular 'trade' when exactly one unreconciled closed trade is excluded", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-portfolio")) {
+        return jsonResponse({ ok: true, data: { ...PORTFOLIO_BODY.data, unreconciledClosedTradeCount: 1 } });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    expect(kpis).toHaveTextContent("1 unreconciled trade excluded");
+    expect(kpis).not.toHaveTextContent("1 unreconciled trades excluded");
+  });
+
+  // Realised P/L card simplification. The long scope explanation must no longer sit directly under
+  // the value as always-visible text — it moves into a tooltip (info icon) instead, and the
+  // exclusion line itself is omitted entirely when there is nothing to exclude.
+  it("does not show the exclusion line when there are no unreconciled closed trades", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-portfolio")) {
+        return jsonResponse({ ok: true, data: { ...PORTFOLIO_BODY.data, unreconciledClosedTradeCount: 0 } });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    // "excluded" alone also appears inside the tooltip's own static explanation text (accessible,
+    // but not the always-visible dynamic exclusion line this test is about) — match the specific
+    // "<count> unreconciled trade(s) excluded" line instead of the bare word.
+    expect(kpis).not.toHaveTextContent(/\d+ unreconciled trades? excluded/);
+  });
+
+  it("moves the long realised-P/L scope explanation into a tooltip rather than always-visible card text", async () => {
+    global.fetch = mockFetchSequence(defaultHandler) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    const tooltip = screen.getByRole("tooltip", { hidden: true });
+    // The long explanation is reachable (an operator can still read it, and it's in the
+    // accessibility tree via aria-describedby) but must not ALSO appear as separate,
+    // always-rendered card text outside the tooltip itself.
+    expect(tooltip).toHaveTextContent(/Since trade lifecycle tracking began/);
+    const textOutsideTooltip = (kpis.textContent ?? "").replace(tooltip.textContent ?? "", "");
+    expect(textOutsideTooltip).not.toContain("Since trade lifecycle tracking began");
+  });
+
+  it("still shows the API's own reason directly on the card when realised P/L is unavailable (no tooltip hides it)", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-portfolio")) {
+        return jsonResponse({
+          ok: true,
+          data: {
+            ...PORTFOLIO_BODY.data,
+            realisedPnl: null,
+            realisedPnlScope: "Unavailable — durable trade lifecycle persistence is not configured on this deployment.",
+            unreconciledClosedTradeCount: 0,
+          },
+        });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<HermesPortfolioSection />);
+    await flushMicrotasks();
+
+    const kpis = screen.getByTestId("hermes-portfolio-kpis");
+    expect(kpis).toHaveTextContent("Unavailable — durable trade lifecycle persistence is not configured");
+    expect(screen.queryByRole("tooltip", { hidden: true })).not.toBeInTheDocument();
   });
 
   it("never prefixes a broker-native amount with £ — uses $ / USD until currency handling is resolved", async () => {

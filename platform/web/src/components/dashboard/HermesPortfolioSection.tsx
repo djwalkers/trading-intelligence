@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
 import { SectionPanel } from "@/components/ui/SectionPanel";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { useHermesDashboardData } from "@/lib/hermes-dashboard/use-hermes-dashboard-data";
 import { formatMaybeBrokerAmount } from "@/lib/hermes-dashboard/format";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/format";
@@ -19,6 +20,17 @@ import { HermesRuntimeStatusStrip } from "./HermesRuntimeStatusStrip";
 // whatever it last successfully loaded (clearly marked stale) — it never silently falls back to
 // the legacy local paper figures, which would mix two different account models and mislead the
 // user about what money is actually at risk.
+
+// Realised P/L card simplification. The full scope explanation used to sit directly under the
+// value as the card's sublabel, making it visually heavy next to its siblings — moved into this
+// tooltip instead (icon, hover/focus-revealed). Only shown once realised P/L is genuinely
+// available (portfolio.realisedPnl !== null) — when it's unavailable, the card's sublabel already
+// shows the API's own concise reason (portfolio.realisedPnlScope), which stays as-is rather than
+// being hidden behind a tooltip nobody may think to check during a degraded state.
+const REALISED_PNL_TOOLTIP_TEXT =
+  "Since trade lifecycle tracking began — aggregated from durable, Supabase-backed trade lifecycle " +
+  "records. Survives trading-runtime restarts and is not limited to the current process uptime. " +
+  "Unreconciled closed trades are excluded because the exit price is unknown.";
 
 export function HermesPortfolioSection() {
   const { state, portfolio, positions, summary, lastRefreshedAt, isStale, refresh } = useHermesDashboardData();
@@ -99,9 +111,12 @@ export function HermesPortfolioSection() {
                 label="Realised P/L"
                 value={formatMaybeBrokerAmount(portfolio.realisedPnl)}
                 valueClassName={portfolio.realisedPnl !== null ? plToneClass(portfolio.realisedPnl) : undefined}
+                icon={portfolio.realisedPnl !== null ? <Tooltip content={REALISED_PNL_TOOLTIP_TEXT} label="About realised P/L" /> : undefined}
                 sublabel={
-                  portfolio.unreconciledClosedTradeCount > 0
-                    ? `${portfolio.realisedPnlScope} — ${portfolio.unreconciledClosedTradeCount} closed trade(s) excluded (unreconciled, exit price unknown)`
+                  portfolio.realisedPnl !== null
+                    ? portfolio.unreconciledClosedTradeCount > 0
+                      ? `${portfolio.unreconciledClosedTradeCount} unreconciled trade${portfolio.unreconciledClosedTradeCount === 1 ? "" : "s"} excluded`
+                      : undefined
                     : portfolio.realisedPnlScope
                 }
               />
