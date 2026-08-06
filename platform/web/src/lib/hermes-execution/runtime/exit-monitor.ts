@@ -104,6 +104,24 @@ function toErrorMessage(error: unknown): string {
  * and no second close order is ever submitted. Fetches a fresh bid again, immediately before
  * submitting the close, per the mission's own explicit requirement — never reuses the bid the
  * trigger was evaluated against.
+ *
+ * Kill-switch exit defect fix. This function is only ever called for a record the caller believes
+ * is genuinely still open (currentPositionOpen && currentRecord in trading-runtime.ts) — so EVERY
+ * failure branch below now durably persists CLOSE_FAILED (retryable, visible) with a specific
+ * reason, never silently returning `{closed:false}` with the record left exactly as it was. Three
+ * structurally distinct failure sources are never conflated:
+ *   1. The broker adapter has no matching open position at all (never adopted into this broker
+ *      instance — see position-reconciliation.ts's own adoptPosition fix — or a genuine race). The
+ *      broker was never called; safe to mark CLOSE_FAILED and let reconciliation's own next-cycle,
+ *      broker-ground-truth check resolve it (back to OPEN if still genuinely live, or to
+ *      CLOSED_UNRECONCILED if genuinely gone) — never guessed here.
+ *   2. broker.closePosition() itself throws — the close never happened at the broker (or is
+ *      genuinely unknown); safe to retry a FRESH close attempt next cycle.
+ *   3. broker.closePosition() SUCCEEDS (POSITION_CLOSED/REALISED_PNL already fired from inside it)
+ *      but the subsequent local lifecycle-persistence step then fails — the close is CONFIRMED and
+ *      must never be resubmitted. The confirmed exit data is preserved in a dedicated audit event
+ *      before CLOSE_FAILED is recorded, so it is never silently discarded even though this specific
+ *      record write couldn't durably capture it.
  */
 export async function executeAutomaticExit(input: ExecuteAutomaticExitInput): Promise<ExecuteAutomaticExitResult> {
   const { broker, record, trigger, lifecycleService, auditTrail, executionRunId, now } = input;
@@ -124,15 +142,25 @@ export async function executeAutomaticExit(input: ExecuteAutomaticExitInput): Pr
     },
   });
 
+  // Moved ahead of the broker-position lookup below (was previously computed only once a matching
+  // broker position was already confirmed found) so EVERY failure branch — including "the broker
+  // adapter doesn't have this position at all" — can route through the identical CLOSE_REQUESTED
+  // state. CLOSE_REQUESTED -> CLOSE_FAILED is a valid transition; OPEN -> CLOSE_FAILED directly is
+  // not (see trade-lifecycle/types.ts's own VALID_TRANSITIONS) — a caller must always be able to
+  // see a failed close attempt reflected durably, never silently left exactly as it was.
+  const closeRequestedRecord = record.status === "OPEN" ? await lifecycleService.recordCloseRequested(record) : record;
+
   const openPositions = broker.getOpenPositions();
   const brokerPosition = record.brokerPositionId
     ? openPositions.find((p) => p.brokerPositionId === record.brokerPositionId)
     : openPositions.find((p) => p.instrument === record.symbol);
   if (!brokerPosition) {
-    return {
-      closed: false,
-      reason: `No matching broker position found to close for lifecycle record ${record.id} (instrument ${record.symbol}) — it may have already closed.`,
-    };
+    const reason =
+      `Broker adapter has no open position matching lifecycle record ${record.id} (brokerPositionId ` +
+      `${record.brokerPositionId ?? "unknown"}, instrument ${record.symbol}) — it was never registered with this broker ` +
+      `instance, or has genuinely already closed. Reconciliation will resolve this on the next cycle.`;
+    await lifecycleService.recordCloseFailed(closeRequestedRecord, { message: reason, context: { failureKind: "POSITION_NOT_FOUND_AT_BROKER_ADAPTER" } });
+    return { closed: false, reason };
   }
 
   // Fresh price fetched again, right before submission — never the bid the trigger was evaluated
@@ -149,19 +177,55 @@ export async function executeAutomaticExit(input: ExecuteAutomaticExitInput): Pr
     }
   }
 
-  const closeRequestedRecord = record.status === "OPEN" ? await lifecycleService.recordCloseRequested(record) : record;
+  let brokerResult: Awaited<ReturnType<PaperBroker["closePosition"]>>;
+  try {
+    brokerResult = await broker.closePosition(brokerPosition.positionId, exitPrice, now.toISOString(), `automatic-exit-${trigger.toLowerCase()}`);
+  } catch (error) {
+    // The broker call itself never confirmed anything happened — safe to retry a fresh close
+    // attempt next cycle.
+    const reason = toErrorMessage(error);
+    await lifecycleService.recordCloseFailed(closeRequestedRecord, { message: reason, context: { failureKind: "BROKER_CLOSE_REJECTED" } });
+    return { closed: false, reason };
+  }
 
   try {
-    const result = await broker.closePosition(brokerPosition.positionId, exitPrice, now.toISOString(), `automatic-exit-${trigger.toLowerCase()}`);
     const closed = await lifecycleService.recordClosed(closeRequestedRecord, {
-      exitPrice: result.trade.exitPrice,
-      exitReason: result.trade.closeReason,
+      exitPrice: brokerResult.trade.exitPrice,
+      exitReason: brokerResult.trade.closeReason,
       closedAt: now.toISOString(),
     });
     return { closed: true, record: closed };
   } catch (error) {
+    // Crash-window fix. The broker CONFIRMED this close already (trackedPositions no longer has it
+    // — a retried broker.closePosition() call for the same positionId fails fast, locally, before
+    // ever reaching a real HTTP call, never a duplicate real order — see
+    // EtoroDemoBroker.closePosition's own lookup-before-call ordering). Only the LOCAL persistence
+    // step failed, after the fact. The confirmed result is preserved here, in the one durable place
+    // it cannot be lost, before CLOSE_FAILED is recorded — reconciliation's own broker-absent path
+    // will resolve this record to CLOSED_UNRECONCILED next cycle; it must never be treated as safe
+    // to resubmit a fresh close.
     const reason = toErrorMessage(error);
-    await lifecycleService.recordCloseFailed(closeRequestedRecord, { message: reason });
-    return { closed: false, reason };
+    await auditTrail.record({
+      timestamp: now.toISOString(),
+      eventType: "AUTOMATIC_EXIT_BROKER_CONFIRMED_PERSISTENCE_FAILED",
+      executionRunId,
+      strategyId: record.strategyId,
+      instrument: record.symbol,
+      details: {
+        lifecycleRecordId: record.id,
+        brokerPositionId: record.brokerPositionId,
+        confirmedExitPrice: brokerResult.trade.exitPrice,
+        confirmedCloseReason: brokerResult.trade.closeReason,
+        confirmedRealisedPnl: brokerResult.trade.realisedPnl,
+        persistenceError: reason,
+      },
+    });
+    await lifecycleService.recordCloseFailed(closeRequestedRecord, {
+      message:
+        `Broker confirmed this position closed (exitPrice=${brokerResult.trade.exitPrice}), but persisting that result failed: ` +
+        `${reason}. Never resubmit a broker close for this position — reconciliation will resolve it.`,
+      context: { failureKind: "BROKER_CONFIRMED_BUT_PERSISTENCE_FAILED", confirmedExitPrice: brokerResult.trade.exitPrice },
+    });
+    return { closed: false, reason: `Broker confirmed the close but local persistence failed: ${reason}` };
   }
 }

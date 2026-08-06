@@ -1322,7 +1322,28 @@ export class TradingRuntime {
       } else {
         this.opposingSignalStability.reset(currentRecord.id);
 
-        if (trigger2) {
+        // Kill-switch exit defect fix — duplicate-submission guard. trigger2 is a FIXED trigger
+        // here (KILL_SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/MAX_HOLDING_DURATION), the exact
+        // same class Phase A already evaluated and, if one fired, already attempted to close THIS
+        // cycle (state.phaseAExitTrigger). Reaching here with state.phaseAExitTrigger already set
+        // means Phase A's own attempt FAILED (a success would have already cleared
+        // currentPositionOpen/currentRecord above, skipping this whole block) — never re-attempt
+        // the same fixed-trigger close a second time within one cycle; a failed attempt is already
+        // durably CLOSE_FAILED and will retry on the NEXT scheduled cycle, exactly like any other
+        // CLOSE_FAILED record. Re-submitting immediately here would call broker.closePosition()
+        // twice for the same position in the same cycle for no benefit.
+        if (trigger2 && state.phaseAExitTrigger !== undefined) {
+          await this.recordAudit(
+            "AUTOMATIC_EXIT_RETRY_DEFERRED",
+            {
+              trigger: trigger2,
+              phaseAExitTrigger: state.phaseAExitTrigger,
+              reason: "Phase A already attempted a fixed-trigger close this cycle and it failed — deferring to the next scheduled cycle rather than resubmitting immediately.",
+              lifecycleRecordId: currentRecord.id,
+            },
+            instrument,
+          );
+        } else if (trigger2) {
           exitTrigger = trigger2;
           const exitResult = await executeAutomaticExit({
             broker: this.deps.broker,

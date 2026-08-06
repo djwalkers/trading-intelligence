@@ -1045,6 +1045,323 @@ describe("TradingRuntime — kill switch blocks all exposure-increasing activity
 
     await runtime.stop();
   });
+
+  // Root-cause regression — kill-switch exit defect. Production evidence: the kill switch
+  // repeatedly reported exitClosed:false for a genuinely open BTC demo position and never closed
+  // it, until it was closed manually. Root cause (proven via a companion unit test in
+  // position-reconciliation.test.ts): reconciliation's own "existing OPEN record, broker confirms
+  // it's still live" branch never registered the position with the broker ADAPTER itself
+  // (broker.adoptPosition()), unlike the orphan-adoption branch right below it — so a brand-new
+  // broker instance (e.g. after a PM2 restart, simulated here by NOT pre-seeding `tracked`, unlike
+  // the test above) had an empty trackedPositions map despite reconciliation correctly believing
+  // the position was still open, and every later close attempt silently failed. This test proves
+  // the fix: the exact same restart scenario now closes successfully.
+  it("kill switch successfully closes a position that survived a restart (regression for the production defect)", async () => {
+    const rawPosition = { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 };
+    const tracked = new Map<string, PaperPosition>();
+    const closePosition = vi.fn(async (positionId: string, exitPrice: number, exitTimestamp: string, closeReason: string) => {
+      const position = tracked.get(positionId)!;
+      tracked.delete(positionId);
+      const trade: CompletedTrade = {
+        tradeId: `trade-${positionId}`,
+        positionId,
+        strategyId: position.strategyId,
+        strategyVersion: position.strategyVersion,
+        sourceType: position.sourceType,
+        instrument: position.instrument,
+        side: position.side,
+        quantity: position.quantity,
+        entryPrice: position.entryPrice,
+        entryTimestamp: position.entryTimestamp,
+        entryOrderId: position.entryOrderId,
+        exitPrice,
+        exitTimestamp,
+        exitOrderId: `close-${positionId}`,
+        realisedPnl: exitPrice - position.entryPrice,
+        closeReason,
+      };
+      return { trade, orderId: `close-${positionId}` };
+    });
+    // A brand-new broker instance — its own trackedPositions map starts EMPTY, exactly like a real
+    // EtoroDemoBroker after a PM2 restart. Nothing pre-seeds `tracked` here (unlike the test above),
+    // so the ONLY way this position can ever become closeable is if reconciliation itself registers
+    // it via adoptPosition().
+    const broker = {
+      getAccount: (): Account => ({ cashBalance: 1_000_000, startingCashBalance: 1_000_000 }),
+      getOpenPositions: (): PaperPosition[] => [...tracked.values()],
+      getCompletedTrades: (): CompletedTrade[] => [],
+      resolveInstrument: async (_term: string) => ({ instrumentId: 100000 }),
+      getRate: async (_instrument: string) => ({ bid: 100, ask: 100.05 }),
+      getRawPortfolio: async () => ({ clientPortfolio: { positions: [rawPosition], credit: 1_000_000 } }),
+      adoptPosition: (
+        raw: typeof rawPosition,
+        internalInstrument: string,
+        strategyContext: { strategyId: string; strategyVersion: number; sourceType: InternalStrategy["sourceType"] },
+      ): PaperPosition => {
+        const position: PaperPosition = {
+          positionId: "adopted-position-1",
+          strategyId: strategyContext.strategyId,
+          strategyVersion: strategyContext.strategyVersion,
+          sourceType: strategyContext.sourceType,
+          instrument: internalInstrument,
+          side: raw.isBuy === false ? "SELL" : "BUY",
+          quantity: raw.amount,
+          entryPrice: raw.openRate,
+          entryTimestamp: NOW.toISOString(),
+          entryOrderId: String(raw.orderID),
+          brokerPositionId: String(raw.positionID),
+        };
+        tracked.set(position.positionId, position);
+        return position;
+      },
+      placeMarketOrder: vi.fn(),
+      closePosition,
+    };
+
+    // The durable lifecycle record already exists BEFORE this broker instance is ever constructed
+    // — "a position opened by an earlier process, this runtime instance is fresh after a restart."
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "UNITS",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      entryPrice: 64_948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    const { runtime, clock, auditTrail } = makeRuntime({ broker: broker as never, lifecycleStore, killSwitchEnabled: true });
+    await runtime.start();
+    await clock.advance(0);
+
+    const status = runtime.getStatus();
+    expect(status.lastResult?.exitTrigger).toBe("KILL_SWITCH");
+    expect(status.lastResult?.exitClosed).toBe(true);
+    expect(status.lastResult?.positionOpen).toBe(false);
+    expect(closePosition).toHaveBeenCalledOnce();
+    expect(closePosition).toHaveBeenCalledWith("adopted-position-1", expect.any(Number), expect.any(String), "automatic-exit-kill_switch");
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("BROKER_POSITION_RECONCILED"); // reconciliation found + registered it
+    expect(events).toContain("AUTOMATIC_EXIT_TRIGGERED");
+    expect(events).toContain("TRADE_CLOSE_REQUESTED");
+    expect(events).toContain("TRADE_CLOSED");
+    expect(events).not.toContain("TRADE_CLOSE_FAILED");
+
+    const record = await lifecycleStore.getById("lifecycle-1");
+    expect(record?.status).toBe("CLOSED");
+    expect(record?.exitReason).toBe("automatic-exit-kill_switch");
+    expect(typeof record?.realisedPnl).toBe("number");
+
+    await runtime.stop();
+  });
+
+  // Same restart scenario, but the broker's own close call itself fails (e.g. a transient eToro
+  // error) — must never silently succeed, must remain retryable, and the failure reason must be
+  // specific and actionable, never the generic "already closed" text a not-found case would use.
+  it("persists CLOSE_FAILED with a specific, actionable reason when the broker rejects the close of a position that survived a restart", async () => {
+    const rawPosition = { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 };
+    const tracked = new Map<string, PaperPosition>();
+    const closePosition = vi.fn(async () => {
+      throw new Error("eToro temporarily unreachable");
+    });
+    const broker = {
+      getAccount: (): Account => ({ cashBalance: 1_000_000, startingCashBalance: 1_000_000 }),
+      getOpenPositions: (): PaperPosition[] => [...tracked.values()],
+      getCompletedTrades: (): CompletedTrade[] => [],
+      resolveInstrument: async (_term: string) => ({ instrumentId: 100000 }),
+      getRate: async (_instrument: string) => ({ bid: 100, ask: 100.05 }),
+      getRawPortfolio: async () => ({ clientPortfolio: { positions: [rawPosition], credit: 1_000_000 } }),
+      adoptPosition: (
+        raw: typeof rawPosition,
+        internalInstrument: string,
+        strategyContext: { strategyId: string; strategyVersion: number; sourceType: InternalStrategy["sourceType"] },
+      ): PaperPosition => {
+        const position: PaperPosition = {
+          positionId: "adopted-position-1",
+          strategyId: strategyContext.strategyId,
+          strategyVersion: strategyContext.strategyVersion,
+          sourceType: strategyContext.sourceType,
+          instrument: internalInstrument,
+          side: raw.isBuy === false ? "SELL" : "BUY",
+          quantity: raw.amount,
+          entryPrice: raw.openRate,
+          entryTimestamp: NOW.toISOString(),
+          entryOrderId: String(raw.orderID),
+          brokerPositionId: String(raw.positionID),
+        };
+        tracked.set(position.positionId, position);
+        return position;
+      },
+      placeMarketOrder: vi.fn(),
+      closePosition,
+    };
+
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "UNITS",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      entryPrice: 64_948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    const { runtime, clock, auditTrail } = makeRuntime({ broker: broker as never, lifecycleStore, killSwitchEnabled: true });
+    await runtime.start();
+    await clock.advance(0);
+
+    const status = runtime.getStatus();
+    expect(status.lastResult?.exitClosed).toBe(false);
+    // Duplicate-submission guard. Phase A attempts the close once (and fails); Phase B re-evaluates
+    // the SAME fixed KILL_SWITCH trigger (still enabled, deterministically fires again) but must
+    // defer rather than resubmit — closePosition is called exactly once this cycle, never twice.
+    expect(closePosition).toHaveBeenCalledOnce();
+
+    const record = await lifecycleStore.getById("lifecycle-1");
+    expect(record?.status).toBe("CLOSE_FAILED");
+    expect(record?.error?.message).toMatch(/temporarily unreachable/);
+    expect(record?.error?.context?.failureKind).toBe("BROKER_CLOSE_REJECTED");
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events.filter((e) => e === "AUTOMATIC_EXIT_TRIGGERED")).toHaveLength(1); // Phase A only — Phase B never re-fires it
+    expect(events).toContain("AUTOMATIC_EXIT_RETRY_DEFERRED"); // Phase B's own explicit "deferring, not resubmitting" record
+    expect(events).toContain("TRADE_CLOSE_FAILED");
+    expect(events.filter((e) => e === "TRADE_CLOSE_FAILED")).toHaveLength(1); // never a second, duplicate failure record either
+    expect(events).not.toContain("TRADE_CLOSED");
+
+    await runtime.stop();
+  });
+
+  // CLOSE_FAILED retry safety. A close attempt that failed one cycle must be automatically retried
+  // — and succeed — on the very next scheduled cycle, once the underlying problem (here, a
+  // transient broker error) clears, without any manual intervention or duplicate broker order.
+  it("a CLOSE_FAILED position is retried and successfully closed on the next scheduled cycle", async () => {
+    const rawPosition = { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: 10, openRate: 64_948.33 };
+    const tracked = new Map<string, PaperPosition>();
+    let attempt = 0;
+    const closePosition = vi.fn(async (positionId: string, exitPrice: number, exitTimestamp: string, closeReason: string) => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("eToro temporarily unreachable");
+      const position = tracked.get(positionId)!;
+      tracked.delete(positionId);
+      const trade: CompletedTrade = {
+        tradeId: `trade-${positionId}`,
+        positionId,
+        strategyId: position.strategyId,
+        strategyVersion: position.strategyVersion,
+        sourceType: position.sourceType,
+        instrument: position.instrument,
+        side: position.side,
+        quantity: position.quantity,
+        entryPrice: position.entryPrice,
+        entryTimestamp: position.entryTimestamp,
+        entryOrderId: position.entryOrderId,
+        exitPrice,
+        exitTimestamp,
+        exitOrderId: `close-${positionId}`,
+        realisedPnl: exitPrice - position.entryPrice,
+        closeReason,
+      };
+      return { trade, orderId: `close-${positionId}` };
+    });
+    const broker = {
+      getAccount: (): Account => ({ cashBalance: 1_000_000, startingCashBalance: 1_000_000 }),
+      getOpenPositions: (): PaperPosition[] => [...tracked.values()],
+      getCompletedTrades: (): CompletedTrade[] => [],
+      resolveInstrument: async (_term: string) => ({ instrumentId: 100000 }),
+      getRate: async (_instrument: string) => ({ bid: 100, ask: 100.05 }),
+      getRawPortfolio: async () => ({ clientPortfolio: { positions: [rawPosition], credit: 1_000_000 } }),
+      adoptPosition: (
+        raw: typeof rawPosition,
+        internalInstrument: string,
+        strategyContext: { strategyId: string; strategyVersion: number; sourceType: InternalStrategy["sourceType"] },
+      ): PaperPosition => {
+        const position: PaperPosition = {
+          positionId: "adopted-position-1",
+          strategyId: strategyContext.strategyId,
+          strategyVersion: strategyContext.strategyVersion,
+          sourceType: strategyContext.sourceType,
+          instrument: internalInstrument,
+          side: raw.isBuy === false ? "SELL" : "BUY",
+          quantity: raw.amount,
+          entryPrice: raw.openRate,
+          entryTimestamp: NOW.toISOString(),
+          entryOrderId: String(raw.orderID),
+          brokerPositionId: String(raw.positionID),
+        };
+        tracked.set(position.positionId, position);
+        return position;
+      },
+      placeMarketOrder: vi.fn(),
+      closePosition,
+    };
+
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "UNITS",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      entryPrice: 64_948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    const { runtime, clock } = makeRuntime({ broker: broker as never, lifecycleStore, killSwitchEnabled: true, intervalMs: 10_000 });
+    await runtime.start();
+    await clock.advance(0); // cycle 1: broker rejects, record becomes CLOSE_FAILED
+
+    expect((await lifecycleStore.getById("lifecycle-1"))?.status).toBe("CLOSE_FAILED");
+    expect(closePosition).toHaveBeenCalledOnce();
+
+    await clock.advance(10_000); // cycle 2: reconciliation reverts CLOSE_FAILED -> OPEN and re-registers with the broker; the retry succeeds
+
+    const status = runtime.getStatus();
+    expect(status.lastResult?.exitClosed).toBe(true);
+    expect(closePosition).toHaveBeenCalledTimes(2); // one failed attempt, one successful retry — never more
+
+    const record = await lifecycleStore.getById("lifecycle-1");
+    expect(record?.status).toBe("CLOSED");
+    expect(typeof record?.realisedPnl).toBe("number");
+
+    await runtime.stop();
+  });
 });
 
 // Restart-Resilient Autonomy Phase — cycle-ordering hardening (safety-review pass). Covers the

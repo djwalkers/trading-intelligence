@@ -308,6 +308,22 @@ export type AuditEventType =
   // POSITION_CLOSED/REALISED_PNL (existing, unchanged) still fire from inside the broker's own
   // closePosition — never duplicated here.
   | "AUTOMATIC_EXIT_TRIGGERED"
+  // Kill-switch exit defect fix. Fired ONLY for the crash-window case: broker.closePosition()
+  // already CONFIRMED the close (POSITION_CLOSED/REALISED_PNL already fired from inside it) but the
+  // subsequent local lifecycle-persistence step (recordClosed) itself then failed. Preserves the
+  // broker's own confirmed exitPrice/realisedPnl/closeReason in the audit trail — the one durable
+  // place they are not lost — distinct from TRADE_CLOSE_FAILED (which also fires immediately after,
+  // scoped to "this record is now CLOSE_FAILED") because a reader must be able to tell "the broker
+  // never actually closed this, retrying with a fresh close is safe" (an ordinary TRADE_CLOSE_FAILED
+  // with no matching event of this type) apart from "the broker DID close this — never resubmit a
+  // close for it; only reconciliation's own broker-absent path may resolve it now."
+  | "AUTOMATIC_EXIT_BROKER_CONFIRMED_PERSISTENCE_FAILED"
+  // Kill-switch exit defect fix — duplicate-submission guard. Fired in trading-runtime.ts's own
+  // Phase B when a fixed exit trigger (KILL_SWITCH/STOP_LOSS/TAKE_PROFIT/STRATEGY_DISABLED/
+  // MAX_HOLDING_DURATION) fires again for a position whose Phase A close attempt THIS SAME cycle
+  // already failed — deliberately never resubmitted a second time within one cycle (the failed
+  // attempt is already durably CLOSE_FAILED and retries on the next scheduled cycle instead).
+  | "AUTOMATIC_EXIT_RETRY_DEFERRED"
   // Restart-Resilient Autonomy Phase — trade-approval/trade-candidate-service.ts. Fired ONLY for an
   // AUTO_DEMO auto-approval, always in addition to (never instead of) the existing
   // TRADE_CANDIDATE_APPROVED event approveTradeCandidate() itself already emits for every approval,

@@ -123,6 +123,62 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Kill-switch exit defect fix. Root cause: reconciliation's own "an existing durable record already
+ * references this exact broker position, and the broker confirms it's still live" branches
+ * (OPEN/CLOSE_REQUESTED direct match, and CLOSE_FAILED reverted to OPEN for retry) previously
+ * returned success WITHOUT ever calling broker.adoptPosition(...) — unlike the orphan-adoption
+ * branch just below them in the same function, which always does. adoptPosition is what registers a
+ * position into the broker ADAPTER's own in-memory trackedPositions map (EtoroDemoBroker's own doc
+ * comment); getOpenPositions()/closePosition() can only ever find a position that map already knows
+ * about. A brand-new broker instance's own trackedPositions map starts empty after every process
+ * restart, regardless of what the durable lifecycleStore already knows — so a position whose
+ * lifecycle record survives a restart (the exact case durable persistence exists for) was
+ * reconciled as "open" yet remained permanently invisible to every later close attempt for as long
+ * as that broker instance lived, silently failing with a misleading "already closed" reason on every
+ * single cycle (kill-switch, stop-loss, take-profit — any automatic-exit trigger, not kill-switch-
+ * specific).
+ *
+ * Idempotent: only calls adoptPosition when the broker adapter does NOT already know about this
+ * exact brokerPositionId (via its own getOpenPositions()) — guards against creating a SECOND,
+ * duplicate internally-tracked entry for the same real position on every cycle, which would happen
+ * unconditionally otherwise (adoptPosition always mints a fresh internal positionId — see
+ * EtoroDemoBroker.adoptPosition's own doc comment). Covers both the common case (this exact process
+ * already opened or previously adopted the position — nothing to do) and the restart case (this
+ * broker instance has never heard of it — adopt it now).
+ *
+ * Code-review fix: mirrors the orphan-adoption branch's own fail-closed amount/openRate guard
+ * (below, in the main function) rather than assuming the broker always reports complete fields —
+ * without this, a broker position missing amount/openRate would make EtoroDemoBroker.adoptPosition's
+ * own assertValidAmount throw synchronously, escaping as an uncaught exception instead of the clear,
+ * audited BROKER_RECONCILIATION_FAILED result every other controlled failure in this module produces.
+ */
+function ensureRegisteredWithBroker(
+  broker: PaperBroker,
+  raw: RawPortfolioPosition,
+  instrument: string,
+  strategy: InternalStrategy,
+): { ok: true } | { ok: false; reason: string } {
+  if (!hasPositionAdoption(broker)) return { ok: true };
+  const brokerPositionId = String(raw.positionID);
+  const alreadyKnown = broker.getOpenPositions().some((p) => p.brokerPositionId === brokerPositionId);
+  if (alreadyKnown) return { ok: true };
+  if (raw.amount === undefined || raw.openRate === undefined) {
+    return {
+      ok: false,
+      reason:
+        `Broker position ${brokerPositionId} for "${instrument}" is missing its own reported amount/openRate — ` +
+        `refusing to register it with the broker adapter without genuine entry data.`,
+    };
+  }
+  broker.adoptPosition(raw, instrument, {
+    strategyId: strategy.strategyId,
+    strategyVersion: strategy.version,
+    sourceType: strategy.sourceType,
+  });
+  return { ok: true };
+}
+
 /** Mirrors trade-lifecycle-store.ts's own ACTIVE_BROKER_POSITION_STATUSES: statuses that mean "a
  * real broker position genuinely exists (or very recently did) for this record," PLUS
  * EXECUTION_RECONCILIATION_REQUIRED — a genuinely ambiguous crash-window record (see
@@ -190,6 +246,16 @@ interface ReconcileMismatchInput {
  * CLOSED_UNRECONCILED (broker evidence is authoritative for OPEN/CLOSE_REQUESTED/CLOSE_FAILED —
  * none of those require exit economics this runtime doesn't have) or fails closed if the record is
  * in some other status this function does not recognise as safely resolvable.
+ *
+ * Known, narrow limitation (code-review finding, kill-switch exit defect fix): when a CLOSE_FAILED
+ * record arrives here because the broker genuinely already confirmed the close but the LOCAL
+ * persistence step failed right after (exit-monitor.ts's own crash-window handling — see
+ * AUTOMATIC_EXIT_BROKER_CONFIRMED_PERSISTENCE_FAILED), the real exitPrice/realisedPnl WAS known at
+ * that moment and is preserved in that audit event, but this function has no way to recover it from
+ * here — it resolves to CLOSED_UNRECONCILED exactly as it would for a genuinely-unknown case,
+ * "unknown" here really meaning "not available to THIS function," not "never existed." The position
+ * itself is correctly, safely terminal either way; only P/L reporting built from lifecycle records
+ * (not the audit trail) is affected for this specific, rare case.
  */
 async function reconcileLocalActiveButBrokerAbsent(input: ReconcileMismatchInput): Promise<ReconcileBrokerPositionResult> {
   const { localRecord, strategy, brokerProvider, instrument, lifecycleStore, tradeCandidateRepository, auditTrail, executionRunId, now } = input;
@@ -437,6 +503,25 @@ export async function reconcileBrokerPosition(input: ReconcileBrokerPositionInpu
   const existing = matchingRecords[0];
   if (existing) {
     if (existing.status === "OPEN" || existing.status === "CLOSE_REQUESTED") {
+      // Kill-switch exit defect fix. Root cause: this branch used to return success without ever
+      // registering the position with the broker ADAPTER itself — see ensureRegisteredWithBroker's
+      // own doc comment below for the full explanation. Without this, a position whose lifecycle
+      // record survives a restart (the very case durable persistence exists for) is confirmed
+      // "open" by reconciliation yet invisible to broker.getOpenPositions(), so every later close
+      // attempt (kill-switch or any other trigger) silently fails, reporting a misleading "already
+      // closed" reason despite the position genuinely still being open.
+      const registration = ensureRegisteredWithBroker(broker, raw, instrument, strategy);
+      if (!registration.ok) {
+        await auditTrail.record({
+          timestamp: now.toISOString(),
+          eventType: "BROKER_RECONCILIATION_FAILED",
+          executionRunId,
+          strategyId: strategy.strategyId,
+          instrument,
+          details: { reason: registration.reason, brokerProvider, brokerPositionId, lifecycleRecordId: existing.id },
+        });
+        return { ok: false, reason: registration.reason };
+      }
       await auditTrail.record({
         timestamp: now.toISOString(),
         eventType: "BROKER_POSITION_RECONCILED",
@@ -449,6 +534,25 @@ export async function reconcileBrokerPosition(input: ReconcileBrokerPositionInpu
     }
 
     if (existing.status === "CLOSE_FAILED") {
+      // Kill-switch exit defect fix — same reasoning as the OPEN/CLOSE_REQUESTED branch above: a
+      // CLOSE_FAILED record reverted for retry is exactly as likely to be facing a fresh broker
+      // instance (post-restart) that has never heard of this position. Checked BEFORE the revert
+      // below is persisted, so a registration failure never leaves a record reverted to OPEN with
+      // no broker registration behind it (which would just recreate the original defect for this
+      // one edge case).
+      const registration = ensureRegisteredWithBroker(broker, raw, instrument, strategy);
+      if (!registration.ok) {
+        await auditTrail.record({
+          timestamp: now.toISOString(),
+          eventType: "BROKER_RECONCILIATION_FAILED",
+          executionRunId,
+          strategyId: strategy.strategyId,
+          instrument,
+          details: { reason: registration.reason, brokerProvider, brokerPositionId, lifecycleRecordId: existing.id },
+        });
+        return { ok: false, reason: registration.reason };
+      }
+
       // The prior close attempt failed, but the broker confirms the position is still genuinely
       // live — safe to retry: revert to OPEN (a real, validated transition) so the normal
       // automatic-exit path re-evaluates and re-attempts the close next, rather than either

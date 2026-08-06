@@ -220,6 +220,168 @@ describe("reconcileBrokerPosition — restart survival (scenario 3)", () => {
     expect(events).toEqual(["BROKER_POSITION_DISCOVERED", "BROKER_POSITION_RECONCILED"]);
     expect(events).not.toContain("BROKER_POSITION_ORPHANED");
   });
+
+  // Kill-switch exit defect — root cause reproduction. reconcileBrokerPosition() itself reports
+  // success (positionOpen: true, the correct durable record) for a position that survived a
+  // restart and is re-matched via the "existing OPEN record, broker confirms it's still live"
+  // branch (position-reconciliation.ts's own `if (existing.status === "OPEN" ...)`) — but that
+  // branch, unlike the orphan-adoption branch just below it in the same function, never calls
+  // broker.adoptPosition(...). The brand-new broker instance's own trackedPositions map is left
+  // empty, so a LATER close attempt (executeAutomaticExit in exit-monitor.ts) can never find this
+  // position via broker.getOpenPositions() and fails with a misleading "already closed" reason —
+  // even though the position is genuinely still open. This test proves the gap directly: the
+  // broker adapter itself must be able to list/close this position after reconciliation, and today
+  // it cannot.
+  it("a position re-matched via the existing-OPEN-record branch is registered with the broker adapter, so a later close attempt can find it", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const rawPosition: FakeRawPosition = {
+      positionID: 3568040809,
+      orderID: 369015901,
+      instrumentID: 100000,
+      isBuy: true,
+      amount: 10,
+      openRate: 64948.33,
+    };
+
+    // The durable record already exists BEFORE this broker instance is ever constructed — exactly
+    // "a position opened by an earlier process, this one is fresh after a restart."
+    const existingRecord: TradeLifecycleRecord = {
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "NOTIONAL",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      openedAt: "2026-01-01T00:00:00.000Z",
+      entryPrice: 64948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    };
+    await lifecycleStore.create(existingRecord);
+
+    const broker = makeFakeEtoroLikeBroker([rawPosition]);
+
+    const result = await reconcileBrokerPosition(baseInput({ broker, lifecycleStore }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.positionOpen).toBe(true);
+
+    // Kill-switch exit defect — root cause. Reconciliation reporting positionOpen: true is not
+    // enough on its own: the broker adapter that a later close attempt (executeAutomaticExit in
+    // exit-monitor.ts) will actually query via getOpenPositions() must ALSO know about this
+    // position, or that close attempt fails with a misleading "already closed" reason despite the
+    // position genuinely still being open.
+    const brokerOpenPositions = broker.getOpenPositions();
+    expect(brokerOpenPositions).toHaveLength(1);
+    expect(brokerOpenPositions[0]?.brokerPositionId).toBe("3568040809");
+  });
+
+  // Code-review fix — idempotency. adoptPosition always mints a FRESH internal positionId, so
+  // calling it unconditionally on every cycle would create a second, duplicate tracked entry for
+  // the same real broker position every time reconciliation re-confirms it. Proves the guard: a
+  // second reconcileBrokerPosition() call against the SAME broker instance never re-registers.
+  it("does not re-register an already-registered position on a second reconciliation pass against the same broker instance", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    const rawPosition: FakeRawPosition = {
+      positionID: 3568040809,
+      orderID: 369015901,
+      instrumentID: 100000,
+      isBuy: true,
+      amount: 10,
+      openRate: 64948.33,
+    };
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "NOTIONAL",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      openedAt: "2026-01-01T00:00:00.000Z",
+      entryPrice: 64948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    const broker = makeFakeEtoroLikeBroker([rawPosition]);
+
+    const first = await reconcileBrokerPosition(baseInput({ broker, lifecycleStore }));
+    expect(first.ok).toBe(true);
+    expect(broker.getOpenPositions()).toHaveLength(1);
+
+    // Second cycle, same (never-restarted) broker instance — the broker adapter already knows
+    // about this position from the first call.
+    const second = await reconcileBrokerPosition(baseInput({ broker, lifecycleStore }));
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("unreachable");
+    expect(second.positionOpen).toBe(true);
+
+    // Still exactly one tracked entry — never a duplicate.
+    expect(broker.getOpenPositions()).toHaveLength(1);
+    expect(broker.getOpenPositions()[0]?.brokerPositionId).toBe("3568040809");
+  });
+
+  // Code-review fix — fail closed rather than an uncaught exception. Mirrors the orphan-adoption
+  // branch's own amount/openRate guard: EtoroDemoBroker.adoptPosition's own assertValidAmount
+  // throws synchronously for an incomplete broker DTO, so this must be checked BEFORE ever calling
+  // adoptPosition, not left to propagate as an uncaught exception out of reconcileBrokerPosition.
+  it("fails closed with BROKER_RECONCILIATION_FAILED (never an uncaught exception) when a broker position needing registration is missing amount/openRate", async () => {
+    const lifecycleStore = new InMemoryTradeLifecycleStore();
+    await lifecycleStore.create({
+      id: "lifecycle-1",
+      brokerProvider: "etoro-demo",
+      strategyId: "DEMO-0001",
+      strategyVersion: 1,
+      symbol: "BTC",
+      side: "BUY",
+      quantity: 10,
+      sizingMode: "NOTIONAL",
+      decision: "BUY",
+      confidence: 0.8,
+      decisionReasons: ["seed"],
+      status: "OPEN",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      openedAt: "2026-01-01T00:00:00.000Z",
+      entryPrice: 64948.33,
+      brokerPositionId: "3568040809",
+      brokerOrderId: "369015901",
+    });
+
+    // A brand-new broker instance (post-restart, nothing registered yet) whose own raw portfolio
+    // read is missing amount/openRate for this position — a genuinely incomplete eToro response.
+    const broker = makeFakeEtoroLikeBroker([
+      { positionID: 3568040809, orderID: 369015901, instrumentID: 100000, isBuy: true, amount: undefined, openRate: undefined },
+    ]);
+    const auditTrail = new InMemoryAuditTrail();
+
+    const result = await reconcileBrokerPosition(baseInput({ broker, lifecycleStore, auditTrail }));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toMatch(/missing its own reported amount\/openRate/);
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("BROKER_RECONCILIATION_FAILED");
+    expect(broker.getOpenPositions()).toEqual([]); // never registered with incomplete data
+  });
 });
 
 describe("reconcileBrokerPosition — ambiguous/failed broker state fails closed", () => {

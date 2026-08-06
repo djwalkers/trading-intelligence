@@ -384,10 +384,19 @@ describe("executeAutomaticExit — transient failure never produces a duplicate 
 
     const stored = await store.getById(record.id);
     expect(stored?.status).toBe("CLOSE_FAILED");
+    // Never fabricated — the broker call itself threw, so no exit price/realised P&L exists.
+    expect(stored?.exitPrice).toBeUndefined();
+    expect(stored?.realisedPnl).toBeUndefined();
   });
 
-  it("finds nothing to close (closed: false, broker never called again) once the position is genuinely already gone", async () => {
-    const broker = makeMockBroker([]); // position already closed — broker reports nothing open
+  // Kill-switch exit defect fix. Previously this case returned {closed:false} with NO lifecycle
+  // transition and no dedicated audit event — a silently swallowed failure indistinguishable from
+  // "nothing to do." Since this function is only ever called for a record the caller believes is
+  // genuinely still open, "not found" here is always an anomaly worth surfacing as CLOSE_FAILED
+  // (retryable, visible) — never a silent no-op — regardless of whether the record was already at
+  // CLOSE_REQUESTED (as here) or still OPEN.
+  it("persists CLOSE_FAILED with a specific, actionable reason (never a silent no-op) when the broker adapter has no matching open position", async () => {
+    const broker = makeMockBroker([]); // broker adapter reports nothing open for this position
     const { store, service, auditTrail } = makeLifecycleService();
     const record = makeRecord({ status: "CLOSE_REQUESTED" }); // a prior attempt already got this far
     await store.create(record);
@@ -403,6 +412,123 @@ describe("executeAutomaticExit — transient failure never produces a duplicate 
     });
 
     expect(result.closed).toBe(false);
+    if (result.closed) throw new Error("unreachable");
+    expect(result.reason).toMatch(/no open position matching lifecycle record/i);
+    expect(broker.closePosition).not.toHaveBeenCalled(); // never a duplicate/fresh close order for an unregistered position
+
+    const stored = await store.getById(record.id);
+    expect(stored?.status).toBe("CLOSE_FAILED");
+    expect(stored?.error?.context?.failureKind).toBe("POSITION_NOT_FOUND_AT_BROKER_ADAPTER");
+    // Never fabricated — no broker close was ever confirmed, so no exit price/realised P&L exists.
+    expect(stored?.exitPrice).toBeUndefined();
+    expect(stored?.realisedPnl).toBeUndefined();
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toContain("TRADE_CLOSE_FAILED");
+  });
+
+  it("transitions OPEN -> CLOSE_REQUESTED -> CLOSE_FAILED (never OPEN -> CLOSE_FAILED directly) when the position is not found at the broker adapter", async () => {
+    const broker = makeMockBroker([]);
+    const { store, service, auditTrail } = makeLifecycleService();
+    const record = makeRecord({ status: "OPEN" });
+    await store.create(record);
+
+    await executeAutomaticExit({
+      broker: broker as never,
+      record,
+      trigger: "STOP_LOSS",
+      lifecycleService: service,
+      auditTrail,
+      executionRunId: "test-run",
+      now: new Date("2026-01-01T01:00:00.000Z"),
+    });
+
+    const events = (await auditTrail.getEvents()).map((e) => e.eventType);
+    expect(events).toEqual(["AUTOMATIC_EXIT_TRIGGERED", "TRADE_CLOSE_REQUESTED", "TRADE_CLOSE_FAILED"]);
+  });
+});
+
+describe("executeAutomaticExit — lifecycle persistence fails BEFORE any broker submission", () => {
+  it("never calls the broker at all when recordCloseRequested itself fails — the record stays OPEN and safely retryable next cycle", async () => {
+    const openPositions = [makeOpenPosition()];
+    const broker = makeMockBroker(openPositions, { bid: 66_100, ask: 66_105 });
+    const auditTrail = new InMemoryAuditTrail();
+    const store = new InMemoryTradeLifecycleStore();
+    const service = new TradeLifecycleService({ store, auditTrail, executionRunId: "test-run" });
+    const record = makeRecord({ status: "OPEN" });
+    await store.create(record);
+
+    vi.spyOn(service, "recordCloseRequested").mockRejectedValueOnce(new Error("Supabase write timed out"));
+
+    await expect(
+      executeAutomaticExit({
+        broker: broker as never,
+        record,
+        trigger: "STOP_LOSS",
+        lifecycleService: service,
+        auditTrail,
+        executionRunId: "test-run",
+        now: new Date("2026-01-01T01:00:00.000Z"),
+      }),
+    ).rejects.toThrow(/Supabase write timed out/);
+
+    // The broker was never touched — nothing to undo, and the record (still OPEN in the durable
+    // store, since the failed write never took effect) will be re-evaluated exactly like any other
+    // OPEN position next cycle.
     expect(broker.closePosition).not.toHaveBeenCalled();
+    const stored = await store.getById(record.id);
+    expect(stored?.status).toBe("OPEN");
+  });
+});
+
+describe("executeAutomaticExit — crash window between broker confirmation and local persistence", () => {
+  it("never reports success, and preserves the broker's confirmed exit data in a dedicated audit event, when recordClosed itself fails after the broker already confirmed the close", async () => {
+    const openPositions = [makeOpenPosition()];
+    const broker = makeMockBroker(openPositions, { bid: 66_100, ask: 66_105 });
+    const auditTrail = new InMemoryAuditTrail();
+    const store = new InMemoryTradeLifecycleStore();
+    const service = new TradeLifecycleService({ store, auditTrail, executionRunId: "test-run" });
+    const record = makeRecord();
+    await store.create(record);
+
+    // Simulates the local persistence step itself failing AFTER the broker already confirmed the
+    // close (broker.closePosition() above already resolved successfully) — e.g. a transient
+    // Supabase write failure right after a genuinely successful broker close.
+    const recordClosedSpy = vi.spyOn(service, "recordClosed").mockRejectedValueOnce(new Error("Supabase write timed out"));
+
+    const result = await executeAutomaticExit({
+      broker: broker as never,
+      record,
+      trigger: "TAKE_PROFIT",
+      lifecycleService: service,
+      auditTrail,
+      executionRunId: "test-run",
+      now: new Date("2026-01-01T01:00:00.000Z"),
+    });
+
+    expect(result.closed).toBe(false); // never reports success
+    if (result.closed) throw new Error("unreachable");
+    expect(result.reason).toMatch(/broker confirmed the close but local persistence failed/i);
+
+    // The broker call itself genuinely happened and succeeded — never resubmitted.
+    expect(broker.closePosition).toHaveBeenCalledOnce();
+
+    // The confirmed broker result (exitPrice/realisedPnl/closeReason) is preserved in a dedicated,
+    // distinct audit event — never silently discarded just because the record write itself failed.
+    const confirmedEvent = (await auditTrail.getEvents()).find((e) => e.eventType === "AUTOMATIC_EXIT_BROKER_CONFIRMED_PERSISTENCE_FAILED");
+    expect(confirmedEvent).toBeDefined();
+    expect(confirmedEvent?.details.confirmedExitPrice).toBe(66_100);
+    expect(typeof confirmedEvent?.details.confirmedRealisedPnl).toBe("number");
+
+    const stored = await store.getById(record.id);
+    expect(stored?.status).toBe("CLOSE_FAILED");
+    expect(stored?.error?.context?.failureKind).toBe("BROKER_CONFIRMED_BUT_PERSISTENCE_FAILED");
+    // The durable RECORD's own exitPrice/realisedPnl fields are never fabricated by THIS module —
+    // recordClosed (the only path that ever sets them) is exactly what just failed. The confirmed
+    // figures live only in the immutable audit event above, never invented onto the record itself.
+    expect(stored?.exitPrice).toBeUndefined();
+    expect(stored?.realisedPnl).toBeUndefined();
+
+    recordClosedSpy.mockRestore();
   });
 });
