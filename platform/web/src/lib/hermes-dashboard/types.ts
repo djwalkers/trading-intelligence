@@ -55,7 +55,16 @@ export interface HermesPositionsData {
 
 export interface HermesSummaryData {
   timestamp: string;
-  health: { status: string; runtimeMode: string; brokerProvider: string };
+  health: {
+    status: string;
+    runtimeMode: string;
+    brokerProvider: string;
+    // Runtime Processes panel (Operations Centre). Additive fields — null whenever the server's
+    // own HermesExecutionConfig failed to load, never a guessed default.
+    killSwitchEnabled: boolean | null;
+    schedulerEnabled: boolean | null;
+    schedulerIntervalMs: number | null;
+  };
   runtime: { state: string; lastRunAt: string | null; successfulRunCount: number; failedRunCount: number } | null;
   openPositionCount: number | null;
   latestDecision: { timestamp: string; symbol: string; outcome: string; confidence: number | null } | null;

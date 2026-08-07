@@ -3,6 +3,7 @@ import { SectionPanel } from "@/components/ui/SectionPanel";
 import { InfoNote } from "@/components/ui/InfoNote";
 import { PlatformHealthOverview } from "@/components/system-health/PlatformHealthOverview";
 import { HermesAgentStatusPanel } from "@/components/system-health/HermesAgentStatusPanel";
+import { RuntimeProcessesPanel } from "@/components/system-health/RuntimeProcessesPanel";
 import { DatabaseStatusPanel } from "@/components/system-health/DatabaseStatusPanel";
 import { AuthStatusPanel } from "@/components/system-health/AuthStatusPanel";
 import { MarketDataStatusPanel } from "@/components/system-health/MarketDataStatusPanel";
@@ -52,6 +53,13 @@ export default function SystemHealthPage() {
         description="Three distinct, real statuses — the official Hermes Agent, the trading runtime process, and the eToro broker connection. A running runtime does not by itself confirm Hermes Agent is healthy."
       >
         <HermesAgentStatusPanel />
+      </SectionPanel>
+
+      <SectionPanel
+        title="Runtime Processes"
+        description="Is the operating-system process alive, monitored via PM2 — separate from whether the Hermes trading runtime itself is completing cycles"
+      >
+        <RuntimeProcessesPanel />
       </SectionPanel>
 
       <SectionPanel

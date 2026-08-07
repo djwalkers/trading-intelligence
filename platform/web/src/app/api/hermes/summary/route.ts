@@ -167,6 +167,14 @@ export async function GET(request: NextRequest) {
         status: overallHealth,
         runtimeMode: config?.runtimeTrading.mode ?? "unknown",
         brokerProvider: config?.brokerProvider ?? "unknown",
+        // Runtime Processes panel (Operations Centre). Additive only — both already exist on the
+        // same `config` object this route already reads above for runtimeMode/brokerProvider; no
+        // new business logic, no new Supabase call. `null` (never a guessed default) whenever
+        // config itself failed to load, matching this object's own existing "unknown"/null
+        // convention for every other config-derived field here.
+        killSwitchEnabled: config?.killSwitchEnabled ?? null,
+        schedulerEnabled: config?.scheduler?.enabled ?? null,
+        schedulerIntervalMs: config?.scheduler?.intervalMs ?? null,
       },
       runtime: runtimeSummary,
       portfolio,

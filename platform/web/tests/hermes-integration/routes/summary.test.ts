@@ -52,7 +52,13 @@ function makeRequest(): NextRequest {
   });
 }
 
-const BASE_CONFIG = { runtimeTrading: { mode: "demo" }, brokerProvider: "etoro-demo", marketDataProvider: "live" };
+const BASE_CONFIG = {
+  runtimeTrading: { mode: "demo" },
+  brokerProvider: "etoro-demo",
+  marketDataProvider: "live",
+  killSwitchEnabled: false,
+  scheduler: { enabled: true, intervalMs: 60_000 },
+};
 
 describe("GET /api/hermes/summary — subsystem failure degradation", () => {
   beforeEach(() => {
@@ -313,5 +319,70 @@ describe("GET /api/hermes/summary — realised P/L restart consistency", () => {
     expect(sumRealisedPnlForClosedTradesMock).toHaveBeenCalledWith();
     expect(countUnreconciledClosedTradesMock).toHaveBeenCalledTimes(1);
     expect(countUnreconciledClosedTradesMock).toHaveBeenCalledWith();
+  });
+});
+
+// Runtime Processes panel (Operations Centre). Additive fields on the existing `health` object —
+// sourced from the SAME HermesExecutionConfig the route already reads for runtimeMode/
+// brokerProvider, never a new business-logic path or Supabase call.
+describe("GET /api/hermes/summary — killSwitchEnabled / schedulerEnabled / schedulerIntervalMs (Runtime Processes panel)", () => {
+  beforeEach(() => {
+    process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
+    resetHermesIntegrationConfigCacheForTests();
+    vi.clearAllMocks();
+    mockGetBrokerSnapshot.mockResolvedValue({ ok: true, provider: "etoro-demo", accountMode: "demo", cash: 100, positions: [], positionsAreLiveGroundTruth: true });
+    mockReadAuditLog.mockResolvedValue({ events: [], available: true });
+    buildAnalysisPersistenceConfigMock.mockReturnValue({ enabled: false, ownerUserId: undefined });
+  });
+
+  afterEach(() => {
+    if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
+    else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
+    resetHermesIntegrationConfigCacheForTests();
+  });
+
+  it("surfaces killSwitchEnabled: true when the kill switch is on", async () => {
+    mockGetConfig.mockReturnValue({ ...BASE_CONFIG, killSwitchEnabled: true });
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.health.killSwitchEnabled).toBe(true);
+  });
+
+  it("surfaces killSwitchEnabled: false when the kill switch is off", async () => {
+    mockGetConfig.mockReturnValue({ ...BASE_CONFIG, killSwitchEnabled: false });
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.health.killSwitchEnabled).toBe(false);
+  });
+
+  it("surfaces schedulerEnabled and schedulerIntervalMs from config.scheduler", async () => {
+    mockGetConfig.mockReturnValue({ ...BASE_CONFIG, scheduler: { enabled: true, intervalMs: 60_000 } });
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.health.schedulerEnabled).toBe(true);
+    expect(body.data.health.schedulerIntervalMs).toBe(60_000);
+  });
+
+  it("surfaces schedulerEnabled: false with the configured interval still reported (interval is independent of the on/off flag)", async () => {
+    mockGetConfig.mockReturnValue({ ...BASE_CONFIG, scheduler: { enabled: false, intervalMs: 30_000 } });
+    const response = await GET(makeRequest());
+    const body = await response.json();
+    expect(body.data.health.schedulerEnabled).toBe(false);
+    expect(body.data.health.schedulerIntervalMs).toBe(30_000);
+  });
+
+  it("degrades all three new fields to null (never a guessed default) when config itself fails to load", async () => {
+    mockGetConfig.mockImplementation(() => {
+      throw new Error("bad config");
+    });
+    const response = await GET(makeRequest());
+    expect(response.status).toBe(200); // still ok:true overall — see the existing config-error degradation test
+    const body = await response.json();
+    expect(body.data.health.killSwitchEnabled).toBeNull();
+    expect(body.data.health.schedulerEnabled).toBeNull();
+    expect(body.data.health.schedulerIntervalMs).toBeNull();
   });
 });
