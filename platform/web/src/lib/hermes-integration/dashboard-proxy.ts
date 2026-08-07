@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getHermesIntegrationConfig } from "./config";
 import type { HermesErrorEnvelope } from "./response-envelope";
+import { logger } from "@/lib/logger/logger";
 
 // Main Dashboard Hermes/eToro fix. Every /api/hermes/* route requires a bearer token
 // (HERMES_INTEGRATION_TOKEN — see auth.ts's own doc comment: "there is no supported 'on, but
@@ -28,25 +29,38 @@ import type { HermesErrorEnvelope } from "./response-envelope";
 // HERMES_INTEGRATION_BASE_URL (config.baseUrl — see config.ts's own validation: required together
 // with the token, HTTPS-enforced for anything remote, trailing-slash-normalised) instead — `request`
 // itself is no longer needed to determine where to call.
+//
+// Runtime Processes split-deployment defect fix. The VPS-only PM2 collector (GET
+// /api/operations/processes — see its own route.ts) hit the exact same split-deployment problem
+// /api/hermes/* already had: the browser was calling it directly, so on Vercel it executed against
+// Vercel's own copy of that route, where no PM2 process exists ("The PM2 executable could not be
+// started on this server"). proxyOperationsProcessesGet below reuses this module's own bridge
+// unchanged — same HERMES_INTEGRATION_BASE_URL/HERMES_INTEGRATION_TOKEN pair, same error handling —
+// rather than inventing a second networking model; the two exported functions share one internal
+// `proxyGet` that only the upstream path differs between them.
+
+interface ProxyErrorLogContext {
+  upstreamPath: string;
+}
+
+function configErrorResponse(message: string): NextResponse<HermesErrorEnvelope> {
+  return NextResponse.json<HermesErrorEnvelope>(
+    { ok: false, error: { code: "CONFIG_ERROR", message }, meta: { timestamp: new Date().toISOString() } },
+    { status: 500 },
+  );
+}
 
 /**
- * Proxies one GET /api/hermes/<path> call for a same-origin dashboard route handler. `path` must
- * be a plain path segment (e.g. "portfolio") — never accepts caller-supplied input, so there is no
- * injection surface here; every call site passes a hard-coded literal.
+ * Proxies one GET `<upstreamPath>` call for a same-origin dashboard route handler, attaching the
+ * HERMES_INTEGRATION_TOKEN bearer token server-side. `upstreamPath` must always be a hard-coded
+ * literal at the call site (never derived from a request/caller) — see the two thin wrappers below.
  */
-export async function proxyHermesGet(path: string): Promise<NextResponse> {
+async function proxyGet(upstreamPath: string): Promise<NextResponse> {
   let config;
   try {
     config = getHermesIntegrationConfig();
   } catch (error) {
-    return NextResponse.json<HermesErrorEnvelope>(
-      {
-        ok: false,
-        error: { code: "CONFIG_ERROR", message: error instanceof Error ? error.message : "Hermes Integration API configuration error." },
-        meta: { timestamp: new Date().toISOString() },
-      },
-      { status: 500 },
-    );
+    return configErrorResponse(error instanceof Error ? error.message : "Hermes Integration API configuration error.");
   }
 
   if (!config) {
@@ -65,7 +79,7 @@ export async function proxyHermesGet(path: string): Promise<NextResponse> {
 
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/api/hermes/${path}`, config.baseUrl), {
+    upstream = await fetch(new URL(upstreamPath, config.baseUrl), {
       headers: { Authorization: `Bearer ${config.token}` },
       cache: "no-store",
     });
@@ -79,6 +93,8 @@ export async function proxyHermesGet(path: string): Promise<NextResponse> {
       { status: 502 },
     );
   }
+
+  logUpstreamAuthFailure(upstream.status, { upstreamPath });
 
   let body: unknown;
   try {
@@ -98,4 +114,36 @@ export async function proxyHermesGet(path: string): Promise<NextResponse> {
   }
 
   return NextResponse.json(body, { status: upstream.status });
+}
+
+// A 401/403 from the upstream almost always means the two sides' HERMES_INTEGRATION_TOKEN values
+// disagree (or one side lacks it entirely) — a configuration problem, not a real caller-facing
+// event. Logged server-side only, by status code and upstream path alone, so an operator can
+// diagnose it; the token itself is never logged, matching this API's own auth.ts convention (see
+// its own doc comment: unexpected-error logging never includes the credential, only a safe reason).
+function logUpstreamAuthFailure(status: number, context: ProxyErrorLogContext): void {
+  if (status !== 401 && status !== 403) return;
+  logger.warn("Dashboard proxy: upstream Hermes Integration API rejected the server-to-server request as unauthorized", {
+    component: "dashboard-proxy",
+    ...context,
+    upstreamStatus: status,
+  });
+}
+
+/**
+ * Proxies one GET /api/hermes/<path> call for a same-origin dashboard route handler. `path` must
+ * be a plain path segment (e.g. "portfolio") — never accepts caller-supplied input, so there is no
+ * injection surface here; every call site passes a hard-coded literal.
+ */
+export async function proxyHermesGet(path: string): Promise<NextResponse> {
+  return proxyGet(`/api/hermes/${path}`);
+}
+
+/**
+ * Proxies GET /api/operations/processes (the VPS-only PM2 process-health collector) for the
+ * browser-facing GET /api/dashboard/operations-processes route. No arguments — there is exactly one
+ * upstream path this ever calls, never parameterized by a caller.
+ */
+export async function proxyOperationsProcessesGet(): Promise<NextResponse> {
+  return proxyGet("/api/operations/processes");
 }

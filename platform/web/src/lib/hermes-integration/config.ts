@@ -22,10 +22,12 @@ import { ConfigError } from "@/lib/config/env";
 
 export interface HermesIntegrationConfig {
   token: string;
-  /** Normalised (trailing slash stripped) absolute URL `/api/hermes/*` is called against — see
-   * dashboard-proxy.ts, which appends its own literal "/api/hermes/<path>" after this. Always
-   * `http:`/`https:`; `https:` is enforced for anything other than a loopback host
-   * (localhost/127.0.0.1/::1) — see buildHermesIntegrationConfig's own validation. */
+  /** Normalised (trailing slash stripped) absolute URL of the VPS host dashboard-proxy.ts's
+   * server-to-server calls are made against — it appends its own literal upstream path after this
+   * (e.g. "/api/hermes/<path>" for proxyHermesGet, "/api/operations/processes" for
+   * proxyOperationsProcessesGet). Always `http:`/`https:`; `https:` is enforced for anything other
+   * than a loopback host (localhost/127.0.0.1/::1) — see buildHermesIntegrationConfig's own
+   * validation. */
   baseUrl: string;
 }
 

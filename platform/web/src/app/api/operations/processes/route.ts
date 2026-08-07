@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { ChildProcessPm2Runner } from "@/lib/operations/pm2-runner";
 import { mapPm2ProcessesToOperationsView } from "@/lib/operations/map-pm2-processes";
+import { requireHermesAuth } from "@/lib/hermes-integration/auth";
 import { logger } from "@/lib/logger/logger";
 
 // Runtime Processes panel — Operations Centre. GET /api/operations/processes: read-only PM2
@@ -10,21 +11,18 @@ import { logger } from "@/lib/logger/logger";
 // anything in `request` — no query parameter, header, or body is ever read here) and returns a
 // narrow, explicitly-modelled DTO.
 //
-// Auth. This app has no server-side session-validation mechanism at all today — no
-// `src/middleware.ts`, no `@supabase/ssr`/cookie-based session reader anywhere in the codebase
-// (confirmed by repository-wide search before writing this route). `AuthGate` (the mechanism that
-// gates PAGES behind sign-in) is a client-side-only React redirect; it cannot, and does not,
-// protect any API route. Every existing dashboard-facing data route in this app
-// (/api/dashboard/hermes-*, see dashboard-proxy.ts's own doc comment: "no token needed — this app
-// has no other multi-tenant concern at this layer") is consequently already same-origin-callable
-// with no bearer token, by explicit, established design — not an oversight this route introduces.
-// This route follows that exact same convention for this iteration, rather than inventing a new,
-// one-off authentication mechanism for a single endpoint. The response is kept narrow enough
-// (§ map-pm2-processes.ts: no pm2_env, no environment variables, no paths, no command lines) that
-// the impact of it being technically reachable without a session is low — but this IS a known,
-// pre-existing platform limitation, not a solved problem, and is not yet tracked in any backlog
-// document. If a real server-side session-validation mechanism is added to this app in the future,
-// this route (and every other same-origin dashboard route referenced above) should adopt it.
+// Split-deployment defect fix. This route only ever produces a real result on the VPS (the only
+// host PM2 actually runs on) — it must never be called directly by the browser, which may be
+// talking to an entirely different host (Vercel) where this route correctly, but uselessly, fails
+// with "the PM2 executable could not be started". The browser instead calls
+// GET /api/dashboard/operations-processes, which server-side-proxies here across hosts with a
+// bearer token attached — see dashboard-proxy.ts's own proxyOperationsProcessesGet. This route is
+// consequently no longer purely same-origin-dashboard-facing; it now has a legitimate
+// server-to-server caller, and is gated by requireHermesAuth — the exact same
+// HERMES_INTEGRATION_TOKEN bearer-token check every /api/hermes/* route already uses (not a new,
+// one-off auth mechanism). The response stays just as narrow as before regardless (§
+// map-pm2-processes.ts: no pm2_env, no environment variables, no paths, no command lines) — the
+// token check is a real access-control layer now, not merely a compensating control.
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +41,12 @@ function errorResponse(code: string, message: string, status: number): NextRespo
   return NextResponse.json({ ok: false, error: { code, message } }, { status });
 }
 
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
+  const auth = requireHermesAuth(request);
+  if (!auth.ok) {
+    return errorResponse(auth.code, auth.message, auth.status);
+  }
+
   const runner = new ChildProcessPm2Runner();
   const result = await runner.jlist({ timeoutMs: TIMEOUT_MS, maxStdoutBytes: MAX_STDOUT_BYTES });
 

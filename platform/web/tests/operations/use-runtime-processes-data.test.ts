@@ -4,9 +4,15 @@ import { REFRESH_INTERVAL_MS, STALE_THRESHOLD_MS, useRuntimeProcessesData } from
 
 // Runtime Processes panel — Operations Centre. Mirrors use-hermes-dashboard-data.test.ts's own
 // established conventions exactly (fake timers, mocked global fetch, flushMicrotasks helper) — two
-// endpoints this time: /api/operations/processes (PM2 health, required for "ready") and
+// endpoints this time: /api/dashboard/operations-processes (PM2 health, required for "ready") and
 // /api/dashboard/hermes-summary (Hermes operational state, best-effort/supplementary, exactly like
 // the main dashboard hook already treats its own summary fetch).
+//
+// Split-deployment defect fix. The browser must go through the Vercel-side dashboard proxy
+// (/api/dashboard/operations-processes), never the VPS-only collector (/api/operations/processes)
+// directly — calling the latter from the browser executes it against whatever host is currently
+// serving the page, which on Vercel has no PM2 process at all. See defaultHandler's own explicit
+// rejection of that path below, and the dedicated test at the bottom of this file.
 
 const PROCESSES_BODY = {
   ok: true,
@@ -42,8 +48,11 @@ function mockFetchSequence(handler: (path: string) => Response) {
 }
 
 function defaultHandler(path: string): Response {
-  if (path.includes("/api/operations/processes")) return jsonResponse(PROCESSES_BODY);
+  if (path.includes("/api/dashboard/operations-processes")) return jsonResponse(PROCESSES_BODY);
   if (path.includes("hermes-summary")) return jsonResponse(SUMMARY_BODY);
+  // The VPS-only collector must never be called directly by the browser — see the split-deployment
+  // defect fix note above. A stray call to it here is a test failure, not a silently-served fixture.
+  if (path.includes("/api/operations/processes")) throw new Error(`the browser must never call the VPS-only collector directly: ${path}`);
   throw new Error(`unexpected path: ${path}`);
 }
 
@@ -186,5 +195,16 @@ describe("useRuntimeProcessesData", () => {
     // still there, not cleared, on this best-effort request's own transient failure.
     expect(result.current.state.status).toBe("ready");
     expect(result.current.hermesSummary?.health.runtimeMode).toBe("demo");
+  });
+
+  it("fetches PM2 process health from the Vercel-side dashboard proxy, never the VPS-only collector directly", async () => {
+    const fetchMock = mockFetchSequence(defaultHandler);
+    global.fetch = fetchMock as unknown as typeof fetch;
+    renderHook(() => useRuntimeProcessesData());
+    await flushMicrotasks();
+
+    const calledPaths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(calledPaths.some((path) => path.includes("/api/dashboard/operations-processes"))).toBe(true);
+    expect(calledPaths.some((path) => path === "/api/operations/processes" || path.endsWith("/api/operations/processes"))).toBe(false);
   });
 });

@@ -66,7 +66,7 @@ const SUMMARY_BODY = {
 };
 
 function defaultHandler(path: string): Response {
-  if (path.includes("/api/operations/processes")) return jsonResponse(PROCESSES_BODY);
+  if (path.includes("/api/dashboard/operations-processes")) return jsonResponse(PROCESSES_BODY);
   if (path.includes("hermes-summary")) return jsonResponse(SUMMARY_BODY);
   throw new Error(`unexpected path: ${path}`);
 }
@@ -111,7 +111,7 @@ describe("RuntimeProcessesPanel", () => {
 
   it("shows the correct PM2 status label per process", async () => {
     global.fetch = mockFetchSequence((path) => {
-      if (path.includes("/api/operations/processes")) {
+      if (path.includes("/api/dashboard/operations-processes")) {
         return jsonResponse({
           ok: true,
           data: {
@@ -236,7 +236,7 @@ describe("RuntimeProcessesPanel", () => {
 
   it("shows a degraded-state warning when the PM2 endpoint cannot be reached, without crashing", async () => {
     global.fetch = mockFetchSequence((path) => {
-      if (path.includes("/api/operations/processes")) return jsonResponse({ ok: false, error: { code: "PM2_UNAVAILABLE", message: "PM2 did not respond in time." } }, 503);
+      if (path.includes("/api/dashboard/operations-processes")) return jsonResponse({ ok: false, error: { code: "PM2_UNAVAILABLE", message: "PM2 did not respond in time." } }, 503);
       return defaultHandler(path);
     }) as unknown as typeof fetch;
     render(<RuntimeProcessesPanel />);
@@ -289,7 +289,7 @@ describe("RuntimeProcessesPanel", () => {
     expect(screen.getByText("Trading Intelligence Web")).toBeInTheDocument();
 
     global.fetch = mockFetchSequence((path) => {
-      if (path.includes("/api/operations/processes")) return jsonResponse({ ok: false, error: { code: "PM2_UNAVAILABLE", message: "down" } }, 503);
+      if (path.includes("/api/dashboard/operations-processes")) return jsonResponse({ ok: false, error: { code: "PM2_UNAVAILABLE", message: "down" } }, 503);
       return defaultHandler(path);
     }) as unknown as typeof fetch;
     const button = screen.getByTestId("runtime-processes-refresh-button");
@@ -305,7 +305,7 @@ describe("RuntimeProcessesPanel", () => {
 
   it("represents a missing/unavailable monitored process explicitly, never crashing or showing a fabricated status", async () => {
     global.fetch = mockFetchSequence((path) => {
-      if (path.includes("/api/operations/processes")) {
+      if (path.includes("/api/dashboard/operations-processes")) {
         return jsonResponse({
           ok: true,
           data: {

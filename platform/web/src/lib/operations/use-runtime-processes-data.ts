@@ -7,13 +7,20 @@ import type { HermesSummaryData } from "@/lib/hermes-dashboard/types";
 // Runtime Processes panel — Operations Centre. Mirrors use-hermes-dashboard-data.ts's own
 // established conventions exactly (30s auto-refresh, manual refresh, stale-data detection, retain
 // last successful data on failure) — fetches exactly two endpoints per refresh:
-//   - /api/operations/processes — PM2 process health. Required for "ready": this panel's primary
-//     purpose is process monitoring, so a failure here is the section's own degraded state.
+//   - /api/dashboard/operations-processes — PM2 process health. Required for "ready": this panel's
+//     primary purpose is process monitoring, so a failure here is the section's own degraded state.
 //   - /api/dashboard/hermes-summary — Hermes operational state (mode/broker/kill-switch/scheduler/
 //     last cycle/open positions). Best-effort/supplementary, exactly like the main dashboard hook
 //     already treats its own summary fetch — a failure here never blocks the PM2 cards themselves
 //     from rendering, it only means the Hermes-specific fields on the Hermes card show
 //     "Unavailable".
+//
+// Split-deployment defect fix. This hook must NEVER fetch /api/operations/processes directly — that
+// route only produces a real result on the VPS (the only host PM2 runs on); called from the browser
+// on Vercel it correctly, but uselessly, fails with "the PM2 executable could not be started on
+// this server". /api/dashboard/operations-processes is the same-origin route that bridges to it
+// server-side, across hosts, with a bearer token attached — see dashboard-proxy.ts's own
+// proxyOperationsProcessesGet.
 
 export const REFRESH_INTERVAL_MS = 30_000;
 // 3 missed refreshes before a stale warning, not 1 — avoids flapping on a single slow/late poll
@@ -69,7 +76,7 @@ export function useRuntimeProcessesData(): RuntimeProcessesDataResult {
     isFetchingRef.current = true;
     try {
       const [processesResult, summaryResult] = await Promise.all([
-        fetchJson<RuntimeProcessesData>("/api/operations/processes"),
+        fetchJson<RuntimeProcessesData>("/api/dashboard/operations-processes"),
         fetchJson<HermesSummaryData>("/api/dashboard/hermes-summary"),
       ]);
 

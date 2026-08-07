@@ -1,9 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { resetHermesIntegrationConfigCacheForTests, MIN_HERMES_INTEGRATION_TOKEN_LENGTH } from "@/lib/hermes-integration/config";
 
 // Runtime Processes panel — Operations Centre. GET /api/operations/processes — mocked at the
 // Pm2Runner boundary (never a real `pm2` call), matching this repo's own established route-test
 // convention (see tests/hermes-integration/routes/portfolio.test.ts).
+//
+// Split-deployment defect fix. This route now has a legitimate server-to-server caller (the
+// Vercel-side dashboard proxy — see dashboard-proxy.ts's own proxyOperationsProcessesGet) and is
+// gated by the exact same requireHermesAuth bearer-token check every /api/hermes/* route already
+// uses — reusing HERMES_INTEGRATION_TOKEN/HERMES_INTEGRATION_BASE_URL, not a new auth mechanism.
+// Every test below therefore runs with a valid token configured and presented by default (via
+// makeRequest's own default header) so the existing PM2-mapping test coverage below is unaffected;
+// the dedicated "auth" describe block covers the missing/incorrect/correct-credential cases.
+
+const VALID_TOKEN = "a".repeat(MIN_HERMES_INTEGRATION_TOKEN_LENGTH);
+const VALID_BASE_URL = "https://hermes.example-vps.com";
+const originalToken = process.env.HERMES_INTEGRATION_TOKEN;
+const originalBaseUrl = process.env.HERMES_INTEGRATION_BASE_URL;
 
 const { jlistMock } = vi.hoisted(() => ({ jlistMock: vi.fn() }));
 
@@ -19,8 +33,8 @@ vi.mock("@/lib/logger/logger", () => ({ logger: { warn: loggerWarnMock, debug: v
 
 const { GET } = await import("@/app/api/operations/processes/route");
 
-function makeRequest(search = ""): NextRequest {
-  return new NextRequest(`http://127.0.0.1:3000/api/operations/processes${search}`);
+function makeRequest(search = "", headers: Record<string, string> = { authorization: `Bearer ${VALID_TOKEN}` }): NextRequest {
+  return new NextRequest(`http://127.0.0.1:3000/api/operations/processes${search}`, { headers });
 }
 
 function rawProcess(name: string, overrides: Record<string, unknown> = {}) {
@@ -35,10 +49,18 @@ function rawProcess(name: string, overrides: Record<string, unknown> = {}) {
 describe("GET /api/operations/processes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.HERMES_INTEGRATION_TOKEN = VALID_TOKEN;
+    process.env.HERMES_INTEGRATION_BASE_URL = VALID_BASE_URL;
+    resetHermesIntegrationConfigCacheForTests();
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    if (originalToken === undefined) delete process.env.HERMES_INTEGRATION_TOKEN;
+    else process.env.HERMES_INTEGRATION_TOKEN = originalToken;
+    if (originalBaseUrl === undefined) delete process.env.HERMES_INTEGRATION_BASE_URL;
+    else process.env.HERMES_INTEGRATION_BASE_URL = originalBaseUrl;
+    resetHermesIntegrationConfigCacheForTests();
   });
 
   it("returns both allow-listed processes on a healthy PM2 response", async () => {
@@ -164,5 +186,52 @@ describe("GET /api/operations/processes", () => {
     const body = await response.json();
     const keys = Object.keys(body.data.processes[0]).sort();
     expect(keys).toEqual(["available", "cpuPercent", "key", "memoryBytes", "name", "pm2Id", "pm2Name", "restartCount", "status", "uptimeMs"].sort());
+  });
+
+  describe("bearer-token auth (server-to-server only, never a browser-facing credential)", () => {
+    it("rejects a request with no Authorization header at all, and never invokes the PM2 runner", async () => {
+      const response = await GET(makeRequest("", {}));
+      expect(response.status).toBe(401);
+      const body = await response.json();
+      expect(body.ok).toBe(false);
+      expect(jlistMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a request with an incorrect bearer token, and never invokes the PM2 runner", async () => {
+      const response = await GET(makeRequest("", { authorization: "Bearer wrong-token-wrong-token-wrong-token" }));
+      expect(response.status).toBe(401);
+      const body = await response.json();
+      expect(body.ok).toBe(false);
+      expect(jlistMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a malformed Authorization header (not the 'Bearer <token>' form), and never invokes the PM2 runner", async () => {
+      const response = await GET(makeRequest("", { authorization: VALID_TOKEN }));
+      expect(response.status).toBe(401);
+      expect(jlistMock).not.toHaveBeenCalled();
+    });
+
+    it("accepts a request with the correct bearer token and proceeds to invoke the PM2 runner", async () => {
+      jlistMock.mockResolvedValue({
+        ok: true,
+        stdout: JSON.stringify([rawProcess("trading-intelligence-web"), rawProcess("hermes-market-runtime")]),
+      });
+
+      const response = await GET(makeRequest("", { authorization: `Bearer ${VALID_TOKEN}` }));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(jlistMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("never includes the configured token in any response body", async () => {
+      jlistMock.mockResolvedValue({ ok: true, stdout: JSON.stringify([rawProcess("trading-intelligence-web")]) });
+
+      const okResponse = await GET(makeRequest());
+      expect(JSON.stringify(await okResponse.json())).not.toContain(VALID_TOKEN);
+
+      const rejectedResponse = await GET(makeRequest("", {}));
+      expect(JSON.stringify(await rejectedResponse.json())).not.toContain(VALID_TOKEN);
+    });
   });
 });

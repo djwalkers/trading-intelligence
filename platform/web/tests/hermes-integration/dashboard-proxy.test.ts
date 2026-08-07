@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { proxyHermesGet } from "@/lib/hermes-integration/dashboard-proxy";
+import { proxyHermesGet, proxyOperationsProcessesGet } from "@/lib/hermes-integration/dashboard-proxy";
 import { resetHermesIntegrationConfigCacheForTests, MIN_HERMES_INTEGRATION_TOKEN_LENGTH } from "@/lib/hermes-integration/config";
 
 // Main Dashboard Hermes/eToro fix + split-deployment fix. proxyHermesGet is the ONE place the
@@ -181,5 +181,101 @@ describe("proxyHermesGet", () => {
     expect(response.status).toBe(502);
     const body = await response.json();
     expect(body.ok).toBe(false);
+  });
+});
+
+// Split-deployment defect fix. The Runtime Processes panel's browser-facing route must reach the
+// VPS-side PM2 collector (GET /api/operations/processes) through this exact same bridge — never a
+// direct browser call, which would execute (and fail) against Vercel's own copy of that route,
+// where no PM2 process exists. proxyOperationsProcessesGet shares 100% of proxyHermesGet's own
+// networking/config/error-handling logic (same internal proxyGet helper) — these tests only cover
+// what differs: the upstream path, and that a 401/403 from the VPS collector (e.g. a misconfigured
+// or missing HERMES_INTEGRATION_TOKEN on one side) is both forwarded faithfully to the browser AND
+// logged server-side for diagnosis, without ever leaking the token itself into either.
+describe("proxyOperationsProcessesGet", () => {
+  beforeEach(() => {
+    setEnv(VALID_TOKEN, VERCEL_STYLE_REMOTE_BASE_URL);
+  });
+
+  afterEach(() => {
+    setEnv(originalToken, originalBaseUrl);
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("calls the VPS operations-processes endpoint, never /api/hermes/*", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, data: { processes: [] } }), { status: 200 }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await proxyOperationsProcessesGet();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe("https://hermes.example-vps.com/api/operations/processes");
+  });
+
+  it("attaches the bearer token server-side, never exposing it in the response", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, data: { processes: [] } }), { status: 200 }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await proxyOperationsProcessesGet();
+    const body = await response.json();
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect((init?.headers as Record<string, string>).Authorization).toBe(`Bearer ${VALID_TOKEN}`);
+    const serialisedBody = JSON.stringify(body);
+    expect(serialisedBody).not.toContain(VALID_TOKEN);
+    expect(serialisedBody).not.toContain(VERCEL_STYLE_REMOTE_BASE_URL);
+  });
+
+  it("forwards the upstream success envelope unchanged", async () => {
+    global.fetch = vi.fn(
+      async () => new Response(JSON.stringify({ ok: true, data: { processes: [{ key: "web" }] } }), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const response = await proxyOperationsProcessesGet();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, data: { processes: [{ key: "web" }] } });
+  });
+
+  it("returns a clean degraded response (never a raw error) when the VPS is unreachable, and retains no secret in it", async () => {
+    global.fetch = vi.fn(async () => {
+      throw new Error("connect ECONNREFUSED 10.0.0.5:3000");
+    }) as unknown as typeof fetch;
+
+    const response = await proxyOperationsProcessesGet();
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    const serialised = JSON.stringify(body);
+    expect(serialised).not.toContain(VALID_TOKEN);
+    expect(serialised).not.toContain(VERCEL_STYLE_REMOTE_BASE_URL);
+  });
+
+  it("forwards a genuine upstream 401 (e.g. a misconfigured token) as-is, without leaking the token", async () => {
+    global.fetch = vi.fn(
+      async () => new Response(JSON.stringify({ ok: false, error: { code: "UNAUTHORIZED", message: "Missing or invalid credentials." } }), { status: 401 }),
+    ) as unknown as typeof fetch;
+
+    const response = await proxyOperationsProcessesGet();
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("UNAUTHORIZED");
+    expect(JSON.stringify(body)).not.toContain(VALID_TOKEN);
+  });
+
+  it("returns 401 itself, without ever calling fetch, when HERMES_INTEGRATION_TOKEN is missing", async () => {
+    setEnv(undefined, undefined);
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await proxyOperationsProcessesGet();
+    expect(response.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
