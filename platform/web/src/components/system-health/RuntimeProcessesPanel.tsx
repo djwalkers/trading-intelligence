@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { useRuntimeProcessesData } from "@/lib/operations/use-runtime-processes-data";
@@ -47,6 +48,32 @@ function ProcessMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Open positions is otherwise-identical to ProcessMetric, but actionable: a non-zero count links
+ * to the existing Hermes portfolio view (the root dashboard's own HermesPortfolioSection, the real
+ * broker-ground-truth positions list this exact count is sourced from — never the legacy paper
+ * simulator's /portfolio). A zero count stays plain, non-interactive text — there is nothing to
+ * navigate to. `next/link`'s `<a>` is used, not a styled `<button>`, so keyboard/screen-reader
+ * behaviour (Tab focus, Enter activation, link semantics) comes for free. */
+function OpenPositionsMetric({ count }: { count: number | null }) {
+  const displayValue = count !== null ? String(count) : "—";
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[11px] uppercase tracking-wide text-ink-500">Open positions</span>
+      {count !== null && count > 0 ? (
+        <Link
+          href="/"
+          aria-label={`View ${count} open position${count === 1 ? "" : "s"}`}
+          className="text-sm text-ink-100 underline decoration-dotted underline-offset-2 hover:text-accent-teal"
+        >
+          {displayValue}
+        </Link>
+      ) : (
+        <span className="text-sm text-ink-100">{displayValue}</span>
+      )}
+    </div>
+  );
+}
+
 /** Demo is the calm, expected state (the only state this deployment runs in today). Anything else
  * — including a future "live" value the current RuntimeMode type doesn't even define yet — gets a
  * visually prominent, unmistakably different treatment, so a genuinely live runtime mode can never
@@ -64,9 +91,14 @@ function RuntimeModeIndicator({ mode }: { mode: string }) {
   );
 }
 
-/** Disabled is the calm, unremarkable state. Enabled is an active safety mechanism worth noticing
- * at a glance — never the same quiet grey as "off". */
-function KillSwitchIndicator({ enabled }: { enabled: boolean | null }) {
+/** In Demo mode, Disabled is the genuinely safe, healthy state (reuses the same accent-teal token
+ * every other "healthy" badge in this design system already uses) and Enabled is an active safety
+ * mechanism worth noticing at a glance (accent-amber, matching this file's own PM2 "launching"
+ * treatment). In Live mode, real money is at stake regardless of the switch's own position, so the
+ * calm green treatment never applies there — both states keep the same prominent, cautionary
+ * accent-amber treatment Enabled already used, consistent with RuntimeModeIndicator's own
+ * non-demo-is-never-calm convention just above. */
+function KillSwitchIndicator({ enabled, isLiveMode }: { enabled: boolean | null; isLiveMode: boolean }) {
   if (enabled === null) {
     return (
       <Badge data-testid="kill-switch-indicator" className="border-base-600 bg-base-800 text-ink-400">
@@ -74,10 +106,11 @@ function KillSwitchIndicator({ enabled }: { enabled: boolean | null }) {
       </Badge>
     );
   }
+  const isCalmAndSafe = !isLiveMode && !enabled;
   return (
     <Badge
       data-testid="kill-switch-indicator"
-      className={enabled ? "border-accent-amber/40 bg-accent-amber/15 font-semibold text-accent-amber" : "border-base-600 bg-base-800 text-ink-300"}
+      className={isCalmAndSafe ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal" : "border-accent-amber/40 bg-accent-amber/15 font-semibold text-accent-amber"}
     >
       {enabled ? "Enabled" : "Disabled"}
     </Badge>
@@ -113,10 +146,10 @@ function HermesOperationalDetails({ summary }: { summary: HermesSummaryData | nu
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-[11px] uppercase tracking-wide text-ink-500">Kill switch</span>
-          <KillSwitchIndicator enabled={health.killSwitchEnabled} />
+          <KillSwitchIndicator enabled={health.killSwitchEnabled} isLiveMode={health.runtimeMode !== "demo"} />
         </div>
         <ProcessMetric label="Scheduler" value={schedulerValue} />
-        <ProcessMetric label="Open positions" value={openPositionCount !== null ? String(openPositionCount) : "—"} />
+        <OpenPositionsMetric count={openPositionCount} />
         <ProcessMetric label="Last cycle" value={runtime?.lastRunAt ? formatRelativeTime(runtime.lastRunAt) : "—"} />
         <ProcessMetric label="Last decision" value={latestDecision ? `${latestDecision.symbol} ${latestDecision.outcome}` : "—"} />
       </div>

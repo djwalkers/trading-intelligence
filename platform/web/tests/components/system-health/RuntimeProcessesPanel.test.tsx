@@ -155,16 +155,18 @@ describe("RuntimeProcessesPanel", () => {
     expect(within(hermesCard).getByText("1")).toBeInTheDocument(); // open position count
   });
 
-  it("shows kill switch DISABLED with a calm treatment when off", async () => {
+  it("shows kill switch DISABLED with a healthy/green treatment in Demo mode", async () => {
     global.fetch = mockFetchSequence(defaultHandler) as unknown as typeof fetch;
     render(<RuntimeProcessesPanel />);
     await flushMicrotasks();
 
     const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
-    expect(within(hermesCard).getByTestId("kill-switch-indicator")).toHaveTextContent(/disabled/i);
+    const indicator = within(hermesCard).getByTestId("kill-switch-indicator");
+    expect(indicator).toHaveTextContent(/disabled/i);
+    expect(indicator.className).toContain("accent-teal");
   });
 
-  it("shows kill switch ENABLED prominently when on", async () => {
+  it("shows kill switch ENABLED with an amber/red attention treatment in Demo mode", async () => {
     global.fetch = mockFetchSequence((path) => {
       if (path.includes("hermes-summary")) {
         return jsonResponse({ ok: true, data: { ...SUMMARY_BODY.data, health: { ...SUMMARY_BODY.data.health, killSwitchEnabled: true } } });
@@ -177,6 +179,23 @@ describe("RuntimeProcessesPanel", () => {
     const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
     const indicator = within(hermesCard).getByTestId("kill-switch-indicator");
     expect(indicator).toHaveTextContent(/enabled/i);
+    expect(indicator.className).toContain("accent-amber");
+  });
+
+  it("keeps the kill switch treatment prominent/cautionary in Live mode even when disabled — never the calm Demo-mode green", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-summary")) {
+        return jsonResponse({ ok: true, data: { ...SUMMARY_BODY.data, health: { ...SUMMARY_BODY.data.health, runtimeMode: "live", killSwitchEnabled: false } } });
+      }
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<RuntimeProcessesPanel />);
+    await flushMicrotasks();
+
+    const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
+    const indicator = within(hermesCard).getByTestId("kill-switch-indicator");
+    expect(indicator).toHaveTextContent(/disabled/i);
+    expect(indicator.className).not.toContain("accent-teal");
   });
 
   it("shows Demo mode with a calm treatment (not the prominent live-mode treatment)", async () => {
@@ -222,6 +241,45 @@ describe("RuntimeProcessesPanel", () => {
 
     const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
     expect(within(hermesCard).getByText(/Could not read broker portfolio/)).toBeInTheDocument();
+  });
+
+  it("renders open positions as an accessible link to the existing Hermes portfolio view when count > 0", async () => {
+    global.fetch = mockFetchSequence(defaultHandler) as unknown as typeof fetch; // SUMMARY_BODY: openPositionCount 1
+    render(<RuntimeProcessesPanel />);
+    await flushMicrotasks();
+
+    const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
+    const link = within(hermesCard).getByRole("link", { name: "View 1 open position" });
+    expect(link).toHaveAttribute("href", "/");
+    expect(link).toHaveTextContent("1");
+  });
+
+  it("renders open positions as plain non-interactive text (no link) when count is 0", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-summary")) return jsonResponse({ ok: true, data: { ...SUMMARY_BODY.data, openPositionCount: 0 } });
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<RuntimeProcessesPanel />);
+    await flushMicrotasks();
+
+    const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
+    // Scoped to the "Open positions" metric's own container, not the whole card — the PM2 side of
+    // this same card also has its own unrelated "0" (restart count) in this fixture.
+    const openPositionsContainer = within(hermesCard).getByText("Open positions").parentElement!;
+    expect(within(openPositionsContainer).queryByRole("link")).not.toBeInTheDocument();
+    expect(openPositionsContainer).toHaveTextContent("0");
+  });
+
+  it("uses a pluralised accessible label describing the number of open positions for the link", async () => {
+    global.fetch = mockFetchSequence((path) => {
+      if (path.includes("hermes-summary")) return jsonResponse({ ok: true, data: { ...SUMMARY_BODY.data, openPositionCount: 2 } });
+      return defaultHandler(path);
+    }) as unknown as typeof fetch;
+    render(<RuntimeProcessesPanel />);
+    await flushMicrotasks();
+
+    const hermesCard = screen.getByTestId("runtime-process-card-hermes-runtime");
+    expect(within(hermesCard).getByRole("link", { name: "View 2 open positions" })).toBeInTheDocument();
   });
 
   it("shows the summary strip counts (monitored / online / stopped / errored)", async () => {
